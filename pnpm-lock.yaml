@@ -136,6 +136,18 @@ importers:
         specifier: workspace:*
         version: link:../types
 
+  packages/service:
+    dependencies:
+      '@corridor/engine':
+        specifier: workspace:*
+        version: link:../engine
+      '@corridor/manifest':
+        specifier: workspace:*
+        version: link:../manifest
+      '@corridor/types':
+        specifier: workspace:*
+        version: link:../types
+
   packages/stellar:
     dependencies:
       '@corridor/engine':
