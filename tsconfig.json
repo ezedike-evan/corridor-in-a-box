@@ -20,7 +20,8 @@
       "@corridor/adapter-kit": ["packages/adapter-kit/src/index.ts"],
       "@corridor/sep31": ["packages/sep31/src/index.ts"],
       "@corridor/router": ["packages/router/src/index.ts"],
-      "@corridor/engine": ["packages/engine/src/index.ts"]
+      "@corridor/engine": ["packages/engine/src/index.ts"],
+      "@corridor/stellar": ["packages/stellar/src/index.ts"]
     }
   },
   "include": ["packages/*/src/**/*.ts", "examples/**/*.ts", "tests/**/*.ts"]

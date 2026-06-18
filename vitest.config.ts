@@ -12,6 +12,7 @@ export default defineConfig({
       "@corridor/sep31": r("./packages/sep31/src/index.ts"),
       "@corridor/router": r("./packages/router/src/index.ts"),
       "@corridor/engine": r("./packages/engine/src/index.ts"),
+      "@corridor/stellar": r("./packages/stellar/src/index.ts"),
     },
   },
   test: { include: ["tests/**/*.test.ts"] },

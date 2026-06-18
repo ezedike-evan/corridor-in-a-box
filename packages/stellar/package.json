@@ -1,0 +1,16 @@
+{
+  "name": "@corridor/stellar",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "main": "./src/index.ts",
+  "dependencies": {
+    "@corridor/types": "workspace:*",
+    "@corridor/manifest": "workspace:*",
+    "@corridor/engine": "workspace:*",
+    "@corridor/sep31": "workspace:*",
+    "@stellar/stellar-sdk": "^13.0.0"
+  }
+}
