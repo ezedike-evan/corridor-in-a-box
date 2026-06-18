@@ -8,6 +8,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
     "cli": "tsx packages/cli/src/index.ts",
     "example": "tsx examples/run-payment.ts"
   },
@@ -20,9 +22,14 @@
     "@corridor/engine": "workspace:*"
   },
   "devDependencies": {
+    "@eslint/js": "^9.17.0",
     "@types/node": "^22.10.0",
+    "eslint": "^9.17.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.4.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
+    "typescript-eslint": "^8.18.0",
     "vitest": "^2.1.0"
   },
   "packageManager": "pnpm@9.12.0"

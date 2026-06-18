@@ -18,7 +18,10 @@ function corridor(): Corridor {
     dest: {
       name: "D",
       asset: "iso4217:ARS",
-      endpoints: { home_domain: "d.example", transfer_server_sep31: "https://d.example/sep31" },
+      endpoints: {
+        home_domain: "d.example",
+        transfer_server_sep31: "https://d.example/sep31",
+      },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },

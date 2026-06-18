@@ -10,12 +10,7 @@
 // see authToken(). The on-chain settle leg is NOT here; that's the engine's job.
 
 import type { AnchorConfig, Corridor } from "@corridor/manifest";
-import {
-  fail,
-  ok,
-  type Outcome,
-  type PaymentIntent,
-} from "@corridor/types";
+import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
 import type {
   AnchorAdapter,
   KycResult,

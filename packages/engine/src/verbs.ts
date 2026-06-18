@@ -4,12 +4,7 @@
 // right size while there's a single corridor exercising them.
 
 import type { Corridor } from "@corridor/manifest";
-import {
-  fail,
-  ok,
-  type Outcome,
-  type PaymentIntent,
-} from "@corridor/types";
+import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
 import type {
   AnchorAdapter,
   KycResult,
@@ -30,7 +25,9 @@ export async function quote(
   const q = await adapter.requestQuote(intent, corridor);
   if (!q.ok) return q;
   if (q.value.firm && q.value.expiresAt <= now) {
-    return fail("QUOTE_EXPIRED", `quote ${q.value.id} expired before use`, { retryable: true });
+    return fail("QUOTE_EXPIRED", `quote ${q.value.id} expired before use`, {
+      retryable: true,
+    });
   }
   return q;
 }
@@ -87,9 +84,13 @@ export async function reconcile(
   const s = await adapter.getTransaction(transactionId);
   if (!s.ok) return s;
   if (!s.value.settled) {
-    return fail("RECONCILE_MISMATCH", `tx ${transactionId} not settled (status=${s.value.status})`, {
-      retryable: true,
-    });
+    return fail(
+      "RECONCILE_MISMATCH",
+      `tx ${transactionId} not settled (status=${s.value.status})`,
+      {
+        retryable: true,
+      },
+    );
   }
   return s;
 }

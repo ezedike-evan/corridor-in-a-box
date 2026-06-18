@@ -101,7 +101,5 @@ export function loadCorridor(path: string): Outcome<Corridor> {
 }
 
 function formatZodError(e: z.ZodError): string {
-  return e.issues
-    .map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`)
-    .join("; ");
+  return e.issues.map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`).join("; ");
 }

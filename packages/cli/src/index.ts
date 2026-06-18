@@ -42,11 +42,15 @@ function printPlan(c: Corridor): void {
   const line = (s = "") => console.log(s);
   line(`corridor: ${c.id}`);
   if (c.status_note) line(`note:     ${c.status_note}`);
-  line(`route:    ${c.fx.path.join(" -> ")}   (risk: ${c.fx.who_holds_risk}, ttl ${c.fx.quote_ttl_seconds}s)`);
+  line(
+    `route:    ${c.fx.path.join(" -> ")}   (risk: ${c.fx.who_holds_risk}, ttl ${c.fx.quote_ttl_seconds}s)`,
+  );
   line(`source:   ${c.source.name}  [${c.source.asset}]  ${c.source.endpoints.home_domain}`);
   line(`dest:     ${c.dest.name}  [${c.dest.asset}]  ${c.dest.endpoints.home_domain}`);
   line(`bridge:   ${c.settlement.bridge_asset} on ${c.settlement.network}`);
-  line(`recovery: retries=${c.recovery.max_retries}, timeout=${c.recovery.timeout_seconds}s, rollback=${c.recovery.rollback}`);
+  line(
+    `recovery: retries=${c.recovery.max_retries}, timeout=${c.recovery.timeout_seconds}s, rollback=${c.recovery.rollback}`,
+  );
   line();
   line("steps:");
   line("  1. quote      SEP-38  POST /quote");
@@ -58,13 +62,19 @@ function printPlan(c: Corridor): void {
 
   const warnings: string[] = [];
   if (!c.dest.endpoints.transfer_server_sep31) {
-    warnings.push("dest has no SEP-31 transfer server — corridor cannot settle. NOT runnable.");
+    warnings.push(
+      "dest has no SEP-31 transfer server — corridor cannot settle. NOT runnable.",
+    );
   }
   if (c.fx.quote_source === "sep38" && !c.dest.endpoints.quote_server) {
-    warnings.push("fx.quote_source=sep38 but dest exposes no SEP-38 quote server — quotes will fail.");
+    warnings.push(
+      "fx.quote_source=sep38 but dest exposes no SEP-38 quote server — quotes will fail.",
+    );
   }
   if (!c.dest.endpoints.kyc_server) {
-    warnings.push("dest has no SEP-12 KYC server — assuming 1:1 delivery with no per-customer KYC.");
+    warnings.push(
+      "dest has no SEP-12 KYC server — assuming 1:1 delivery with no per-customer KYC.",
+    );
   }
 
   if (warnings.length === 0) {

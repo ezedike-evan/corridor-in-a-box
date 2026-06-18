@@ -66,11 +66,11 @@ Three boundaries do the work:
 Picking the destination is the binding constraint, not the code. SEP-31 needs a
 _live receiving anchor_ on the destination side, so corridors ship in this order:
 
-| Stage | Corridor | Why |
-|------|----------|-----|
-| **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet) | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.** |
-| **#1** | Mexico (Bitso) / Argentina, Peru (Anclap) | Real money. These anchors run SEP-31 receive-side today. |
-| later | `ng-cn.corridor.yaml` (Nigeria → China) | The headline case study, **not** corridor #1. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else. |
+| Stage  | Corridor                                                       | Why                                                                                                                                                                        |
+| ------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet) | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.**                                         |
+| **#1** | Mexico (Bitso) / Argentina, Peru (Anclap)                      | Real money. These anchors run SEP-31 receive-side today.                                                                                                                   |
+| later  | `ng-cn.corridor.yaml` (Nigeria → China)                        | The headline case study, **not** corridor #1. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else. |
 
 The CLI makes the constraint visible. `ng-cn` validates structurally, but:
 

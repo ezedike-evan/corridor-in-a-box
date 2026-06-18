@@ -13,13 +13,13 @@ source:
   name: Nigeria On-Ramp (e.g. cNGN/Cowrie-class)
   asset: USDC
   endpoints:
-    home_domain: example-ng-anchor.invalid     # placeholder; verify a real one before use
+    home_domain: example-ng-anchor.invalid # placeholder; verify a real one before use
 
 dest:
   name: China RMB Off-Ramp (does not exist yet)
   asset: "iso4217:CNY"
   endpoints:
-    home_domain: example-cn-anchor.invalid      # no transfer_server_sep31 on purpose
+    home_domain: example-cn-anchor.invalid # no transfer_server_sep31 on purpose
     # transfer_server_sep31: <-- the missing piece. This is what blocks the lane.
 
 fx:
@@ -36,7 +36,7 @@ compliance:
 settlement:
   bridge_asset: USDC
   network: public
-  asset_issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN  # USDC mainnet issuer
+  asset_issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN # USDC mainnet issuer
 
 recovery:
   max_retries: 2

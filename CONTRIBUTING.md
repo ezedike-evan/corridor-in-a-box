@@ -2,7 +2,7 @@
 
 Thanks for your interest. This is the **open half** of an open-core system: a
 manifest-driven engine for Stellar SEP-31 cross-border corridors. Contributions
-that keep corridors as *configuration, not code* are exactly what we want.
+that keep corridors as _configuration, not code_ are exactly what we want.
 
 ## Ground rules
 
@@ -48,7 +48,7 @@ pnpm lint && pnpm typecheck && pnpm test
 
 We use [Conventional Commits](https://www.conventionalcommits.org/) prefixes
 (`feat:`, `fix:`, `docs:`, `chore:`, `build:`, `test:`). Keep the subject line
-under ~72 characters and explain the *why* in the body.
+under ~72 characters and explain the _why_ in the body.
 
 ## Good first issues
 

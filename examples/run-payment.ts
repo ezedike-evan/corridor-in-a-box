@@ -12,11 +12,7 @@ import { fileURLToPath } from "node:url";
 import { loadCorridor } from "@corridor/manifest";
 import { createMockAdapter } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
-import {
-  InMemoryIdempotencyStore,
-  createMockSubmitter,
-  execute,
-} from "@corridor/engine";
+import { InMemoryIdempotencyStore, createMockSubmitter, execute } from "@corridor/engine";
 import type { PaymentIntent } from "@corridor/types";
 
 const manifestPath = fileURLToPath(

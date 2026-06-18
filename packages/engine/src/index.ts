@@ -1,12 +1,7 @@
 // @corridor/engine — corridor-agnostic orchestration of the five verbs.
 
 export { execute, type EngineDeps, type RunResult } from "./run";
-export {
-  canTransition,
-  isTerminal,
-  TERMINAL,
-  type CorridorState,
-} from "./state";
+export { canTransition, isTerminal, TERMINAL, type CorridorState } from "./state";
 export {
   InMemoryIdempotencyStore,
   type IdempotencyStore,
@@ -19,12 +14,4 @@ export {
   type SettlementRef,
   type SettlementRequest,
 } from "./ports";
-export {
-  quote,
-  comply,
-  open,
-  settle,
-  reconcile,
-  recover,
-  type RecoveryAction,
-} from "./verbs";
+export { quote, comply, open, settle, reconcile, recover, type RecoveryAction } from "./verbs";

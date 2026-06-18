@@ -119,8 +119,7 @@ export async function execute(
 
   // --- 3b/4. settle + reconcile, with recover() retry loop --------------
   let attempt = 0;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+  for (;;) {
     {
       const t = await advance(run.state === "recovering" ? "settling" : "settling");
       if (!t.ok) return die(t.error);
