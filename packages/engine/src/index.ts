@@ -38,9 +38,13 @@ export {
   consoleLogger,
   silentLogger,
   InMemoryAuditLog,
+  noopMetrics,
+  InMemoryMetrics,
   type Logger,
   type LogLevel,
   type LogFields,
   type AuditSink,
   type AuditEntry,
+  type Metrics,
+  type MetricTags,
 } from "./observability";

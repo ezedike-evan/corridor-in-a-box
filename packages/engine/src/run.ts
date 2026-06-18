@@ -15,7 +15,7 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type { RouteResolver } from "@corridor/router";
-import { canTransition, type CorridorState } from "./state";
+import { canTransition, isTerminal, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
   type IdempotencyStore,
@@ -23,7 +23,13 @@ import {
 } from "./idempotency";
 import type { RefundRequest, SettlementSubmitter } from "./ports";
 import { backoffMs, comply, open, quote, recover, reconcileUntil, settle } from "./verbs";
-import { silentLogger, type AuditSink, type Logger } from "./observability";
+import {
+  noopMetrics,
+  silentLogger,
+  type AuditSink,
+  type Logger,
+  type Metrics,
+} from "./observability";
 
 export interface EngineDeps {
   resolver: RouteResolver;
@@ -38,6 +44,8 @@ export interface EngineDeps {
   logger?: Logger;
   /** Append-only audit sink; receives one entry per state transition. */
   audit?: AuditSink;
+  /** Counter/timing sink. Defaults to a no-op. */
+  metrics?: Metrics;
 }
 
 export interface RunResult {
@@ -58,6 +66,16 @@ export async function execute(
   const now = deps.now ?? (() => Date.now());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const pollMs = deps.reconcilePollMs ?? 2_000;
+  const metrics = deps.metrics ?? noopMetrics;
+  const startedAt = now();
+
+  // Time a verb call and emit a `corridor.verb.<name>` histogram sample.
+  const timed = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+    const begin = now();
+    const r = await fn();
+    metrics.timing(`corridor.verb.${name}`, now() - begin, { corridor: corridor.id });
+    return r;
+  };
 
   // --- input guard: never let a malformed amount reach the chain --------
   if (!isValidAmount(intent.sourceAmount.amount)) {
@@ -125,7 +143,7 @@ export async function execute(
   const adapter = route.receiving;
 
   // --- 1. quote ---------------------------------------------------------
-  const q = await quote(adapter, intent, corridor, now());
+  const q = await timed("quote", () => quote(adapter, intent, corridor, now()));
   if (!q.ok) return die(q.error);
   run.quoteId = q.value.id;
   {
@@ -134,7 +152,7 @@ export async function execute(
   }
 
   // --- 2. comply --------------------------------------------------------
-  const c = await comply(adapter, intent, corridor);
+  const c = await timed("comply", () => comply(adapter, intent, corridor));
   if (!c.ok) return die(c.error);
   {
     const t = await advance("compliant");
@@ -142,7 +160,7 @@ export async function execute(
   }
 
   // --- 3a. open ---------------------------------------------------------
-  const opened = await open(adapter, intent, q.value, corridor);
+  const opened = await timed("open", () => open(adapter, intent, q.value, corridor));
   if (!opened.ok) return die(opened.error);
   run.transactionId = opened.value.transactionId;
   {
@@ -220,7 +238,9 @@ export async function execute(
       if (!t.ok) return die(t.error);
     }
 
-    const s = await settle(deps.submitter, opened.value, q.value, corridor);
+    const s = await timed("settle", () =>
+      settle(deps.submitter, opened.value, q.value, corridor),
+    );
     if (!s.ok) {
       const action = recover(corridor, s.error.retryable, attempt);
       if (action.kind === "retry") {
@@ -240,12 +260,9 @@ export async function execute(
 
     // Poll until the anchor confirms payout or we hit the corridor timeout.
     // reconcileUntil returns a non-retryable error, so we never re-settle here.
-    const r = await reconcileUntil(adapter, opened.value.transactionId, {
-      now,
-      sleep,
-      deadlineMs,
-      pollMs,
-    });
+    const r = await timed("reconcile", () =>
+      reconcileUntil(adapter, opened.value.transactionId, { now, sleep, deadlineMs, pollMs }),
+    );
     if (!r.ok) return finishFailure(r.error);
     {
       const t = await advance("reconciled");
@@ -259,6 +276,7 @@ export async function execute(
     const t = await advance("completed");
     if (!t.ok) return die(t.error);
   }
+  metrics.timing("corridor.duration", now() - startedAt, { corridor: corridor.id });
   return ok(toResult(run, trail));
 }
 
@@ -292,6 +310,11 @@ async function emitTransition(
     error,
   };
   (deps.logger ?? silentLogger).log(error ? "error" : "info", "corridor.transition", entry);
+  const metrics = deps.metrics ?? noopMetrics;
+  metrics.increment("corridor.transition", { to: run.state, corridor: run.corridorId });
+  if (isTerminal(run.state)) {
+    metrics.increment("corridor.terminal", { state: run.state, corridor: run.corridorId });
+  }
   await deps.audit?.record(entry);
 }
 

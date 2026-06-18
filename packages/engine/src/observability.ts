@@ -51,3 +51,30 @@ export class InMemoryAuditLog implements AuditSink {
     this.entries.push(entry);
   }
 }
+
+// --- Metrics -------------------------------------------------------------
+// A minimal counter/timing sink. Maps cleanly onto StatsD/Prometheus/OTel:
+// `increment` → a counter, `timing` → a histogram. Tags become labels.
+
+export interface MetricTags {
+  readonly [key: string]: string;
+}
+
+export interface Metrics {
+  increment(name: string, tags?: MetricTags): void;
+  timing(name: string, ms: number, tags?: MetricTags): void;
+}
+
+/** Discards everything. The default. */
+export const noopMetrics: Metrics = { increment() {}, timing() {} };
+
+export class InMemoryMetrics implements Metrics {
+  readonly counters: { name: string; tags?: MetricTags }[] = [];
+  readonly timings: { name: string; ms: number; tags?: MetricTags }[] = [];
+  increment(name: string, tags?: MetricTags): void {
+    this.counters.push({ name, tags });
+  }
+  timing(name: string, ms: number, tags?: MetricTags): void {
+    this.timings.push({ name, ms, tags });
+  }
+}
