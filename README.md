@@ -20,11 +20,15 @@ boundary**: everything here is publishable as-is.
 
 ```bash
 corepack enable && pnpm install
+pnpm lint               # eslint + prettier
 pnpm typecheck          # whole monorepo, one tsc pass
-pnpm test               # vitest: engine + manifest
+pnpm test               # vitest: engine, manifest, money, sep31, stellar, …
 pnpm example            # run a payment end-to-end (mocked anchor + settle)
 pnpm cli plan corridors/reference.corridor.yaml   # offline pre-flight / liveness check
 ```
+
+See [CONTRIBUTING](./CONTRIBUTING.md), [SECURITY](./SECURITY.md), and the
+[ROADMAP](./ROADMAP.md) for how to get involved and where this is headed.
 
 `pnpm example` walks a payment through every state and proves idempotency:
 
@@ -41,8 +45,12 @@ packages/
   manifest/      Zod schema for a corridor + loader  ← the abstraction lives here
   adapter-kit/   AnchorAdapter port + conformance probes + a mock adapter
   sep31/         ONE generic adapter for any standards-compliant SEP-31 anchor
+                 (SEP-10 auth + SEP-12 KYC; crypto behind an injected signer)
+  stellar/       the ONLY chain-touching package: @stellar/stellar-sdk-backed
+                 settlement submitter + SEP-10 signer
   router/        RouteResolver seam — open interface + dumb static default
-  engine/        corridor-agnostic orchestration of the five verbs
+  engine/        corridor-agnostic orchestration of the five verbs, with a
+                 persisted state machine, crash-resume, recovery, audit trail
   cli/           validate a manifest; print an offline runnability plan
 corridors/       the manifests — ALL corridor-specifics live here, nowhere else
 examples/        runnable end-to-end demo
@@ -69,7 +77,7 @@ _live receiving anchor_ on the destination side, so corridors ship in this order
 | Stage  | Corridor                                                       | Why                                                                                                                                                                        |
 | ------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet) | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.**                                         |
-| **#1** | Mexico (Bitso) / Argentina, Peru (Anclap)                      | Real money. These anchors run SEP-31 receive-side today.                                                                                                                   |
+| **#1** | `mx-bitso.corridor.yaml` (Mexico, Bitso-class) / Anclap        | Real money. These anchors run SEP-31 receive-side today, so `corridor plan` reports the lane runnable (fill endpoints from the live stellar.toml).                         |
 | later  | `ng-cn.corridor.yaml` (Nigeria → China)                        | The headline case study, **not** corridor #1. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else. |
 
 The CLI makes the constraint visible. `ng-cn` validates structurally, but:
@@ -85,17 +93,23 @@ production.
 
 ## Going live
 
-Swap two mocks for real implementations:
+Swap the mocks for the real implementations (both ship in this repo):
 
-- `createMockAdapter()` → `new Sep31Adapter(corridor)` (already implements the
-  SEP-31/38 HTTP shapes; SEP-10 JWT auth is the one stub to fill in).
-- `createMockSubmitter()` → a `SettlementSubmitter` backed by
-  `@stellar/stellar-sdk` that builds/signs/submits the native payment to the
-  anchor's deposit address and watches Horizon. See `engine/src/ports.ts` for the
-  exact builder sketch.
+- `createMockAdapter()` → `new Sep31Adapter(corridor, { sep10: new StellarSep10Signer(keypair) })`
+  — the SEP-31/38 HTTP shapes plus the SEP-10 challenge/response and SEP-12 KYC
+  status check. The challenge-signing crypto is injected, so the adapter itself
+  stays SDK-free.
+- `createMockSubmitter()` → `new StellarSettlementSubmitter({ signerSecret, horizonUrl })`
+  from `@corridor/stellar` — builds/signs/submits the native bridge-asset payment
+  to the anchor deposit address and confirms it on Horizon.
+- `new InMemoryIdempotencyStore()` → `new PostgresIdempotencyStore(pool)` for a
+  durable, crash-resumable run log (run `migrate(pool)` once at startup).
+- Pass an `audit` sink (and a `logger`) to `execute()` so every state transition
+  is recorded.
 
-Then point a manifest at the testnet reference server and run it for real.
+Then point a manifest at the testnet reference server and run it for real. The
+proprietary `RouteResolver` is the one piece injected from the private repo.
 
 ## License
 
-Apache-2.0.
+Apache-2.0 — see [LICENSE](./LICENSE).
