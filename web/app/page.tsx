@@ -1,0 +1,89 @@
+import Link from "next/link";
+import { ArrowRight, Boxes, ShieldCheck, Repeat, Activity } from "lucide-react";
+import { Button } from "@/components/ui/Button";
+import { CorridorCard } from "@/components/CorridorCard";
+import { corridors } from "@/lib/corridors";
+
+export default function Home() {
+  return (
+    <div className="flex flex-col gap-16">
+      {/* Hero */}
+      <section className="flex flex-col items-start gap-5 pt-6">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg-subtle px-3 py-1 text-xs font-medium text-secondary-text">
+          <Boxes size={13} className="text-blue-600" /> Open SEP-31 corridor engine
+        </span>
+        <h1 className="max-w-3xl text-4xl font-bold tracking-tight sm:text-5xl">
+          A corridor is <span className="text-blue-600">configuration</span>, not code.
+        </h1>
+        <p className="max-w-2xl text-lg text-secondary-text">
+          A manifest-driven engine for Stellar SEP-31 cross-border corridors. It runs{" "}
+          <code className="rounded bg-bg-subtle px-1.5 py-0.5 text-sm">
+            quote → comply → settle → reconcile → recover
+          </code>{" "}
+          over any standards-compliant anchor pair — adding a corridor is a new YAML file, not a fork.
+        </p>
+        <div className="flex gap-3">
+          <Link href="/payments">
+            <Button size="lg">
+              Run a payment <ArrowRight size={18} />
+            </Button>
+          </Link>
+          <Link href="/docs">
+            <Button size="lg" variant="secondary">
+              Read the docs
+            </Button>
+          </Link>
+        </div>
+      </section>
+
+      {/* Features */}
+      <section className="grid gap-4 sm:grid-cols-3">
+        <Feature
+          icon={<Repeat size={20} className="text-blue-600" />}
+          title="Idempotent & resumable"
+          body="A persisted state machine with crash-resume and a real refund/hold recovery path. The same key never settles twice."
+        />
+        <Feature
+          icon={<ShieldCheck size={20} className="text-blue-600" />}
+          title="Standards-native"
+          body="One adapter for any SEP-31 anchor — SEP-38 quotes, SEP-10 auth, SEP-12 KYC — and a chain-isolated native settle leg."
+        />
+        <Feature
+          icon={<Activity size={20} className="text-blue-600" />}
+          title="Operable"
+          body="Structured logs, an append-only audit trail, metrics hooks, KMS-ready signing, and a thin HTTP API."
+        />
+      </section>
+
+      {/* Corridors */}
+      <section className="flex flex-col gap-5">
+        <div className="flex items-end justify-between">
+          <div>
+            <h2 className="text-2xl font-semibold">Corridors</h2>
+            <p className="text-secondary-text">
+              Liveness is surfaced at build time — the binding constraint is a live receiving anchor,
+              not code.
+            </p>
+          </div>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {corridors.map((c) => (
+            <CorridorCard key={c.id} corridor={c} />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Feature({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
+  return (
+    <div className="rounded-xl border border-border bg-background p-5">
+      <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-bg-subtle">
+        {icon}
+      </div>
+      <h3 className="font-semibold">{title}</h3>
+      <p className="mt-1 text-sm text-secondary-text">{body}</p>
+    </div>
+  );
+}

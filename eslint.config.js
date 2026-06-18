@@ -7,7 +7,8 @@ import prettier from "eslint-config-prettier";
 
 export default tseslint.config(
   {
-    ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**"],
+    // web/ is a standalone Next.js app with its own toolchain and lint config.
+    ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**", "web/**"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
