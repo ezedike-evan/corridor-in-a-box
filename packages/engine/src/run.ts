@@ -8,6 +8,7 @@
 import type { Corridor } from "@corridor/manifest";
 import {
   fail,
+  isValidAmount,
   ok,
   type CorridorError,
   type Outcome,
@@ -46,6 +47,14 @@ export async function execute(
 ): Promise<Outcome<RunResult>> {
   const store = deps.idempotency ?? new InMemoryIdempotencyStore();
   const now = deps.now ?? (() => Date.now());
+
+  // --- input guard: never let a malformed amount reach the chain --------
+  if (!isValidAmount(intent.sourceAmount.amount)) {
+    return fail(
+      "AMOUNT_INVALID",
+      `sourceAmount "${intent.sourceAmount.amount}" is not a valid decimal amount`,
+    );
+  }
 
   // --- idempotency gate -------------------------------------------------
   const existing = await store.get(intent.idempotencyKey);

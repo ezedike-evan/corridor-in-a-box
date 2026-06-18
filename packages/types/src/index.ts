@@ -16,6 +16,7 @@ export const isErr = <T, E>(o: Outcome<T, E>): o is Err<E> => !o.ok;
 
 export type CorridorErrorCode =
   | "MANIFEST_INVALID"
+  | "AMOUNT_INVALID"
   | "QUOTE_UNAVAILABLE"
   | "QUOTE_EXPIRED"
   | "KYC_REQUIRED"
@@ -68,3 +69,6 @@ export interface PaymentIntent {
   /** What the sender is putting in, in the corridor's source asset. */
   readonly sourceAmount: Money;
 }
+
+// --- Decimal-safe money math ---------------------------------------------
+export * from "./money";
