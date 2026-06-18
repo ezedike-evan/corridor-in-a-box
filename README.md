@@ -50,9 +50,12 @@ packages/
                  settlement submitter + SEP-10 signer
   router/        RouteResolver seam — open interface + dumb static default
   engine/        corridor-agnostic orchestration of the five verbs, with a
-                 persisted state machine, crash-resume, recovery, audit trail
+                 persisted state machine, crash-resume, recovery, audit trail,
+                 metrics hooks, and a durable Postgres idempotency store
+  service/       thin HTTP API over the engine (auth + rate limiting), zero deps
   cli/           validate a manifest; print an offline runnability plan
 corridors/       the manifests — ALL corridor-specifics live here, nowhere else
+docs/            key management, "why not Anchor Platform", …
 examples/        runnable end-to-end demo
 ```
 

@@ -25,9 +25,11 @@ system. Items marked ✅ are done.
 ## Phase 3 — Operability (required before close beta)
 
 - ✅ Structured logging + append-only audit trail of every state transition.
-- ⬜ Metrics / tracing hooks.
-- ⬜ Signing-key management guidance and a KMS-backed submitter example.
-- ⬜ A thin service/API layer (the engine is a library today).
+- ✅ Metrics / tracing hooks (injectable `Metrics`; per-verb timings + counters).
+- ✅ Signing-key management: an `ExternalSigner` port (KMS/HSM-ready) and
+  [docs/key-management.md](./docs/key-management.md).
+- ✅ A thin service/API layer (`@corridor/service`: HTTP over the engine, with
+  API-key auth and rate limiting).
 
 ## Phase 4 — Corridors
 
