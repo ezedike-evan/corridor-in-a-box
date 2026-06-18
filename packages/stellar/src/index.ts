@@ -14,7 +14,9 @@ import {
   Memo,
   Networks,
   Operation,
+  Transaction,
   TransactionBuilder,
+  xdr,
 } from "@stellar/stellar-sdk";
 import { fail, ok, type Outcome } from "@corridor/types";
 import type {
@@ -34,23 +36,71 @@ function bridgeAsset(code: string, issuer: string): Asset {
   return code.toUpperCase() === "XLM" ? Asset.native() : new Asset(code, issuer);
 }
 
-/** Signs SEP-10 challenges with a Stellar keypair. Plug into Sep31Adapter. */
-export class StellarSep10Signer implements Sep10Signer {
-  readonly account: string;
+// --- Signing -------------------------------------------------------------
+// The private key is the most sensitive thing in the system. ExternalSigner is
+// the seam that keeps it out of this process: a KMS/HSM implements `sign` and
+// the raw seed never leaves the vault. LocalKeypairSigner (an in-process seed)
+// is for dev/testnet only. See docs/key-management.md.
+
+export interface ExternalSigner {
+  /** The signing account (G…). */
+  readonly publicKey: string;
+  /** Produce a 64-byte ed25519 signature over `data` (the 32-byte tx hash). */
+  sign(data: Uint8Array): Promise<Uint8Array>;
+}
+
+/** In-process signer backed by a Stellar seed. Dev/testnet only — in production
+ *  implement ExternalSigner over a KMS/HSM so the seed never enters the app. */
+export class LocalKeypairSigner implements ExternalSigner {
+  readonly publicKey: string;
   constructor(private readonly keypair: Keypair) {
-    this.account = keypair.publicKey();
+    this.publicKey = keypair.publicKey();
+  }
+  static fromSecret(secret: string): LocalKeypairSigner {
+    return new LocalKeypairSigner(Keypair.fromSecret(secret));
+  }
+  async sign(data: Uint8Array): Promise<Uint8Array> {
+    return this.keypair.sign(Buffer.from(data));
+  }
+}
+
+function isKeypair(s: ExternalSigner | Keypair): s is Keypair {
+  // Keypair exposes publicKey() as a method; ExternalSigner as a string property.
+  return typeof (s as { publicKey: unknown }).publicKey === "function";
+}
+
+function toSigner(s: ExternalSigner | Keypair): ExternalSigner {
+  return isKeypair(s) ? new LocalKeypairSigner(s) : s;
+}
+
+/** Attach an ExternalSigner's signature to a built transaction. */
+async function attachSignature(tx: Transaction, signer: ExternalSigner): Promise<void> {
+  const signature = Buffer.from(await signer.sign(tx.hash()));
+  const hint = Keypair.fromPublicKey(signer.publicKey).signatureHint();
+  tx.signatures.push(new xdr.DecoratedSignature({ hint, signature }));
+}
+
+/** Signs SEP-10 challenges via an ExternalSigner (or a raw Keypair for dev). */
+export class StellarSep10Signer implements Sep10Signer {
+  private readonly signer: ExternalSigner;
+  readonly account: string;
+  constructor(signer: ExternalSigner | Keypair) {
+    this.signer = toSigner(signer);
+    this.account = this.signer.publicKey;
   }
 
   async signChallenge(challengeXdr: string, networkPassphrase: string): Promise<string> {
-    const tx = TransactionBuilder.fromXDR(challengeXdr, networkPassphrase);
-    tx.sign(this.keypair);
+    const tx = TransactionBuilder.fromXDR(challengeXdr, networkPassphrase) as Transaction;
+    await attachSignature(tx, this.signer);
     return tx.toXDR();
   }
 }
 
 export interface StellarSubmitterOptions {
-  /** Secret seed (S…) of the distribution account that holds the bridge asset. */
-  signerSecret: string;
+  /** Production: a KMS/HSM-backed signer that never exposes the seed. */
+  signer?: ExternalSigner;
+  /** Dev/testnet convenience: a raw seed, wrapped in a LocalKeypairSigner. */
+  signerSecret?: string;
   /** Horizon endpoint, e.g. https://horizon-testnet.stellar.org */
   horizonUrl: string;
   /** How long to keep polling Horizon for confirmation. Default 30s. */
@@ -70,14 +120,17 @@ export interface StellarSubmitterOptions {
  * (recovery is the anchor's SEP-31 refund flow or an operator action).
  */
 export class StellarSettlementSubmitter implements SettlementSubmitter {
-  private readonly keypair: Keypair;
+  private readonly signer: ExternalSigner;
   private readonly server: Horizon.Server;
   private readonly confirmTimeoutMs: number;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
 
-  constructor(private readonly opts: StellarSubmitterOptions) {
-    this.keypair = Keypair.fromSecret(opts.signerSecret);
+  constructor(opts: StellarSubmitterOptions) {
+    if (!opts.signer && !opts.signerSecret) {
+      throw new Error("StellarSettlementSubmitter: provide either `signer` or `signerSecret`");
+    }
+    this.signer = opts.signer ?? LocalKeypairSigner.fromSecret(opts.signerSecret as string);
     this.server = new Horizon.Server(opts.horizonUrl);
     this.confirmTimeoutMs = opts.confirmTimeoutMs ?? 30_000;
     this.now = opts.now ?? (() => Date.now());
@@ -90,7 +143,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
       const passphrase = passphraseFor(network);
       const asset = bridgeAsset(req.amount.asset, req.corridor.settlement.asset_issuer);
 
-      const source = await this.server.loadAccount(this.keypair.publicKey());
+      const source = await this.server.loadAccount(this.signer.publicKey);
       const builder = new TransactionBuilder(source, {
         fee: BASE_FEE,
         networkPassphrase: passphrase,
@@ -104,7 +157,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
       if (req.memo) builder.addMemo(Memo.text(req.memo));
 
       const tx = builder.build();
-      tx.sign(this.keypair);
+      await attachSignature(tx, this.signer);
 
       const sent = await this.server.submitTransaction(tx);
       const confirmed = await this.confirm(sent.hash);
