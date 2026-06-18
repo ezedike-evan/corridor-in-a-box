@@ -1,0 +1,47 @@
+# Corridor #1 — USD → Mexico (MXN), receiving via a Bitso-class SEP-31 anchor.
+# Unlike ng-cn, the destination DOES run SEP-31 receive-side today, so this lane
+# is structurally runnable: `corridor plan` reports all five steps live.
+#
+# IMPORTANT: the endpoint URLs below are placeholders. Before pointing real money
+# at this corridor, discover the live values from the anchor's published
+# stellar.toml (TRANSFER_SERVER_SEP0031, WEB_AUTH_ENDPOINT, KYC_SERVER,
+# ANCHOR_QUOTE_SERVER) and replace them. Nothing else in this file changes.
+id: mx-bitso
+status_note: "Destination runs SEP-31 receive-side. Verify endpoints from the live stellar.toml before use."
+
+source:
+  name: USD Sending Anchor
+  asset: USDC
+  endpoints:
+    home_domain: sending-anchor.example
+
+dest:
+  name: Mexico Off-Ramp (Bitso-class)
+  asset: "iso4217:MXN"
+  endpoints:
+    home_domain: anchor.example.mx # ← replace with the real anchor home domain
+    transfer_server_sep31: https://anchor.example.mx/sep31
+    web_auth: https://anchor.example.mx/auth
+    kyc_server: https://anchor.example.mx/sep12
+    quote_server: https://anchor.example.mx/sep38
+
+fx:
+  path: ["USD", "USDC", "MXN"]
+  quote_source: sep38
+  who_holds_risk: receiving_anchor
+  quote_ttl_seconds: 60
+
+compliance:
+  source_jurisdiction: US
+  dest_jurisdiction: MX
+  travel_rule_profile: default
+
+settlement:
+  bridge_asset: USDC
+  network: public
+  asset_issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN # USDC mainnet issuer
+
+recovery:
+  max_retries: 3
+  timeout_seconds: 900
+  rollback: refund_sender
