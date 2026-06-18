@@ -1,8 +1,8 @@
 // @corridor/types — shared domain types + the result type the whole engine speaks.
 //
-// Everything returns Outcome instead of throwing. This is the same discipline as
-// Numio's SpendOutcome: failures are values you must handle, not exceptions that
-// unwind the stack and lose the in-flight payment's state.
+// Everything returns Outcome instead of throwing. Failures are values you must
+// handle, not exceptions that unwind the stack and lose the in-flight payment's
+// state.
 
 export type Ok<T> = { readonly ok: true; readonly value: T };
 export type Err<E> = { readonly ok: false; readonly error: E };

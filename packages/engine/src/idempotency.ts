@@ -2,7 +2,7 @@
 //
 // The `version` field is what reconciliation keys on: each state transition bumps
 // it, so an external observer (or a resumed run) can tell which step a payment
-// reached without re-deriving it. Same pattern as Numio's version field.
+// reached without re-deriving it.
 //
 // InMemoryIdempotencyStore is for tests/examples. In production back this with
 // Postgres (a row per idempotencyKey, optimistic concurrency on `version`).

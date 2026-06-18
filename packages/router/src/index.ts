@@ -2,8 +2,8 @@
 //
 // The interface and a dumb default ship here, in the open repo. The REAL resolver
 // — health-weighted, rate-aware, split-routing, fed by the anchor conformance
-// dataset (the Stellar-Intel/Tideline brain) — is proprietary and injected at
-// runtime. Anyone can run the open engine; only you have the routing intelligence.
+// dataset — is proprietary and injected at runtime. Anyone can run the open
+// engine; only the operator supplies the routing intelligence.
 
 import type { Corridor } from "@corridor/manifest";
 import type { AnchorAdapter } from "@corridor/adapter-kit";
