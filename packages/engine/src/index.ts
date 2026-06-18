@@ -13,5 +13,17 @@ export {
   type SettlementSubmitter,
   type SettlementRef,
   type SettlementRequest,
+  type RefundRequest,
 } from "./ports";
-export { quote, comply, open, settle, reconcile, recover, type RecoveryAction } from "./verbs";
+export {
+  quote,
+  comply,
+  open,
+  settle,
+  reconcile,
+  reconcileUntil,
+  backoffMs,
+  recover,
+  type RecoveryAction,
+  type PollOptions,
+} from "./verbs";

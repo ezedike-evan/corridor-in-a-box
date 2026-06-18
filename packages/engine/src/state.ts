@@ -14,6 +14,7 @@ export type CorridorState =
   | "completed"
   | "recovering"
   | "refunded"
+  | "held"
   | "failed";
 
 const NEXT: Record<CorridorState, readonly CorridorState[]> = {
@@ -25,8 +26,11 @@ const NEXT: Record<CorridorState, readonly CorridorState[]> = {
   settled: ["reconciled", "recovering", "failed"],
   reconciled: ["completed", "failed"],
   completed: [],
-  recovering: ["settling", "refunded", "failed"],
+  // recover() routes here; from recovering we either retry, refund, hold for
+  // manual intervention, or give up.
+  recovering: ["settling", "refunded", "held", "failed"],
   refunded: [],
+  held: [],
   failed: [],
 };
 
@@ -37,6 +41,7 @@ export function canTransition(from: CorridorState, to: CorridorState): boolean {
 export const TERMINAL: ReadonlySet<CorridorState> = new Set([
   "completed",
   "refunded",
+  "held",
   "failed",
 ]);
 

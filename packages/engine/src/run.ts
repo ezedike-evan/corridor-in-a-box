@@ -21,14 +21,18 @@ import {
   type IdempotencyStore,
   type StoredRun,
 } from "./idempotency";
-import type { SettlementSubmitter } from "./ports";
-import { comply, open, quote, recover, reconcile, settle } from "./verbs";
+import type { RefundRequest, SettlementSubmitter } from "./ports";
+import { backoffMs, comply, open, quote, recover, reconcileUntil, settle } from "./verbs";
 
 export interface EngineDeps {
   resolver: RouteResolver;
   submitter: SettlementSubmitter;
   idempotency?: IdempotencyStore;
   now?: () => number;
+  /** Injectable sleep so tests don't wait on real backoff/poll delays. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Delay between reconcile polls (ms). Defaults to 2s. */
+  reconcilePollMs?: number;
 }
 
 export interface RunResult {
@@ -47,6 +51,8 @@ export async function execute(
 ): Promise<Outcome<RunResult>> {
   const store = deps.idempotency ?? new InMemoryIdempotencyStore();
   const now = deps.now ?? (() => Date.now());
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const pollMs = deps.reconcilePollMs ?? 2_000;
 
   // --- input guard: never let a malformed amount reach the chain --------
   if (!isValidAmount(intent.sourceAmount.amount)) {
@@ -126,11 +132,73 @@ export async function execute(
     if (!t.ok) return die(t.error);
   }
 
+  // The whole settle+reconcile phase must finish inside the corridor's timeout.
+  const deadlineMs = now() + corridor.recovery.timeout_seconds * 1000;
+
+  // Terminal failure handling: reverse any on-chain settlement (refund), park for
+  // manual intervention (hold), or give up — per the manifest's recovery policy.
+  const finishFailure = async (e: CorridorError): Promise<Err> => {
+    if (corridor.recovery.rollback === "refund_sender") {
+      return refundAndStop(e);
+    }
+    if (corridor.recovery.rollback === "hold") {
+      return holdAndStop(e);
+    }
+    return die(e);
+  };
+
+  const refundAndStop = async (e: CorridorError): Promise<Err> => {
+    const back = await advance("recovering");
+    if (!back.ok) return die(back.error);
+    // Only reverse the chain if a payment actually went out. If settlement never
+    // succeeded, there is nothing on-chain to undo — the sending anchor returns
+    // the sender's funds off-chain — so we just record the refunded state.
+    if (run.stellarTxHash) {
+      const req: RefundRequest = {
+        original: { stellarTxHash: run.stellarTxHash },
+        amount: {
+          asset: corridor.settlement.bridge_asset,
+          amount: q.value.sourceAmount.amount,
+        },
+        corridor,
+        reason: `${e.code}: ${e.message}`,
+      };
+      const rf = await deps.submitter.refund(req);
+      if (!rf.ok) {
+        // Couldn't reverse the chain payment — escalate to a manual hold.
+        return holdAndStop(rf.error);
+      }
+    }
+    run.lastError = `${e.code}: ${e.message}`;
+    const done = await advance("refunded");
+    if (!done.ok) return die(done.error);
+    return { ok: false, error: e };
+  };
+
+  const holdAndStop = async (e: CorridorError): Promise<Err> => {
+    if (run.state !== "recovering") {
+      const back = await advance("recovering");
+      if (!back.ok) return die(back.error);
+    }
+    run.lastError = `${e.code}: ${e.message}`;
+    const held = await advance("held");
+    if (!held.ok) return die(held.error);
+    return { ok: false, error: e };
+  };
+
   // --- 3b/4. settle + reconcile, with recover() retry loop --------------
   let attempt = 0;
   for (;;) {
+    if (now() >= deadlineMs) {
+      return finishFailure({
+        code: "SETTLEMENT_TIMEOUT",
+        message: `corridor ${corridor.id} exceeded ${corridor.recovery.timeout_seconds}s`,
+        retryable: false,
+      });
+    }
+
     {
-      const t = await advance(run.state === "recovering" ? "settling" : "settling");
+      const t = await advance("settling");
       if (!t.ok) return die(t.error);
     }
 
@@ -141,13 +209,10 @@ export async function execute(
         attempt = action.attempt;
         const back = await advance("recovering");
         if (!back.ok) return die(back.error);
+        await sleep(backoffMs(attempt));
         continue;
       }
-      if (action.kind === "refund") {
-        await markRefunded(run, store, trail, s.error);
-        return { ok: false, error: s.error };
-      }
-      return die(s.error);
+      return finishFailure(s.error);
     }
     run.stellarTxHash = s.value.stellarTxHash;
     {
@@ -155,17 +220,15 @@ export async function execute(
       if (!t.ok) return die(t.error);
     }
 
-    const r = await reconcile(adapter, opened.value.transactionId);
-    if (!r.ok) {
-      const action = recover(corridor, r.error.retryable, attempt);
-      if (action.kind === "retry") {
-        attempt = action.attempt;
-        const back = await advance("recovering");
-        if (!back.ok) return die(back.error);
-        continue;
-      }
-      return die(r.error);
-    }
+    // Poll until the anchor confirms payout or we hit the corridor timeout.
+    // reconcileUntil returns a non-retryable error, so we never re-settle here.
+    const r = await reconcileUntil(adapter, opened.value.transactionId, {
+      now,
+      sleep,
+      deadlineMs,
+      pollMs,
+    });
+    if (!r.ok) return finishFailure(r.error);
     {
       const t = await advance("reconciled");
       if (!t.ok) return die(t.error);
@@ -191,22 +254,4 @@ function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
     stellarTxHash: run.stellarTxHash,
     trail,
   };
-}
-
-async function markRefunded(
-  run: StoredRun,
-  store: IdempotencyStore,
-  trail: CorridorState[],
-  e: CorridorError,
-): Promise<void> {
-  run.lastError = `${e.code}: ${e.message}`;
-  if (canTransition(run.state, "recovering")) {
-    run.state = "recovering";
-    run.version += 1;
-    trail.push("recovering");
-  }
-  run.state = "refunded";
-  run.version += 1;
-  trail.push("refunded");
-  await store.put(run);
 }

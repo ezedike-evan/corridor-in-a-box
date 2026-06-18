@@ -76,7 +76,7 @@ export async function settle(
 }
 
 // 4. RECONCILE — match the on-chain leg against the anchor's view of the payout.
-//    Skeleton does a single status check; production polls until settled/timeout.
+//    A single status check (kept for tests / direct use).
 export async function reconcile(
   adapter: AnchorAdapter,
   transactionId: string,
@@ -87,12 +87,51 @@ export async function reconcile(
     return fail(
       "RECONCILE_MISMATCH",
       `tx ${transactionId} not settled (status=${s.value.status})`,
-      {
-        retryable: true,
-      },
+      { retryable: true },
     );
   }
   return s;
+}
+
+export interface PollOptions {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  /** Absolute epoch-ms after which we stop polling and time out. */
+  deadlineMs: number;
+  /** Delay between polls. */
+  pollMs: number;
+}
+
+// 4'. RECONCILE (production) — poll the anchor until the payout settles or the
+//     corridor's timeout elapses. Returns a NON-retryable error on timeout so the
+//     engine routes straight to refund/hold instead of re-sending the payment.
+export async function reconcileUntil(
+  adapter: AnchorAdapter,
+  transactionId: string,
+  opts: PollOptions,
+): Promise<Outcome<TransactionStatus>> {
+  let lastStatus = "unknown";
+  for (;;) {
+    const s = await adapter.getTransaction(transactionId);
+    if (s.ok && s.value.settled) return s;
+    if (s.ok) lastStatus = s.value.status;
+    if (opts.now() >= opts.deadlineMs) {
+      // On a transient anchor error, surface it; otherwise it's a settle timeout.
+      if (!s.ok) return s;
+      return fail(
+        "SETTLEMENT_TIMEOUT",
+        `tx ${transactionId} did not settle before timeout (last status=${lastStatus})`,
+        { retryable: false },
+      );
+    }
+    await opts.sleep(opts.pollMs);
+  }
+}
+
+/** Exponential backoff with a cap, used between settlement retries. */
+export function backoffMs(attempt: number, baseMs = 250, capMs = 5_000): number {
+  const exp = baseMs * 2 ** Math.max(0, attempt - 1);
+  return Math.min(exp, capMs);
 }
 
 // 5. RECOVER — decide what to do with a failed step, per the manifest policy.

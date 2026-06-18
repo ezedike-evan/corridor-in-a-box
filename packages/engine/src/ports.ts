@@ -22,8 +22,22 @@ export interface SettlementRequest {
   readonly corridor: Corridor;
 }
 
+export interface RefundRequest {
+  /** The settlement we are reversing. */
+  readonly original: SettlementRef;
+  readonly amount: Money;
+  readonly corridor: Corridor;
+  readonly reason: string;
+}
+
 export interface SettlementSubmitter {
   submit(req: SettlementRequest): Promise<Outcome<SettlementRef>>;
+  /**
+   * Reverse a previously-submitted settlement (send the bridge asset back).
+   * Only called when an on-chain payment actually went out; if it didn't, the
+   * engine records the refund without touching the chain.
+   */
+  refund(req: RefundRequest): Promise<Outcome<SettlementRef>>;
 }
 
 /**
@@ -45,18 +59,30 @@ export class UnimplementedSubmitter implements SettlementSubmitter {
       "settlement not wired: implement SettlementSubmitter with @stellar/stellar-sdk (native payment to the anchor deposit address)",
     );
   }
+
+  async refund(): Promise<Outcome<SettlementRef>> {
+    return fail("SETTLEMENT_FAILED", "refund not wired: implement SettlementSubmitter.refund");
+  }
 }
 
 /** Test/example submitter: pretends the on-chain payment succeeded. */
-export function createMockSubmitter(): SettlementSubmitter {
+export function createMockSubmitter(opts: { failSubmit?: boolean } = {}): SettlementSubmitter {
   let n = 0;
+  const hash = (prefix: string) =>
+    `${prefix}${(++n).toString().padStart(64 - prefix.length, "0")}`;
   return {
     async submit(req) {
       void req;
-      return ok<SettlementRef>({
-        stellarTxHash: `mocktx${(++n).toString().padStart(60, "0")}`,
-        ledger: 1_000_000 + n,
-      });
+      if (opts.failSubmit) {
+        return fail("SETTLEMENT_FAILED", "mock submit configured to fail", {
+          retryable: true,
+        });
+      }
+      return ok<SettlementRef>({ stellarTxHash: hash("mocktx"), ledger: 1_000_000 + n });
+    },
+    async refund(req) {
+      void req;
+      return ok<SettlementRef>({ stellarTxHash: hash("mockrf"), ledger: 1_000_000 + n });
     },
   };
 }
