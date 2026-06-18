@@ -6,8 +6,11 @@
 // directly instead — those would live in the private repo, not here.
 //
 // The HTTP shapes below follow SEP-31 (GET /info, POST /transactions,
-// GET /transactions/:id) and SEP-38 (POST /quote). SEP-10 JWT auth is stubbed —
-// see authToken(). The on-chain settle leg is NOT here; that's the engine's job.
+// GET /transactions/:id), SEP-38 (POST /quote), SEP-10 (GET/POST web_auth) and
+// SEP-12 (GET /customer). The crypto for SEP-10 — parsing and signing the
+// challenge transaction XDR — lives behind an injected Sep10Signer so this
+// adapter never has to depend on a Stellar SDK. The on-chain settle leg is NOT
+// here; that's the engine's job.
 
 import type { AnchorConfig, Corridor } from "@corridor/manifest";
 import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
@@ -21,27 +24,87 @@ import type {
 
 type FetchLike = typeof fetch;
 
+/**
+ * Signs a SEP-10 challenge. The concrete implementation (Keypair + Transaction
+ * from @stellar/stellar-sdk) is supplied by the caller, keeping this package
+ * free of a chain SDK. See @corridor/stellar for a ready-made signer.
+ */
+export interface Sep10Signer {
+  /** The Stellar account (G…) being authenticated. */
+  readonly account: string;
+  /** Sign the base64 challenge XDR and return the signed XDR. */
+  signChallenge(challengeXdr: string, networkPassphrase: string): Promise<string>;
+}
+
 export interface Sep31AdapterOptions {
   /** Inject a fetch implementation (defaults to global fetch). Handy for tests. */
   fetchImpl?: FetchLike;
+  /** SEP-10 signer. Without it the adapter calls anchors anonymously. */
+  sep10?: Sep10Signer;
+}
+
+/** Decode a JWT's `exp` claim (epoch ms) without verifying it. */
+function jwtExpiryMs(token: string): number | undefined {
+  const payload = token.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const json = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof json.exp === "number" ? json.exp * 1000 : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export class Sep31Adapter implements AnchorAdapter {
   readonly name: string;
   private readonly anchor: AnchorConfig;
   private readonly fetchImpl: FetchLike;
+  private readonly sep10?: Sep10Signer;
+  private cachedToken?: { token: string; expMs: number };
 
   constructor(corridor: Corridor, opts: Sep31AdapterOptions = {}) {
     this.anchor = corridor.dest;
     this.name = corridor.dest.name;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.sep10 = opts.sep10;
   }
 
-  // SEP-10. Stub: a real implementation does the challenge/response handshake
-  // against web_auth and caches the returned JWT until expiry.
-  private async authToken(_corridor: Corridor): Promise<string | undefined> {
-    // TODO(sep10): implement WEB_AUTH_ENDPOINT challenge transaction + JWT.
-    return undefined;
+  // SEP-10 challenge/response: GET a challenge transaction, sign it, POST it back
+  // for a JWT. Cached until ~30s before expiry. Returns undefined when no
+  // web_auth endpoint or signer is configured (anonymous access).
+  private async authToken(): Promise<string | undefined> {
+    const webAuth = this.anchor.endpoints.web_auth;
+    if (!webAuth || !this.sep10) return undefined;
+
+    const now = Date.now();
+    if (this.cachedToken && this.cachedToken.expMs - 30_000 > now) {
+      return this.cachedToken.token;
+    }
+
+    const url = new URL(webAuth);
+    url.searchParams.set("account", this.sep10.account);
+    url.searchParams.set("home_domain", this.anchor.endpoints.home_domain);
+    const challengeRes = await this.fetchImpl(url.toString());
+    if (!challengeRes.ok) return undefined;
+    const challenge = (await challengeRes.json()) as {
+      transaction: string;
+      network_passphrase: string;
+    };
+
+    const signed = await this.sep10.signChallenge(
+      challenge.transaction,
+      challenge.network_passphrase,
+    );
+    const tokenRes = await this.fetchImpl(webAuth, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ transaction: signed }),
+    });
+    if (!tokenRes.ok) return undefined;
+    const { token } = (await tokenRes.json()) as { token: string };
+
+    this.cachedToken = { token, expMs: jwtExpiryMs(token) ?? now + 15 * 60_000 };
+    return token;
   }
 
   private base(corridor: Corridor): Outcome<{ sep31: string; sep38?: string }> {
@@ -62,7 +125,7 @@ export class Sep31Adapter implements AnchorAdapter {
       return fail("QUOTE_UNAVAILABLE", `${this.name}: anchor exposes no SEP-38 quote server`);
     }
     try {
-      const token = await this.authToken(corridor);
+      const token = await this.authToken();
       const res = await this.fetchImpl(`${b.value.sep38}/quote`, {
         method: "POST",
         headers: {
@@ -107,16 +170,44 @@ export class Sep31Adapter implements AnchorAdapter {
     intent: PaymentIntent,
     corridor: Corridor,
   ): Promise<Outcome<KycResult>> {
-    // TODO(sep12): PUT /customer against kyc_server with the fields the anchor's
-    // GET /info advertises for this corridor, then poll GET /customer for status.
-    // The sending anchor verifies once and passes identity through here.
-    if (!this.anchor.endpoints.kyc_server) {
+    const kyc = this.anchor.endpoints.kyc_server;
+    if (!kyc) {
       // Some corridors deliver 1:1 with no per-customer KYC at the receiver.
       return ok<KycResult>({ status: "accepted" });
     }
-    void intent;
-    void corridor;
-    return ok<KycResult>({ status: "accepted", customerId: "sep12-stub" });
+    // SEP-12: check the receiving anchor's view of the customer's status. The
+    // sending anchor collects/verifies PII and passes it via SEP-12; here we only
+    // read status (no PII flows through the engine). NEEDS_INFO / PROCESSING are
+    // surfaced as "pending" so the engine fails closed rather than settling early.
+    try {
+      const token = await this.authToken();
+      const url = new URL(`${kyc}/customer`);
+      url.searchParams.set("account", this.sep10?.account ?? intent.recipient.id);
+      url.searchParams.set("type", `${corridor.compliance.dest_jurisdiction}:receiver`);
+      const res = await this.fetchImpl(url.toString(), {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        return fail("KYC_REQUIRED", `${this.name}: SEP-12 customer HTTP ${res.status}`, {
+          retryable: res.status >= 500,
+        });
+      }
+      const j = (await res.json()) as { id?: string; status?: string };
+      const status = (j.status ?? "").toUpperCase();
+      if (status === "ACCEPTED") {
+        return ok<KycResult>({ status: "accepted", customerId: j.id });
+      }
+      if (status === "REJECTED") {
+        return ok<KycResult>({ status: "rejected", customerId: j.id });
+      }
+      // PROCESSING, NEEDS_INFO, or anything unknown → not yet cleared.
+      return ok<KycResult>({ status: "pending", customerId: j.id });
+    } catch (cause) {
+      return fail("ANCHOR_UNAVAILABLE", `${this.name}: SEP-12 request failed`, {
+        retryable: true,
+        cause,
+      });
+    }
   }
 
   async openTransaction(
@@ -127,7 +218,7 @@ export class Sep31Adapter implements AnchorAdapter {
     const b = this.base(corridor);
     if (!b.ok) return b;
     try {
-      const token = await this.authToken(corridor);
+      const token = await this.authToken();
       const res = await this.fetchImpl(`${b.value.sep31}/transactions`, {
         method: "POST",
         headers: {
