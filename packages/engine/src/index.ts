@@ -34,3 +34,13 @@ export {
   type RecoveryAction,
   type PollOptions,
 } from "./verbs";
+export {
+  consoleLogger,
+  silentLogger,
+  InMemoryAuditLog,
+  type Logger,
+  type LogLevel,
+  type LogFields,
+  type AuditSink,
+  type AuditEntry,
+} from "./observability";

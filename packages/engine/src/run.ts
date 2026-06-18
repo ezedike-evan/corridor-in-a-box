@@ -23,6 +23,7 @@ import {
 } from "./idempotency";
 import type { RefundRequest, SettlementSubmitter } from "./ports";
 import { backoffMs, comply, open, quote, recover, reconcileUntil, settle } from "./verbs";
+import { silentLogger, type AuditSink, type Logger } from "./observability";
 
 export interface EngineDeps {
   resolver: RouteResolver;
@@ -33,6 +34,10 @@ export interface EngineDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Delay between reconcile polls (ms). Defaults to 2s. */
   reconcilePollMs?: number;
+  /** Structured logger. Defaults to a silent logger. */
+  logger?: Logger;
+  /** Append-only audit sink; receives one entry per state transition. */
+  audit?: AuditSink;
 }
 
 export interface RunResult {
@@ -95,19 +100,23 @@ export async function execute(
     if (!canTransition(run.state, to)) {
       return fail("SETTLEMENT_FAILED", `illegal transition ${run.state} -> ${to}`);
     }
+    const from = run.state;
     run.state = to;
     run.version += 1;
     trail.push(to);
     await store.put(run);
+    await emitTransition(deps, run, from, now());
     return ok(undefined);
   };
 
   const die = async (e: CorridorError): Promise<Err> => {
+    const from = run.state;
     run.lastError = `${e.code}: ${e.message}`;
     run.state = "failed";
     run.version += 1;
     trail.push("failed");
     await store.put(run);
+    await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`);
     return { ok: false, error: e };
   };
 
@@ -265,6 +274,27 @@ function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
   };
 }
 
+/** Log + audit a single transition. `run` must already be at its new state. */
+async function emitTransition(
+  deps: EngineDeps,
+  run: StoredRun,
+  from: CorridorState,
+  at: number,
+  error?: string,
+): Promise<void> {
+  const entry = {
+    idempotencyKey: run.idempotencyKey,
+    corridorId: run.corridorId,
+    from,
+    to: run.state,
+    version: run.version,
+    at,
+    error,
+  };
+  (deps.logger ?? silentLogger).log(error ? "error" : "info", "corridor.transition", entry);
+  await deps.audit?.record(entry);
+}
+
 /**
  * Resume a persisted run that crashed after the money moved. From `settled` we
  * re-poll the anchor (the payment already went out — we must NOT re-settle) and,
@@ -288,10 +318,12 @@ async function resumeRun(
     if (!canTransition(run.state, to)) {
       return fail("SETTLEMENT_FAILED", `illegal resume transition ${run.state} -> ${to}`);
     }
+    const from = run.state;
     run.state = to;
     run.version += 1;
     trail.push(to);
     await store.put(run);
+    await emitTransition(deps, run, from, now());
     return ok(undefined);
   };
 
@@ -310,11 +342,13 @@ async function resumeRun(
       pollMs,
     });
     if (!r.ok) {
+      const from = run.state;
       run.lastError = `${r.error.code}: ${r.error.message}`;
       run.state = "failed";
       run.version += 1;
       trail.push("failed");
       await store.put(run);
+      await emitTransition(deps, run, from, now(), `${r.error.code}: ${r.error.message}`);
       return { ok: false, error: r.error };
     }
     const t = await advance("reconciled");

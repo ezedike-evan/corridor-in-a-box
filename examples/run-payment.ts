@@ -12,7 +12,12 @@ import { fileURLToPath } from "node:url";
 import { loadCorridor } from "@corridor/manifest";
 import { createMockAdapter } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
-import { InMemoryIdempotencyStore, createMockSubmitter, execute } from "@corridor/engine";
+import {
+  InMemoryAuditLog,
+  InMemoryIdempotencyStore,
+  createMockSubmitter,
+  execute,
+} from "@corridor/engine";
 import type { PaymentIntent } from "@corridor/types";
 
 const manifestPath = fileURLToPath(
@@ -27,10 +32,12 @@ async function main(): Promise<void> {
   }
   const corridor = loaded.value;
 
+  const audit = new InMemoryAuditLog();
   const deps = {
     resolver: new StaticRouteResolver(() => createMockAdapter({ name: corridor.dest.name })),
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
+    audit,
   };
 
   const intent: PaymentIntent = {
@@ -50,6 +57,7 @@ async function main(): Promise<void> {
     console.log(`  state:       ${result.value.state}`);
     console.log(`  stellar tx:  ${result.value.stellarTxHash}`);
     console.log(`  trail:       ${result.value.trail.join(" -> ")}`);
+    console.log(`  audit:       ${audit.entries.length} transitions recorded`);
   } else {
     console.log(`✗ payment failed: ${result.error.code} — ${result.error.message}`);
   }
