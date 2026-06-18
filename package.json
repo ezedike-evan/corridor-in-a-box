@@ -1,0 +1,29 @@
+{
+  "name": "corridor-in-a-box",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Open, manifest-driven engine for Stellar SEP-31 cross-border corridors. A corridor is configuration, not code.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "cli": "tsx packages/cli/src/index.ts",
+    "example": "tsx examples/run-payment.ts"
+  },
+  "dependencies": {
+    "@corridor/types": "workspace:*",
+    "@corridor/manifest": "workspace:*",
+    "@corridor/adapter-kit": "workspace:*",
+    "@corridor/sep31": "workspace:*",
+    "@corridor/router": "workspace:*",
+    "@corridor/engine": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "packageManager": "pnpm@9.12.0"
+}

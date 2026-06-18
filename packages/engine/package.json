@@ -1,0 +1,13 @@
+{
+  "name": "@corridor/engine",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "main": "./src/index.ts",
+  "dependencies": {
+    "@corridor/types": "workspace:*",
+    "@corridor/manifest": "workspace:*",
+    "@corridor/adapter-kit": "workspace:*",
+    "@corridor/router": "workspace:*"
+  }
+}

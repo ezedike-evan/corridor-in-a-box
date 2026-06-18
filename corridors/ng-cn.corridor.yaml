@@ -1,0 +1,44 @@
+# Nigeria -> China. The headline case study, NOT corridor #1.
+# This manifest is the whole thesis in one file: the day a compliant RMB SEP-31
+# receiving anchor exists, you fill in dest.endpoints and this becomes runnable on
+# the SAME engine — no code change. Until then it is documented as pending.
+#
+# It still validates structurally (run: corridor validate corridors/ng-cn.corridor.yaml)
+# but `corridor plan` will flag it as NOT runnable because the dest SEP-31 server
+# is absent — which is exactly the off-ramp scarcity, surfaced by tooling.
+id: ng-cn
+status_note: "PENDING — no compliant RMB SEP-31 off-ramp exists yet. dest endpoints unfilled."
+
+source:
+  name: Nigeria On-Ramp (e.g. cNGN/Cowrie-class)
+  asset: USDC
+  endpoints:
+    home_domain: example-ng-anchor.invalid     # placeholder; verify a real one before use
+
+dest:
+  name: China RMB Off-Ramp (does not exist yet)
+  asset: "iso4217:CNY"
+  endpoints:
+    home_domain: example-cn-anchor.invalid      # no transfer_server_sep31 on purpose
+    # transfer_server_sep31: <-- the missing piece. This is what blocks the lane.
+
+fx:
+  path: ["NGN", "USDC", "CNY"]
+  quote_source: sep38
+  who_holds_risk: sending_anchor
+  quote_ttl_seconds: 45
+
+compliance:
+  source_jurisdiction: NG
+  dest_jurisdiction: CN
+  travel_rule_profile: strict
+
+settlement:
+  bridge_asset: USDC
+  network: public
+  asset_issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN  # USDC mainnet issuer
+
+recovery:
+  max_retries: 2
+  timeout_seconds: 1200
+  rollback: refund_sender

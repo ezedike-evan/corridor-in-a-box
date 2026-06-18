@@ -1,0 +1,44 @@
+# corridor #0 — the Anchor Platform SEP-31 reference server on testnet.
+# Stand it up locally (docker compose, per the Stellar docs SEP-31 guide) and the
+# engine can exercise quote -> comply -> open -> settle -> reconcile end to end
+# against a conformant SEP-31 implementation. No commercial agreement required.
+# This is the lane you run THIS WEEK to prove the engine.
+id: reference-testnet
+
+source:
+  name: Local Sending Anchor
+  asset: USDC
+  endpoints:
+    home_domain: localhost:8080
+
+dest:
+  name: Anchor Platform Reference
+  asset: "iso4217:USD"           # off-chain payout asset the reference server delivers
+  endpoints:
+    home_domain: localhost:8080
+    transfer_server_sep31: http://localhost:8080/sep31
+    web_auth: http://localhost:8080/auth
+    kyc_server: http://localhost:8080/sep12
+    quote_server: http://localhost:8080/sep38
+
+fx:
+  path: ["USD", "USDC", "USD"]
+  quote_source: sep38
+  who_holds_risk: receiving_anchor
+  quote_ttl_seconds: 60
+
+compliance:
+  source_jurisdiction: US
+  dest_jurisdiction: US
+  travel_rule_profile: default
+
+settlement:
+  bridge_asset: USDC
+  network: testnet
+  # Circle's USDC test issuer, per the Anchor Platform configuration docs.
+  asset_issuer: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+
+recovery:
+  max_retries: 3
+  timeout_seconds: 900
+  rollback: refund_sender
