@@ -62,12 +62,21 @@ export async function execute(
     );
   }
 
-  // --- idempotency gate -------------------------------------------------
+  // --- idempotency gate + crash resume ---------------------------------
+  // A persisted run lets a crashed process pick up where it left off. We only
+  // auto-resume from states where resuming is provably safe — never from a state
+  // where re-running could double-settle.
   const existing = await store.get(intent.idempotencyKey);
   if (existing) {
     if (existing.state === "completed") {
       return ok(toResult(existing, [existing.state]));
     }
+    if (existing.state === "settled" || existing.state === "reconciled") {
+      return resumeRun(existing, intent, corridor, deps, store, now, sleep, pollMs);
+    }
+    // settling / created / quoted / … : ambiguous (did the payment go out?) or
+    // stale (quote may have expired). Surface for a fresh attempt or ops, rather
+    // than risk a duplicate payment.
     return fail(
       "IDEMPOTENCY_CONFLICT",
       `idempotencyKey ${intent.idempotencyKey} already in-flight (state=${existing.state})`,
@@ -254,4 +263,65 @@ function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
     stellarTxHash: run.stellarTxHash,
     trail,
   };
+}
+
+/**
+ * Resume a persisted run that crashed after the money moved. From `settled` we
+ * re-poll the anchor (the payment already went out — we must NOT re-settle) and,
+ * once confirmed, complete. From `reconciled` we just finish. A failed re-poll is
+ * surfaced for ops rather than auto-refunded, since funds are already in flight.
+ */
+async function resumeRun(
+  existing: StoredRun,
+  intent: PaymentIntent,
+  corridor: Corridor,
+  deps: EngineDeps,
+  store: IdempotencyStore,
+  now: () => number,
+  sleep: (ms: number) => Promise<void>,
+  pollMs: number,
+): Promise<Outcome<RunResult>> {
+  const run: StoredRun = { ...existing };
+  const trail: CorridorState[] = [run.state];
+
+  const advance = async (to: CorridorState): Promise<Outcome<void>> => {
+    if (!canTransition(run.state, to)) {
+      return fail("SETTLEMENT_FAILED", `illegal resume transition ${run.state} -> ${to}`);
+    }
+    run.state = to;
+    run.version += 1;
+    trail.push(to);
+    await store.put(run);
+    return ok(undefined);
+  };
+
+  if (run.state === "settled") {
+    if (!run.transactionId) {
+      return fail(
+        "RECONCILE_MISMATCH",
+        `resumed run ${run.idempotencyKey} has no transactionId`,
+      );
+    }
+    const route = await deps.resolver.resolve(intent, corridor);
+    const r = await reconcileUntil(route.receiving, run.transactionId, {
+      now,
+      sleep,
+      deadlineMs: now() + corridor.recovery.timeout_seconds * 1000,
+      pollMs,
+    });
+    if (!r.ok) {
+      run.lastError = `${r.error.code}: ${r.error.message}`;
+      run.state = "failed";
+      run.version += 1;
+      trail.push("failed");
+      await store.put(run);
+      return { ok: false, error: r.error };
+    }
+    const t = await advance("reconciled");
+    if (!t.ok) return t;
+  }
+
+  const done = await advance("completed");
+  if (!done.ok) return done;
+  return ok(toResult(run, trail));
 }

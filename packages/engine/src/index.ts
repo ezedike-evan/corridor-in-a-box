@@ -8,6 +8,13 @@ export {
   type StoredRun,
 } from "./idempotency";
 export {
+  PostgresIdempotencyStore,
+  migrate,
+  CREATE_TABLE_SQL,
+  type Queryable,
+  type QueryResult,
+} from "./idempotency-pg";
+export {
   UnimplementedSubmitter,
   createMockSubmitter,
   type SettlementSubmitter,
