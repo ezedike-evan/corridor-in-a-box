@@ -55,7 +55,7 @@ packages/
   service/       thin HTTP API over the engine (auth + rate limiting), zero deps
   cli/           validate a manifest; print an offline runnability plan
 corridors/       the manifests — ALL corridor-specifics live here, nowhere else
-docs/            key management, "why not Anchor Platform", …
+docs/            key management, "why not Anchor Platform", SEP coverage, operations, …
 examples/        runnable end-to-end demo
 ```
 
