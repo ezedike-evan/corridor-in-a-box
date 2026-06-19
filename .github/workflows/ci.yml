@@ -38,6 +38,9 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
+      # --ignore-workspace: web/ is intentionally outside the root pnpm workspace,
+      # so pnpm must treat it as a standalone project (otherwise it resolves the
+      # parent workspace and never installs web/node_modules).
+      - run: pnpm install --frozen-lockfile --ignore-workspace
       - run: pnpm typecheck
       - run: pnpm build
