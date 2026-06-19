@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { request, type Server } from "node:http";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
 import { createMockAdapter } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
@@ -118,6 +121,76 @@ describe("service: GET /payments/:key", () => {
   it("404s an unknown key", async () => {
     const r = await svc().route({ method: "GET", path: "/payments/missing" });
     expect(r.status).toBe(404);
+  });
+});
+
+describe("service: body-size limit (HTTP server)", () => {
+  async function listen(server: Server): Promise<{ port: number; close: () => void }> {
+    server.listen(0);
+    await once(server, "listening");
+    const port = (server.address() as AddressInfo).port;
+    return { port, close: () => server.close() };
+  }
+
+  function post(
+    port: number,
+    body: string,
+    headers: Record<string, string> = {},
+  ): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = request(
+        { host: "127.0.0.1", port, method: "POST", path: "/payments", headers },
+        (res) => {
+          let data = "";
+          res.on("data", (c) => (data += c));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
+        },
+      );
+      req.on("error", reject);
+      req.end(body);
+    });
+  }
+
+  it("rejects a body over the cap with 413 (declared Content-Length)", async () => {
+    const { port, close } = await listen(svc({ maxBodyBytes: 64 }).server());
+    try {
+      const big = JSON.stringify({ blob: "x".repeat(500) });
+      const res = await post(port, big, {
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(big)),
+      });
+      expect(res.status).toBe(413);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects an oversized streamed body with 413 (no/short Content-Length)", async () => {
+    const { port, close } = await listen(svc({ maxBodyBytes: 64 }).server());
+    try {
+      // Chunked transfer: the server can't trust a declared length and must cap
+      // the bytes it actually buffers.
+      const res = await post(port, JSON.stringify({ blob: "x".repeat(500) }), {
+        "content-type": "application/json",
+        "transfer-encoding": "chunked",
+      });
+      expect(res.status).toBe(413);
+    } finally {
+      close();
+    }
+  });
+
+  it("still serves a normal payment under the cap", async () => {
+    const { port, close } = await listen(svc().server());
+    try {
+      const res = await post(port, JSON.stringify(intentBody("http-ok")), {
+        "content-type": "application/json",
+      });
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body).state).toBe("completed");
+    } finally {
+      close();
+    }
   });
 });
 

@@ -5,6 +5,18 @@
   "type": "module",
   "description": "Open, manifest-driven engine for Stellar SEP-31 cross-border corridors. A corridor is configuration, not code.",
   "license": "Apache-2.0",
+  "author": "ezedike-evan <210902543@live.unilag.edu.ng>",
+  "maintainers": [
+    "ezedike-evan <210902543@live.unilag.edu.ng>"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ezedike-evan/corridor-in-a-box.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ezedike-evan/corridor-in-a-box/issues"
+  },
+  "homepage": "https://github.com/ezedike-evan/corridor-in-a-box#readme",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",

@@ -1,0 +1,43 @@
+name: New corridor
+description: Propose a new corridor manifest (a *.corridor.yaml lane).
+labels: ["corridor"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A corridor is **configuration, not code**. A new lane is a new
+        `*.corridor.yaml`, never a change to `packages/engine`. If your lane needs
+        engine behaviour that doesn't exist yet, open a regular issue instead.
+  - type: input
+    id: lane
+    attributes:
+      label: Lane
+      description: Source → destination, with the receiving anchor.
+      placeholder: "MX → AR via Bitso / Anclap"
+    validations:
+      required: true
+  - type: dropdown
+    id: receive-side
+    attributes:
+      label: Does the destination anchor run a live SEP-31 receive-side server?
+      options:
+        - "Yes — endpoints are published in its stellar.toml"
+        - "Testnet only"
+        - "No / unknown (lane will validate but report NOT runnable)"
+    validations:
+      required: true
+  - type: textarea
+    id: endpoints
+    attributes:
+      label: Known SEP endpoints
+      description: home_domain, SEP-31 transfer server, SEP-38 quote server, SEP-10 web_auth, SEP-12 KYC server — whatever you have.
+      render: yaml
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Who holds FX risk, settlement asset, jurisdictions, anything else relevant.
+    validations:
+      required: false

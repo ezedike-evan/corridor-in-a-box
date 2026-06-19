@@ -55,7 +55,7 @@ packages/
   service/       thin HTTP API over the engine (auth + rate limiting), zero deps
   cli/           validate a manifest; print an offline runnability plan
 corridors/       the manifests — ALL corridor-specifics live here, nowhere else
-docs/            key management, "why not Anchor Platform", …
+docs/            key management, "why not Anchor Platform", SEP coverage, operations, …
 examples/        runnable end-to-end demo
 ```
 
@@ -112,6 +112,29 @@ Swap the mocks for the real implementations (both ship in this repo):
 
 Then point a manifest at the testnet reference server and run it for real. The
 proprietary `RouteResolver` is the one piece injected from the private repo.
+
+## Verifying against a real anchor
+
+The default `pnpm test` runs entirely against mocks. An **opt-in** integration
+test exercises the adapter against a live SEP-31 server (e.g. the Anchor Platform
+reference server on testnet). It is read-only — SEP-10 auth, the SEP-38 quote, and
+the conformance probes; it does **not** move funds — and is skipped unless the
+anchor env vars are set (see [`.env.example`](./.env.example)):
+
+```bash
+ANCHOR_HOME_DOMAIN=anchor.example \
+ANCHOR_SEP31_TRANSFER_SERVER=https://anchor.example/sep31 \
+ANCHOR_SEP31_QUOTE_SERVER=https://anchor.example/sep38 \
+ANCHOR_SEP31_WEB_AUTH=https://anchor.example/auth \
+CORRIDOR_SIGNER_SECRET=S...   # testnet only; enables SEP-10 auth
+pnpm exec vitest run tests/integration/sep31-live.test.ts
+```
+
+The full money-moving end-to-end capture (open → settle → reconcile against a
+testnet anchor) is a manual step — the procedure is in
+[docs/operations.md](./docs/operations.md). This is the one Phase-1 roadmap item
+still open: until that trail is captured here, treat every settlement path as
+verified against mocks only.
 
 ## License
 

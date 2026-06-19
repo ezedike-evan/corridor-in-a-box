@@ -9,9 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Version comes from package.json "packageManager" (pnpm@9.x); do not also
+      # pass `version:` here or action-setup errors on the duplicate.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -20,3 +20,27 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+
+  # The web/ showcase app is a standalone Next.js project with its own lockfile
+  # (intentionally outside the pnpm workspace, see web/README.md), so it gets its
+  # own job rather than riding the monorepo gate above.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      # Version resolves from the root package.json "packageManager" field.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      # --ignore-workspace: web/ is intentionally outside the root pnpm workspace,
+      # so pnpm must treat it as a standalone project (otherwise it resolves the
+      # parent workspace and never installs web/node_modules).
+      - run: pnpm install --frozen-lockfile --ignore-workspace
+      - run: pnpm typecheck
+      - run: pnpm build

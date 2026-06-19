@@ -22,7 +22,7 @@ that keep corridors as _configuration, not code_ are exactly what we want.
 corepack enable          # or: npm i -g pnpm@9
 pnpm install
 pnpm typecheck           # whole monorepo, one tsc pass
-pnpm test                # vitest: engine + manifest
+pnpm test                # vitest: engine, manifest, money, sep31, stellar, service, …
 pnpm lint                # eslint + prettier --check
 pnpm example             # run a payment end-to-end (mocked anchor + settle)
 ```
@@ -52,9 +52,14 @@ under ~72 characters and explain the _why_ in the body.
 
 ## Good first issues
 
-- Implement the SEP-10 challenge/response handshake in `Sep31Adapter.authToken()`.
-- Add a `*.corridor.yaml` for a live SEP-31 receive-side anchor and a `plan` test.
+- Add a `*.corridor.yaml` for a live SEP-31 receive-side anchor (fill `dest.endpoints`
+  from its `stellar.toml`) and a `plan` test asserting it reports runnable.
 - Extend the conformance suite in `packages/adapter-kit` with more probes.
+- Run the env-gated integration test against the Anchor Platform reference server
+  and capture the trail in the README (see `tests/integration/` and
+  [docs/operations.md](./docs/operations.md)).
+- Widen the SEP-31 status mapping in `packages/sep31` as you hit real anchors that
+  report statuses we don't yet classify (see `mapSep31Status`).
 
 ## License
 

@@ -43,6 +43,31 @@ export interface Sep31AdapterOptions {
   sep10?: Sep10Signer;
 }
 
+/**
+ * Classify a SEP-31 transaction status into the engine's reconcile model.
+ *
+ * SEP-31 defines a lifecycle of `pending_*` / `incomplete` (in flight) plus the
+ * terminals `completed` (success), `refunded`, `expired`, and `error`. The engine
+ * only needs three buckets:
+ *   - settled         → `completed`
+ *   - terminalFailure → `refunded` | `expired` | `error`  (stop polling, recover)
+ *   - otherwise        → still in flight, keep polling
+ * Unknown statuses are treated as in-flight (fail-open to polling, never to a
+ * false "settled"). Exported so it can grow as real anchors surface new statuses.
+ */
+export function mapSep31Status(raw: string): {
+  status: string;
+  settled: boolean;
+  terminalFailure: boolean;
+} {
+  const status = (raw ?? "").toLowerCase();
+  if (status === "completed") return { status, settled: true, terminalFailure: false };
+  if (status === "refunded" || status === "expired" || status === "error") {
+    return { status, settled: false, terminalFailure: true };
+  }
+  return { status, settled: false, terminalFailure: false };
+}
+
 /** Decode a JWT's `exp` claim (epoch ms) without verifying it. */
 function jwtExpiryMs(token: string): number | undefined {
   const payload = token.split(".")[1];
@@ -266,11 +291,7 @@ export class Sep31Adapter implements AnchorAdapter {
         });
       }
       const j = (await res.json()) as { transaction: { status: string } };
-      const status = j.transaction.status;
-      return ok<TransactionStatus>({
-        status,
-        settled: status === "completed",
-      });
+      return ok<TransactionStatus>(mapSep31Status(j.transaction.status));
     } catch (cause) {
       return fail("ANCHOR_UNAVAILABLE", `${this.name}: get-tx failed`, {
         retryable: true,

@@ -114,6 +114,16 @@ export async function reconcileUntil(
   for (;;) {
     const s = await adapter.getTransaction(transactionId);
     if (s.ok && s.value.settled) return s;
+    // A terminal non-success at the anchor (error/expired/refunded): stop polling
+    // now and let the engine recover, rather than waiting out the timeout. Non-
+    // retryable so we never re-settle a payment that already terminally failed.
+    if (s.ok && s.value.terminalFailure) {
+      return fail(
+        "RECONCILE_MISMATCH",
+        `tx ${transactionId} terminally failed at anchor (status=${s.value.status})`,
+        { retryable: false },
+      );
+    }
     if (s.ok) lastStatus = s.value.status;
     if (opts.now() >= opts.deadlineMs) {
       // On a transient anchor error, surface it; otherwise it's a settle timeout.
