@@ -34,8 +34,17 @@ export interface OpenTransaction {
 }
 
 export interface TransactionStatus {
+  /** The raw status string reported by the anchor (e.g. a SEP-31 status). */
   readonly status: string;
+  /** The payout is confirmed complete — the engine may finish. */
   readonly settled: boolean;
+  /**
+   * The transaction has reached a terminal NON-success state at the anchor
+   * (e.g. SEP-31 `error` / `expired` / `refunded`). When set, the engine stops
+   * polling immediately and routes to its recovery policy instead of waiting out
+   * the corridor timeout. Absent/false means "not settled yet, keep polling".
+   */
+  readonly terminalFailure?: boolean;
 }
 
 export interface AnchorAdapter {
@@ -98,6 +107,8 @@ export interface MockAdapterOptions {
   expireQuoteImmediately?: boolean;
   price?: string;
   settled?: boolean;
+  /** Make getTransaction report a terminal anchor failure (error/expired/refunded). */
+  terminalFailure?: boolean;
 }
 
 export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter {
@@ -128,6 +139,13 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
       });
     },
     async getTransaction() {
+      if (opts.terminalFailure) {
+        return ok<TransactionStatus>({
+          status: "error",
+          settled: false,
+          terminalFailure: true,
+        });
+      }
       return ok<TransactionStatus>({
         status: opts.settled === false ? "pending_receiver" : "completed",
         settled: opts.settled !== false,

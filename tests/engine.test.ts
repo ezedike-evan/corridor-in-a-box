@@ -174,6 +174,47 @@ describe("engine recovery", () => {
     expect(refunded).toHaveLength(1);
   });
 
+  it("bails out of reconcile immediately on a terminal anchor failure", async () => {
+    let t = 0;
+    let polls = 0;
+    const refunded: string[] = [];
+    const base = createMockSubmitter();
+    const failing = createMockAdapter({ terminalFailure: true });
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => ({
+        ...failing,
+        getTransaction: async (id) => {
+          polls += 1;
+          return failing.getTransaction(id);
+        },
+      })),
+      submitter: {
+        submit: base.submit,
+        refund: async (req) => {
+          refunded.push(req.original.stellarTxHash);
+          return base.refund(req);
+        },
+      },
+      idempotency: new InMemoryIdempotencyStore(),
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      // A long timeout: if the engine waited it out instead of bailing, the test
+      // would still pass on the error code — so assert it polled only once.
+      reconcilePollMs: 500,
+    };
+    const r = await execute(
+      intent("terminal-1"),
+      corridorWith({ max_retries: 0, timeout_seconds: 3600, rollback: "refund_sender" }),
+      d,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("RECONCILE_MISMATCH");
+    expect(polls).toBe(1); // bailed on the first status, did not poll to timeout
+    expect(refunded).toHaveLength(1); // and reversed the on-chain payment
+  });
+
   it("parks for manual intervention when rollback policy is hold", async () => {
     const d: EngineDeps = {
       resolver: new StaticRouteResolver(() => createMockAdapter()),

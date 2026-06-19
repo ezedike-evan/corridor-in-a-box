@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
-import { Sep31Adapter, type Sep10Signer } from "@corridor/sep31";
+import { Sep31Adapter, mapSep31Status, type Sep10Signer } from "@corridor/sep31";
 import type { PaymentIntent } from "@corridor/types";
 
 const PASSPHRASE = "Test SDF Network ; September 2015";
@@ -125,6 +125,61 @@ describe("SEP-10 auth", () => {
     const q = await adapter.requestQuote(intent, c);
     expect(q.ok).toBe(true);
     expect(calls.every((x) => !x.url.includes("/auth"))).toBe(true);
+  });
+});
+
+describe("SEP-31 status mapping", () => {
+  it("classifies the SEP-31 lifecycle into settled / terminalFailure / in-flight", () => {
+    expect(mapSep31Status("completed")).toEqual({
+      status: "completed",
+      settled: true,
+      terminalFailure: false,
+    });
+    for (const terminal of ["error", "expired", "refunded"]) {
+      expect(mapSep31Status(terminal)).toMatchObject({
+        settled: false,
+        terminalFailure: true,
+      });
+    }
+    for (const pending of [
+      "incomplete",
+      "pending_sender",
+      "pending_stellar",
+      "pending_receiver",
+      "pending_external",
+      "something_new_we_dont_know",
+    ]) {
+      expect(mapSep31Status(pending)).toMatchObject({
+        settled: false,
+        terminalFailure: false,
+      });
+    }
+  });
+
+  it("is case-insensitive on the raw anchor status", () => {
+    expect(mapSep31Status("COMPLETED").settled).toBe(true);
+    expect(mapSep31Status("Error").terminalFailure).toBe(true);
+  });
+
+  it("getTransaction reflects the mapping for the anchor's reported status", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    for (const [raw, settled, terminal] of [
+      ["completed", true, false],
+      ["pending_receiver", false, false],
+      ["error", false, true],
+      ["refunded", false, true],
+    ] as const) {
+      const { fn } = fakeFetch({
+        "GET /sep31/transactions/": res({ transaction: { status: raw } }),
+      });
+      const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+      const r = await adapter.getTransaction("tx-1");
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.value.settled).toBe(settled);
+        expect(r.value.terminalFailure ?? false).toBe(terminal);
+      }
+    }
   });
 });
 
