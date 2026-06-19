@@ -88,6 +88,59 @@ describe("crash resume", () => {
   });
 });
 
+describe("concurrent claim", () => {
+  it("two concurrent runs of the same key settle exactly once", async () => {
+    const store = new InMemoryIdempotencyStore();
+    // Count how many times the submitter actually moves money. A correct gate
+    // lets exactly one of the two concurrent runs reach settle().
+    let settlements = 0;
+    const submitter = createMockSubmitter();
+    const counting = {
+      ...submitter,
+      submit: (req: Parameters<typeof submitter.submit>[0]) => {
+        settlements += 1;
+        return submitter.submit(req);
+      },
+    };
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      submitter: counting,
+      idempotency: store,
+      sleep: async () => {},
+    };
+
+    const [a, b] = await Promise.all([
+      execute(intent, corridor(), d),
+      execute(intent, corridor(), d),
+    ]);
+
+    const outcomes = [a, b];
+    expect(outcomes.filter((r) => r.ok)).toHaveLength(1);
+    const loser = outcomes.find((r) => !r.ok);
+    expect(loser && !loser.ok && loser.error.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(settlements).toBe(1);
+  });
+});
+
+describe("PostgresIdempotencyStore.create", () => {
+  it("claims a fresh key once and rejects a second claim", async () => {
+    const db = fakeDb();
+    const store = new PostgresIdempotencyStore(db);
+    const run: StoredRun = {
+      idempotencyKey: "k",
+      corridorId: "c",
+      state: "created",
+      version: 0,
+    };
+    expect(await store.create(run)).toBe(true);
+    expect(await store.create(run)).toBe(false);
+    // The losing claim must not have clobbered the row.
+    const got = await store.get("k");
+    expect(got?.state).toBe("created");
+    expect(got?.version).toBe(0);
+  });
+});
+
 // A tiny in-memory fake that honours the version-guarded upsert semantics of the
 // real SQL, so we can test PostgresIdempotencyStore's mapping + concurrency rule
 // without a live database.
@@ -103,7 +156,6 @@ function fakeDb(): Queryable & { table: Map<string, Record<string, unknown>> } {
         const row = table.get(params[0] as string);
         return { rows: (row ? [row] : []) as R[] };
       }
-      // upsert with version guard
       const key = params[0] as string;
       const incoming = {
         idempotency_key: key,
@@ -115,6 +167,14 @@ function fakeDb(): Queryable & { table: Map<string, Record<string, unknown>> } {
         stellar_tx_hash: params[6],
         last_error: params[7],
       };
+      // create(): INSERT … ON CONFLICT DO NOTHING RETURNING — only the first
+      // writer for a key lands a row and gets it back; a conflict returns [].
+      if (text.includes("do nothing")) {
+        if (table.has(key)) return { rows: [] as R[] };
+        table.set(key, incoming);
+        return { rows: [{ idempotency_key: key }] as R[] };
+      }
+      // put(): upsert with version guard.
       const current = table.get(key);
       if (!current || (current.version as number) < incoming.version) {
         table.set(key, incoming);

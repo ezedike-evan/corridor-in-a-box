@@ -66,6 +66,36 @@ function toRun(r: Row): StoredRun {
 export class PostgresIdempotencyStore implements IdempotencyStore {
   constructor(private readonly db: Queryable) {}
 
+  /**
+   * Atomically claim a key for a new run. `ON CONFLICT DO NOTHING` makes the
+   * insert a no-op when the key already exists; `RETURNING` then tells us whether
+   * a row was actually written. A `false` return means another worker already
+   * owns this key — the caller must NOT proceed to settle. This is the gate that
+   * closes the get()-then-insert race where two concurrent callers could both
+   * start (and both settle) the same payment.
+   */
+  async create(run: StoredRun): Promise<boolean> {
+    const res = await this.db.query<{ idempotency_key: string }>(
+      `insert into corridor_runs
+         (idempotency_key, corridor_id, state, version, transaction_id,
+          quote_id, stellar_tx_hash, last_error, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8, now())
+       on conflict (idempotency_key) do nothing
+       returning idempotency_key`,
+      [
+        run.idempotencyKey,
+        run.corridorId,
+        run.state,
+        run.version,
+        run.transactionId ?? null,
+        run.quoteId ?? null,
+        run.stellarTxHash ?? null,
+        run.lastError ?? null,
+      ],
+    );
+    return res.rows.length > 0;
+  }
+
   async get(key: string): Promise<StoredRun | undefined> {
     const res = await this.db.query<Row>(
       `select idempotency_key, corridor_id, state, version, transaction_id,

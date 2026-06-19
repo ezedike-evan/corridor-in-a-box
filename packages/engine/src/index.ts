@@ -40,6 +40,7 @@ export {
   InMemoryAuditLog,
   noopMetrics,
   InMemoryMetrics,
+  PrometheusMetrics,
   type Logger,
   type LogLevel,
   type LogFields,

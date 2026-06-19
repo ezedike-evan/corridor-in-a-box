@@ -114,6 +114,19 @@ export async function execute(
   };
   const trail: CorridorState[] = ["created"];
 
+  // Atomically claim the key before doing any work. `get()` above can't be the
+  // gate on its own: two concurrent callers can both see "no existing run" and
+  // both proceed to settle. create() is a conditional insert — exactly one
+  // caller wins the claim; the loser bails here rather than risk a duplicate
+  // on-chain payment. (The put() version guard only stops the row going
+  // backwards, not two runs executing.)
+  if (!(await store.create(run))) {
+    return fail(
+      "IDEMPOTENCY_CONFLICT",
+      `idempotencyKey ${intent.idempotencyKey} already claimed by a concurrent run`,
+    );
+  }
+
   const advance = async (to: CorridorState): Promise<Outcome<void>> => {
     if (!canTransition(run.state, to)) {
       return fail("SETTLEMENT_FAILED", `illegal transition ${run.state} -> ${to}`);

@@ -22,6 +22,18 @@ export interface RateLimitOptions {
   refillPerSec: number;
 }
 
+/**
+ * Pluggable rate limiter. The default `TokenBucket` is per-process — fine for a
+ * single replica. For multiple replicas, inject a shared implementation (e.g. a
+ * Redis token bucket via a Lua script) so the limit is enforced across the
+ * fleet rather than per-instance. `take()` may be sync or async (Redis is
+ * async). See docs/operations.md §5.
+ */
+export interface RateLimiter {
+  /** Consume one unit for `key`. Return false to reject (429). */
+  take(key: string): boolean | Promise<boolean>;
+}
+
 export interface ServiceOptions {
   /** Corridor manifests, keyed by corridor id. */
   corridors: Map<string, Corridor>;
@@ -29,10 +41,27 @@ export interface ServiceOptions {
   deps: EngineDeps;
   /** If set, requests must carry `Authorization: Bearer <key>` with a known key. */
   apiKeys?: Set<string>;
-  /** If set, requests are rate-limited per client (API key, else x-forwarded-for). */
+  /** If set, requests are rate-limited per client (API key, else resolved client IP)
+   *  using the default in-process TokenBucket. Ignored when `rateLimiter` is given. */
   rateLimit?: RateLimitOptions;
+  /** Inject a custom (e.g. shared/Redis) limiter. Takes precedence over `rateLimit`. */
+  rateLimiter?: RateLimiter;
+  /**
+   * If set, `GET /metrics` serves Prometheus text exposition (public + unmetered).
+   * Pass `() => prometheusMetrics.render()` and hand the SAME `PrometheusMetrics`
+   * to the engine as `deps.metrics` so scrapes see live counters/timings.
+   */
+  metricsText?: () => string;
   /** Max request body size in bytes. Larger bodies are rejected with 413. Default 64 KiB. */
   maxBodyBytes?: number;
+  /**
+   * Trust `X-Forwarded-For` for the client IP. Default `false`: the header is
+   * client-controlled, so trusting it lets an attacker forge a fresh identity
+   * per request and slip the rate limiter. Enable ONLY when a trusted reverse
+   * proxy (your ingress) sets the header and strips any inbound value. When
+   * false, the transport uses the socket's peer address instead.
+   */
+  trustProxy?: boolean;
   now?: () => number;
 }
 
@@ -42,6 +71,9 @@ const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
 export interface RouteResponse {
   status: number;
   body: unknown;
+  /** Defaults to application/json (body is JSON-encoded). Set e.g. text/plain to
+   *  send a string body verbatim (used by /metrics). */
+  contentType?: string;
 }
 
 export interface RouteRequest {
@@ -49,6 +81,8 @@ export interface RouteRequest {
   path: string;
   body?: unknown;
   headers?: Record<string, string>;
+  /** Resolved client IP from the transport (see `trustProxy`). Used for rate-limit keying. */
+  clientIp?: string;
 }
 
 const STATUS_BY_CODE: Record<CorridorErrorCode, number> = {
@@ -66,15 +100,31 @@ const STATUS_BY_CODE: Record<CorridorErrorCode, number> = {
 };
 
 /** Token-bucket rate limiter, keyed per client. In-memory; swap for Redis at scale. */
-class TokenBucket {
+export class TokenBucket implements RateLimiter {
   private readonly state = new Map<string, { tokens: number; last: number }>();
+  /**
+   * How long an idle bucket takes to refill back to full capacity. Once a bucket
+   * has been idle that long it's indistinguishable from a brand-new one, so it
+   * can be dropped — this is what bounds memory. `Infinity` when refill is
+   * disabled (a drained bucket never recovers, so we must never evict it).
+   */
+  private readonly fullRefillMs: number;
+  private lastSweep = 0;
+
   constructor(
     private readonly opts: RateLimitOptions,
     private readonly now: () => number,
-  ) {}
+  ) {
+    this.fullRefillMs =
+      opts.refillPerSec > 0 ? (opts.capacity / opts.refillPerSec) * 1000 : Infinity;
+  }
 
   take(key: string): boolean {
     const t = this.now();
+    // Without eviction the map grows once per distinct client (API key, or a
+    // spoofable x-forwarded-for) and never shrinks — an unbounded-memory vector.
+    // Sweep at most once per refill window so the cost stays amortized O(1).
+    this.evictFullyRefilled(t);
     const s = this.state.get(key) ?? { tokens: this.opts.capacity, last: t };
     s.tokens = Math.min(
       this.opts.capacity,
@@ -85,6 +135,18 @@ class TokenBucket {
     if (allowed) s.tokens -= 1;
     this.state.set(key, s);
     return allowed;
+  }
+
+  /** Drop buckets idle long enough to have fully refilled (behaviour-neutral:
+   *  a full bucket and a fresh one are identical). Throttled to one pass per
+   *  refill window to keep the hot path cheap. */
+  private evictFullyRefilled(t: number): void {
+    if (!Number.isFinite(this.fullRefillMs)) return;
+    if (t - this.lastSweep < this.fullRefillMs) return;
+    this.lastSweep = t;
+    for (const [k, s] of this.state) {
+      if (t - s.last >= this.fullRefillMs) this.state.delete(k);
+    }
   }
 }
 
@@ -110,12 +172,19 @@ export interface Service {
 
 export function createService(options: ServiceOptions): Service {
   const now = options.now ?? (() => Date.now());
-  const limiter = options.rateLimit ? new TokenBucket(options.rateLimit, now) : undefined;
+  const limiter: RateLimiter | undefined =
+    options.rateLimiter ??
+    (options.rateLimit ? new TokenBucket(options.rateLimit, now) : undefined);
 
-  const clientKey = (headers: Record<string, string>): string => {
-    const auth = headers["authorization"];
+  // Rate-limit identity: an API key if present (most specific), else the client
+  // IP resolved by the transport. We deliberately do NOT key off a raw
+  // X-Forwarded-For here — that's resolved into `clientIp` under `trustProxy`
+  // control by server(); trusting it blindly would let a client forge a new
+  // bucket per request.
+  const clientKey = (req: RouteRequest): string => {
+    const auth = req.headers?.["authorization"];
     if (auth?.startsWith("Bearer ")) return `key:${auth.slice(7)}`;
-    return `ip:${headers["x-forwarded-for"] ?? "anon"}`;
+    return `ip:${req.clientIp ?? "anon"}`;
   };
 
   async function route(req: RouteRequest): Promise<RouteResponse> {
@@ -125,6 +194,16 @@ export function createService(options: ServiceOptions): Service {
     // Health is public and unmetered.
     if (req.method === "GET" && path === "/healthz") {
       return { status: 200, body: { status: "ok" } };
+    }
+
+    // Metrics are public and unmetered (scrapers don't carry an API key). Only
+    // exposed when a renderer is configured.
+    if (req.method === "GET" && path === "/metrics" && options.metricsText) {
+      return {
+        status: 200,
+        body: options.metricsText(),
+        contentType: "text/plain; version=0.0.4",
+      };
     }
 
     // --- auth ---
@@ -137,7 +216,7 @@ export function createService(options: ServiceOptions): Service {
     }
 
     // --- rate limit ---
-    if (limiter && !limiter.take(clientKey(headers))) {
+    if (limiter && !(await limiter.take(clientKey(req)))) {
       return { status: 429, body: { error: "rate_limited" } };
     }
 
@@ -241,17 +320,96 @@ export function createService(options: ServiceOptions): Service {
           if (typeof v === "string") headers[k.toLowerCase()] = v;
         }
         const url = new URL(incoming.url ?? "/", "http://localhost");
-        const out = await route({
-          method: incoming.method ?? "GET",
-          path: url.pathname,
-          body,
-          headers,
-        });
-        res.writeHead(out.status, { "content-type": "application/json" });
-        res.end(JSON.stringify(out.body));
+        try {
+          const out = await route({
+            method: incoming.method ?? "GET",
+            path: url.pathname,
+            body,
+            headers,
+            clientIp: resolveClientIp(incoming, headers, options.trustProxy ?? false),
+          });
+          if (out.contentType) {
+            res.writeHead(out.status, { "content-type": out.contentType });
+            res.end(typeof out.body === "string" ? out.body : JSON.stringify(out.body));
+          } else {
+            res.writeHead(out.status, { "content-type": "application/json" });
+            res.end(JSON.stringify(out.body));
+          }
+        } catch {
+          // An unexpected throw (e.g. the idempotency DB is unreachable) must not
+          // hang the socket or crash the process. A throw here means no payment
+          // was committed past its last persisted state, so the run is safe to
+          // retry; surface a 500 and let the caller back off. Settlement-time
+          // store failures degrade to the same `settling`/IDEMPOTENCY_CONFLICT
+          // path as a crash — never a silent double-settle.
+          if (!res.headersSent) {
+            res.writeHead(500, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: "internal", message: "unexpected error" }));
+          }
+        }
       });
     });
   }
 
   return { route, server };
+}
+
+/** First hop in an X-Forwarded-For list (the original client). */
+function firstForwarded(xff: string | undefined): string | undefined {
+  const first = xff?.split(",")[0]?.trim();
+  return first || undefined;
+}
+
+/**
+ * Resolve the client IP for rate-limit keying. With `trustProxy`, prefer the
+ * left-most X-Forwarded-For entry set by a trusted ingress; otherwise use the
+ * socket peer address, which a client cannot forge.
+ */
+function resolveClientIp(
+  incoming: IncomingMessage,
+  headers: Record<string, string>,
+  trustProxy: boolean,
+): string | undefined {
+  if (trustProxy) {
+    const fwd = firstForwarded(headers["x-forwarded-for"]);
+    if (fwd) return fwd;
+  }
+  return incoming.socket?.remoteAddress ?? undefined;
+}
+
+/**
+ * Stop accepting new connections and drain in-flight requests, then force-close
+ * any that outlast the grace period. Wire this to SIGTERM/SIGINT in your entry
+ * point so a deploy/rollout doesn't sever an in-flight payment mid-settle:
+ *
+ *   const srv = createService(opts).server();
+ *   srv.listen(8080);
+ *   for (const sig of ["SIGTERM", "SIGINT"] as const) {
+ *     process.on(sig, () => void gracefulShutdown(srv).then(() => process.exit(0)));
+ *   }
+ */
+export function gracefulShutdown(
+  srv: ReturnType<typeof httpCreateServer>,
+  opts: { graceMs?: number } = {},
+): Promise<void> {
+  const graceMs = opts.graceMs ?? 10_000;
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    // Reject new connections; resolve once existing ones close.
+    srv.close(() => done());
+    // Free idle keep-alive sockets immediately so close() can complete.
+    srv.closeIdleConnections?.();
+    // Backstop: forcibly close anything still open after the grace window.
+    const timer = setTimeout(() => {
+      srv.closeAllConnections?.();
+      done();
+    }, graceMs);
+    timer.unref?.();
+  });
 }
