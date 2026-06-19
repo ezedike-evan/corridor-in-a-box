@@ -31,8 +31,13 @@ export interface ServiceOptions {
   apiKeys?: Set<string>;
   /** If set, requests are rate-limited per client (API key, else x-forwarded-for). */
   rateLimit?: RateLimitOptions;
+  /** Max request body size in bytes. Larger bodies are rejected with 413. Default 64 KiB. */
+  maxBodyBytes?: number;
   now?: () => number;
 }
+
+/** Default cap on a buffered request body. A payment intent is well under 1 KiB. */
+const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
 
 export interface RouteResponse {
   status: number;
@@ -184,11 +189,42 @@ export function createService(options: ServiceOptions): Service {
     return { status: 404, body: { error: "not found" } };
   }
 
+  const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+
   function server() {
     return httpCreateServer((incoming: IncomingMessage, res: ServerResponse) => {
+      const sendJson = (status: number, body: unknown) => {
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(body));
+      };
+
+      // Reject oversized bodies up front when the client declares Content-Length,
+      // before reading a single byte.
+      const declared = Number(incoming.headers["content-length"]);
+      if (Number.isFinite(declared) && declared > maxBodyBytes) {
+        sendJson(413, { error: "payload too large" });
+        incoming.destroy();
+        return;
+      }
+
       const chunks: Buffer[] = [];
-      incoming.on("data", (c: Buffer) => chunks.push(c));
+      let size = 0;
+      let aborted = false;
+      incoming.on("data", (c: Buffer) => {
+        if (aborted) return;
+        size += c.length;
+        // Guard against a lying/absent Content-Length: cap the actual bytes read
+        // so a stream can't exhaust memory.
+        if (size > maxBodyBytes) {
+          aborted = true;
+          sendJson(413, { error: "payload too large" });
+          incoming.destroy();
+          return;
+        }
+        chunks.push(c);
+      });
       incoming.on("end", async () => {
+        if (aborted) return;
         let body: unknown;
         const raw = Buffer.concat(chunks).toString("utf8");
         if (raw) {
