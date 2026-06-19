@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in the engine, adapter, service, or CLI behaves incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For **security vulnerabilities** (double-settlement,
+        idempotency bypass, key exposure, …) do **not** open a public issue — see
+        [SECURITY.md](../blob/main/SECURITY.md).
+  - type: input
+    id: package
+    attributes:
+      label: Affected package
+      description: e.g. "@corridor/engine", "@corridor/sep31", "@corridor/service", CLI…
+      placeholder: "@corridor/engine"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        A failing test or a minimal `*.corridor.yaml` is ideal. Include the exact
+        commands you ran.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Node version, pnpm version, OS, and the package version / commit SHA.
+      placeholder: |
+        node: 22.x
+        pnpm: 9.x
+        commit: abc1234
+    validations:
+      required: true
