@@ -9,9 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Version comes from package.json "packageManager" (pnpm@9.x); do not also
+      # pass `version:` here or action-setup errors on the duplicate.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -31,9 +31,8 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
+      # Version resolves from the root package.json "packageManager" field.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 22
