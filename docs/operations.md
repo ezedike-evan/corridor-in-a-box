@@ -105,10 +105,21 @@ future schema change ships as an additive migration with a CHANGELOG entry.
 ## 5. Scaling notes (before multi-replica)
 
 - The service's **rate limiter and in-memory idempotency store are per-process**.
-  Before running more than one replica, back idempotency with
-  `PostgresIdempotencyStore` (shared) and move rate limiting to a shared store
-  (e.g. Redis). The `IdempotencyStore` interface is the seam.
+  Before running more than one replica:
+  - Back idempotency with `PostgresIdempotencyStore` (shared). Its atomic
+    `create()` claim + version-guarded `put()` make the double-settlement gate
+    correct across replicas — the `IdempotencyStore` interface is the seam.
+  - Inject a shared rate limiter via `ServiceOptions.rateLimiter` (the
+    `RateLimiter` interface; `take()` may be async). The default `TokenBucket`
+    is per-process; a Redis token bucket (a small `EVAL` Lua script doing
+    refill-then-decrement against a per-client key) enforces the limit fleet-wide.
+    Without it, each replica grants the full bucket independently.
 - Set `maxBodyBytes` on the service for your payload size (default 64 KiB).
+- Enable `trustProxy` **only** behind an ingress that sets `X-Forwarded-For` and
+  strips any client-supplied value; otherwise leave it off so the socket peer
+  address (which a client cannot forge) keys the limiter.
+- Wire `gracefulShutdown(server)` to `SIGTERM`/`SIGINT` so a rollout drains
+  in-flight payments instead of severing one mid-settle.
 - Terminate TLS at your ingress; the built-in `node:http` server speaks plain HTTP.
 
 ## 6. Versioning & releases
@@ -122,3 +133,36 @@ future schema change ships as an additive migration with a CHANGELOG entry.
   tag is the source of truth for the changelog compare links.
 - Only the latest `main` is supported; fixes are not backported (see
   [SECURITY.md](../SECURITY.md)).
+
+## 7. Metrics & alerting
+
+The engine emits counters/timings to an injected `Metrics` sink and one
+`corridor.terminal{state=…}` counter on every terminal transition. To scrape
+them with no client library, pass a `PrometheusMetrics` to BOTH the engine and
+the service:
+
+```ts
+import { PrometheusMetrics } from "@corridor/engine";
+const metrics = new PrometheusMetrics();
+const service = createService({
+  corridors,
+  deps: { ...deps, metrics },
+  metricsText: () => metrics.render(), // GET /metrics (public, unmetered)
+});
+```
+
+Point Prometheus at `/metrics`. The two alerts that matter both key off the
+terminal counter — they catch money that stopped needing a human (see §2):
+
+```yaml
+# Funds may be parked with the anchor; on-chain reversal isn't possible.
+- alert: CorridorPaymentsHeld
+  expr: increase(corridor_terminal{state="held"}[15m]) > 0
+# A payment failed terminally (before or after settle).
+- alert: CorridorPaymentsFailed
+  expr: increase(corridor_terminal{state="failed"}[15m]) > 0
+```
+
+Useful companion series: `corridor_transition{to=…}` (throughput per state),
+`corridor_verb_<verb>_ms_*` (per-verb latency summary), and `corridor_duration_ms_*`
+(end-to-end). Treat a rising `held`/`failed` rate as the page-worthy signal.

@@ -203,6 +203,23 @@ describe("service: auth + rate limiting + health", () => {
     expect(r.status).toBe(200);
   });
 
+  it("serves /metrics as text when a renderer is configured, public + unmetered", async () => {
+    const s = svc({
+      apiKeys: new Set(["secret"]),
+      rateLimit: { capacity: 0, refillPerSec: 0 }, // would 429 everything if metered
+      metricsText: () => "# TYPE corridor_transition counter\ncorridor_transition 3\n",
+    });
+    const r = await s.route({ method: "GET", path: "/metrics" });
+    expect(r.status).toBe(200);
+    expect(r.contentType).toContain("text/plain");
+    expect(r.body).toContain("corridor_transition 3");
+  });
+
+  it("404s /metrics when no renderer is configured", async () => {
+    const r = await svc().route({ method: "GET", path: "/metrics" });
+    expect(r.status).toBe(404);
+  });
+
   it("rejects requests without a valid API key", async () => {
     const s = svc({ apiKeys: new Set(["secret"]) });
     const noKey = await s.route({ method: "POST", path: "/payments", body: intentBody() });
@@ -230,5 +247,43 @@ describe("service: auth + rate limiting + health", () => {
     expect((await hit()).status).toBe(429); // drained
     t += 100; // no refill configured
     expect((await hit()).status).toBe(429);
+  });
+
+  it("keys the rate limiter per resolved client IP", async () => {
+    const s = svc({ rateLimit: { capacity: 1, refillPerSec: 0 } });
+    const hit = (clientIp: string) =>
+      s.route({ method: "GET", path: "/payments/x", clientIp });
+    expect((await hit("10.0.0.1")).status).toBe(404); // client A's only token
+    expect((await hit("10.0.0.1")).status).toBe(429); // A drained
+    expect((await hit("10.0.0.2")).status).toBe(404); // B has its own bucket
+  });
+
+  it("does not let a forged X-Forwarded-For mint fresh buckets", async () => {
+    // Without trustProxy the raw header is ignored for keying, so spoofing it
+    // can't dodge the limit — all such requests share the 'anon' bucket.
+    const s = svc({ rateLimit: { capacity: 1, refillPerSec: 0 } });
+    const hit = (xff: string) =>
+      s.route({ method: "GET", path: "/payments/x", headers: { "x-forwarded-for": xff } });
+    expect((await hit("9.9.9.1")).status).toBe(404);
+    expect((await hit("9.9.9.2")).status).toBe(429); // different forged IP, still limited
+  });
+
+  it("uses an injected (async, shared-style) limiter over the default", async () => {
+    const seen: string[] = [];
+    let allow = true;
+    const s = svc({
+      // The shape a Redis-backed limiter would have: async take().
+      rateLimiter: {
+        async take(key: string) {
+          seen.push(key);
+          return allow;
+        },
+      },
+    });
+    const hit = () => s.route({ method: "GET", path: "/payments/x", clientIp: "5.5.5.5" });
+    expect((await hit()).status).toBe(404);
+    allow = false;
+    expect((await hit()).status).toBe(429);
+    expect(seen).toEqual(["ip:5.5.5.5", "ip:5.5.5.5"]);
   });
 });

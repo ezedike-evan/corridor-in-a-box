@@ -26,7 +26,16 @@ pnpm build
 ## How it talks to the engine
 
 By default the **Run a payment** page calls a local API route
-(`app/api/payments/route.ts`) that drives a faithful simulation of
+(`app/api/payments/route.ts`) that drives a **demo-only** simulation of
 `@corridor/engine` (`lib/engine-sim.ts`) — same state machine and idempotency
-rules. To drive the real engine, run `@corridor/service` and point the route at
-it (`CORRIDOR_SERVICE_URL`).
+rules, but a re-implementation that can drift, so it is not a source of truth.
+
+To drive the **real** engine, run `@corridor/service` and set:
+
+```bash
+CORRIDOR_SERVICE_URL=http://localhost:8080      # the route proxies POST /payments here
+CORRIDOR_SERVICE_API_KEY=…                        # optional; if the service requires Bearer auth
+```
+
+When `CORRIDOR_SERVICE_URL` is set the route forwards to the real service and
+relays its response (and the simulation is bypassed entirely).

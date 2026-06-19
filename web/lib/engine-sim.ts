@@ -1,7 +1,8 @@
-// A faithful simulation of @corridor/engine's execute() for the demo. It walks
-// the same state machine and idempotency rules so the UI shows real behaviour
-// without bundling the engine. Point NEXT_PUBLIC at a running @corridor/service
-// to drive the real thing instead.
+// DEMO-ONLY simulation of @corridor/engine's execute(). It walks the same state
+// machine and idempotency rules so the showcase runs with zero backend — but it
+// is a re-implementation and CAN drift from the real engine. It is NOT a source
+// of truth: for anything load-bearing, set CORRIDOR_SERVICE_URL so the API route
+// (app/api/payments/route.ts) proxies to a real @corridor/service instead.
 
 import { getCorridor, liveness } from "./corridors";
 

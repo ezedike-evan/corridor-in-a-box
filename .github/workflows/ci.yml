@@ -21,6 +21,37 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
 
+  # Exercises PostgresIdempotencyStore against a real Postgres (the atomic claim
+  # + version-guarded upsert that guard against double-settlement). The test is
+  # env-gated, so it only runs when CORRIDOR_TEST_DATABASE_URL points at the
+  # service container below; the default `pnpm test` job above skips it.
+  integration-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pg
+          POSTGRES_DB: corridor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CORRIDOR_TEST_DATABASE_URL: postgres://postgres:pg@localhost:5432/corridor_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run tests/integration/idempotency-pg.test.ts
+
   # The web/ showcase app is a standalone Next.js project with its own lockfile
   # (intentionally outside the pnpm workspace, see web/README.md), so it gets its
   # own job rather than riding the monorepo gate above.

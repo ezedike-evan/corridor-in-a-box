@@ -5,6 +5,7 @@ import { StaticRouteResolver } from "@corridor/router";
 import {
   InMemoryIdempotencyStore,
   InMemoryMetrics,
+  PrometheusMetrics,
   createMockSubmitter,
   execute,
   type EngineDeps,
@@ -74,5 +75,40 @@ describe("metrics", () => {
     expect(r.ok).toBe(false);
     const terminal = m.counters.find((c) => c.name === "corridor.terminal");
     expect(terminal?.tags?.state).toBe("failed");
+  });
+});
+
+describe("PrometheusMetrics", () => {
+  it("renders counters and timings in exposition format, with sanitized names", async () => {
+    const m = new PrometheusMetrics();
+    const r = await execute(intent, corridor(), deps(m as unknown as InMemoryMetrics));
+    expect(r.ok).toBe(true);
+    const text = m.render();
+
+    // Dots become underscores; tags become labels.
+    expect(text).toContain("# TYPE corridor_transition counter");
+    expect(text).toMatch(/corridor_transition\{[^}]*to="completed"[^}]*\} 1/);
+    expect(text).toContain('corridor_terminal{corridor="test",state="completed"} 1');
+    // Timings render as a summary (_count + _sum).
+    expect(text).toContain("# TYPE corridor_verb_quote_ms summary");
+    expect(text).toMatch(/corridor_verb_quote_ms_count\{corridor="test"\} 1/);
+  });
+
+  it("aggregates repeated samples into one series", () => {
+    const m = new PrometheusMetrics();
+    m.increment("corridor.transition", { to: "settled" });
+    m.increment("corridor.transition", { to: "settled" });
+    m.timing("corridor.verb.settle", 10, { corridor: "x" });
+    m.timing("corridor.verb.settle", 30, { corridor: "x" });
+    const text = m.render();
+    expect(text).toContain('corridor_transition{to="settled"} 2');
+    expect(text).toContain('corridor_verb_settle_ms_count{corridor="x"} 2');
+    expect(text).toContain('corridor_verb_settle_ms_sum{corridor="x"} 40');
+  });
+
+  it("escapes label values", () => {
+    const m = new PrometheusMetrics();
+    m.increment("e", { msg: 'a"b\\c' });
+    expect(m.render()).toContain('e{msg="a\\"b\\\\c"} 1');
   });
 });

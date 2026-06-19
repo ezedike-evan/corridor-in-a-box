@@ -1,5 +1,9 @@
 # corridor-in-a-box
 
+[![CI](https://github.com/ezedike-evan/corridor-in-a-box/actions/workflows/ci.yml/badge.svg)](https://github.com/ezedike-evan/corridor-in-a-box/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](./.nvmrc)
+
 An open, **manifest-driven engine for Stellar SEP-31 cross-border corridors**. A
 corridor is _configuration, not code_: the engine runs `quote → comply → settle →
 reconcile → recover` over any standards-compliant anchor pair, and adding a new

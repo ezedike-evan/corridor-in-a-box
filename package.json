@@ -23,22 +23,26 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "cli": "tsx packages/cli/src/index.ts",
-    "example": "tsx examples/run-payment.ts"
+    "example": "tsx examples/run-payment.ts",
+    "testnet": "tsx examples/run-testnet.ts"
   },
   "dependencies": {
-    "@corridor/types": "workspace:*",
-    "@corridor/manifest": "workspace:*",
     "@corridor/adapter-kit": "workspace:*",
-    "@corridor/sep31": "workspace:*",
+    "@corridor/engine": "workspace:*",
+    "@corridor/manifest": "workspace:*",
     "@corridor/router": "workspace:*",
-    "@corridor/engine": "workspace:*"
+    "@corridor/sep31": "workspace:*",
+    "@corridor/stellar": "workspace:*",
+    "@corridor/types": "workspace:*"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@stellar/stellar-sdk": "^13.0.0",
     "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.0",
     "eslint": "^9.17.0",
     "eslint-config-prettier": "^9.1.0",
+    "pg": "^8.13.0",
     "prettier": "^3.4.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
