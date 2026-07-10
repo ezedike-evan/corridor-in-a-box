@@ -17,6 +17,9 @@
     "url": "https://github.com/ezedike-evan/corridor-in-a-box/issues"
   },
   "homepage": "https://github.com/ezedike-evan/corridor-in-a-box#readme",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
@@ -24,7 +27,8 @@
     "format": "prettier --write .",
     "cli": "tsx packages/cli/src/index.ts",
     "example": "tsx examples/run-payment.ts",
-    "testnet": "tsx examples/run-testnet.ts"
+    "testnet": "tsx examples/run-testnet.ts",
+    "serve": "tsx examples/run-service.ts"
   },
   "dependencies": {
     "@corridor/adapter-kit": "workspace:*",
@@ -32,6 +36,7 @@
     "@corridor/manifest": "workspace:*",
     "@corridor/router": "workspace:*",
     "@corridor/sep31": "workspace:*",
+    "@corridor/service": "workspace:*",
     "@corridor/stellar": "workspace:*",
     "@corridor/types": "workspace:*"
   },
