@@ -39,6 +39,28 @@ CONFLICT DO NOTHING` in Postgres) implemented by both stores, plus regression
 - The `web/` API route now proxies to a real `@corridor/service` when
   `CORRIDOR_SERVICE_URL` is set; the in-repo simulation is fenced as demo-only.
 - README status badges (CI, license, Node).
+- One-command service runner (`pnpm serve` → `examples/run-service.ts`) wiring
+  the real adapter/submitter/store behind `createService().server().listen()`
+  — previously the service was importable but nothing ever started it. Serves
+  every corridor manifest in `corridors/`, skipping `network: public` lanes
+  unless `CORRIDOR_ALLOW_MAINNET=1`.
+- An on-page "build-time snapshot, not a live liveness feed" label on the web
+  dashboard's Corridors section — the underlying data was already disclosed in
+  a code comment, now it's visible on the page itself.
+- Dedicated unit tests for `@corridor/cli`, `@corridor/router`, and
+  `@corridor/adapter-kit` — previously exercised only incidentally through
+  other packages' tests; `conformanceSuite` had no coverage that actually ran
+  in CI.
+- `.github/CODEOWNERS`, `.github/dependabot.yml` (npm + github-actions,
+  weekly), and a `feature_request.yml` issue template.
+- `"engines": {"node": ">=22"}` in every package.json (root, `web/`, and all
+  workspace packages), matching `.nvmrc` and the README's Node badge.
+- SHA-pinned the GitHub Actions used in CI (previously floating `@v4` tags),
+  plus new `codeql.yml` and `dependency-review.yml` workflows.
+- `nightly-live-anchor.yml`: re-runs the opt-in live-anchor integration test
+  on a schedule; inert until anchor secrets are configured.
+- `docs/grant-proposal.md`: SCF Tier-2 draft with milestones mapped to
+  ROADMAP.md/MAINTAINER.md; budget figures left as explicit placeholders.
 
 ### Fixed
 
