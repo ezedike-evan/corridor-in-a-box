@@ -1,0 +1,31 @@
+# Re-runs the opt-in live-anchor probe (tests/integration/sep31-live.test.ts)
+# nightly so the "verified against a real anchor" claim is continuously
+# checked, not a one-off capture. Safe to ship before any anchor is
+# configured: the test self-skips (describe.skipIf) when the ANCHOR_* secrets
+# below are unset, so this job goes green-but-skipped until repo secrets are
+# added — no code change needed when that day comes.
+name: nightly-live-anchor
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run tests/integration/sep31-live.test.ts
+        env:
+          ANCHOR_HOME_DOMAIN: ${{ secrets.ANCHOR_HOME_DOMAIN }}
+          ANCHOR_SEP31_TRANSFER_SERVER: ${{ secrets.ANCHOR_SEP31_TRANSFER_SERVER }}
+          ANCHOR_SEP31_QUOTE_SERVER: ${{ secrets.ANCHOR_SEP31_QUOTE_SERVER }}
+          ANCHOR_SEP31_WEB_AUTH: ${{ secrets.ANCHOR_SEP31_WEB_AUTH }}
+          ANCHOR_SEP31_KYC_SERVER: ${{ secrets.ANCHOR_SEP31_KYC_SERVER }}
+          CORRIDOR_SIGNER_SECRET: ${{ secrets.CORRIDOR_SIGNER_SECRET }}
