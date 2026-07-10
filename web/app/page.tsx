@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowRight, Boxes, ShieldCheck, Repeat, Activity } from "lucide-react";
+import { ArrowRight, Boxes, ShieldCheck, Repeat, Activity, Info } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { CorridorCard } from "@/components/CorridorCard";
 import { corridors } from "@/lib/corridors";
@@ -65,6 +65,9 @@ export default function Home() {
               not code.
             </p>
           </div>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg-subtle px-3 py-1 text-xs font-medium text-secondary-text">
+            <Info size={13} className="text-blue-600" /> Build-time snapshot, not a live liveness feed
+          </span>
         </div>
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {corridors.map((c) => (
