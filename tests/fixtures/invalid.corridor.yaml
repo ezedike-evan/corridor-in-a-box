@@ -1,0 +1,17 @@
+# Deliberately invalid: no `source` anchor. Exercises the CLI's MANIFEST_INVALID path.
+id: invalid-fixture
+dest:
+  name: D
+  asset: "iso4217:USD"
+  endpoints:
+    home_domain: d.example
+fx:
+  path: ["USD", "USDC"]
+  who_holds_risk: receiving_anchor
+compliance:
+  source_jurisdiction: US
+  dest_jurisdiction: US
+settlement:
+  network: testnet
+  asset_issuer: GISSUER
+recovery: {}
