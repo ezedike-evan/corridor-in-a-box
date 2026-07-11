@@ -61,9 +61,19 @@ CONFLICT DO NOTHING` in Postgres) implemented by both stores, plus regression
   on a schedule; inert until anchor secrets are configured.
 - `docs/grant-proposal.md`: SCF Tier-2 draft with milestones mapped to
   ROADMAP.md/MAINTAINER.md; budget figures left as explicit placeholders.
+- `@corridor/cli` is now npm-publish-ready: a `tsup` build step bundles it to
+  a single `dist/index.js` (inlining `@corridor/manifest`/`@corridor/types`;
+  `zod`/`yaml` stay real external dependencies), plus `bin`/`files`/
+  `exports`/`description`/`license`/`repository`/`publishConfig`. Verified
+  by installing the actual packed tarball into a scratch project and running
+  the resulting `corridor` bin. The other 8 packages are unpublished still.
 
 ### Fixed
 
+- `.env.example` documented `CORRIDOR_HORIZON_URL`, which nothing in the
+  codebase reads — the real scripts read `HORIZON_URL`. Renamed, and added
+  the previously-undocumented `MANIFEST`, `CORRIDOR_ALLOW_MAINNET`, and
+  `CORRIDORS_DIR` variables.
 - **Concurrent double-settlement window in the idempotency gate.** `execute()`
   previously gated on `get()` alone, so two callers racing the same
   `idempotencyKey` could both pass the check and both settle on-chain (the
