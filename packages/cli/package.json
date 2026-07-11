@@ -1,16 +1,43 @@
 {
   "name": "@corridor/cli",
   "version": "0.1.0",
-  "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
+  "description": "Validate a corridor manifest and print an offline runnability plan.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ezedike-evan/corridor-in-a-box.git",
+    "directory": "packages/cli"
   },
-  "main": "./src/index.ts",
+  "bugs": {
+    "url": "https://github.com/ezedike-evan/corridor-in-a-box/issues"
+  },
+  "homepage": "https://github.com/ezedike-evan/corridor-in-a-box#readme",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "corridor": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup"
+  },
   "dependencies": {
-    "@corridor/types": "workspace:*",
+    "zod": "^3.23.0",
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
     "@corridor/manifest": "workspace:*",
-    "@corridor/adapter-kit": "workspace:*",
-    "@corridor/router": "workspace:*",
-    "@corridor/engine": "workspace:*"
+    "tsup": "^8.3.0"
   }
 }

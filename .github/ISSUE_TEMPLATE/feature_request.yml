@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a new capability in the engine, adapter-kit, service, or CLI.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before requesting an engine change, check whether this is actually a new
+        **corridor** (a `*.corridor.yaml` file) — see the "New corridor" template
+        instead. A corridor is configuration, not code.
+  - type: input
+    id: package
+    attributes:
+      label: Affected package
+      description: e.g. "@corridor/engine", "@corridor/sep31", "@corridor/service", CLI, web…
+      placeholder: "@corridor/engine"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What can't you do today? Who is blocked?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

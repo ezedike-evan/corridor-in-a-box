@@ -30,6 +30,12 @@ system. Items marked ✅ are done.
   [docs/key-management.md](./docs/key-management.md).
 - ✅ A thin service/API layer (`@corridor/service`: HTTP over the engine, with
   API-key auth and rate limiting).
+- ✅ A runnable launcher for `@corridor/service` (`pnpm serve` →
+  `examples/run-service.ts`), serving every corridor manifest with the same
+  mainnet safety guard as `pnpm testnet`.
+- ✅ Nightly CI job re-running the live-anchor probe
+  (`tests/integration/sep31-live.test.ts`), inert until anchor secrets are
+  configured.
 
 ## Phase 4 — Corridors
 
@@ -37,5 +43,16 @@ system. Items marked ✅ are done.
   (`mx-bitso.corridor.yaml`).
 - ⬜ Additional real corridors as off-ramps come online.
 - ⬜ `ng-cn` becomes runnable the day a compliant RMB SEP-31 off-ramp exists.
+
+## Phase 5 — Grant-maturity / protocol depth (after wave entry)
+
+- ⬜ Demonstrate all four SEP flows (SEP-10, SEP-12, SEP-31, SEP-38) against a
+  live anchor, with tests.
+- ⬜ SCF Tier-2 grant proposal — structure and milestones drafted in
+  [docs/grant-proposal.md](./docs/grant-proposal.md); budget figures and
+  submission still pending maintainer input.
+- ⬜ Corridor #1 live: fill `mx-bitso.corridor.yaml` endpoints from the real
+  `stellar.toml` (blocked — needs a verified live anchor domain, not a code
+  change).
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for good first issues.
