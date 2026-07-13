@@ -67,8 +67,27 @@ CONFLICT DO NOTHING` in Postgres) implemented by both stores, plus regression
   `exports`/`description`/`license`/`repository`/`publishConfig`. Verified
   by installing the actual packed tarball into a scratch project and running
   the resulting `corridor` bin. The other 8 packages are unpublished still.
+- `release.yml`: tag-triggered (`cli-vX.Y.Z`) npm publish workflow for
+  `@corridor/cli` — full test suite, bundle build, a smoke run of the built
+  bin, a tag↔package-version check, then `npm publish --provenance`. Needs
+  one repo secret (`NPM_TOKEN`).
+- The live-anchor suite (and the nightly workflow) now honours
+  `ANCHOR_ASSET_ISSUER` / `ANCHOR_DEST_ASSET`, and `.env.example` + README
+  document verified known-good values for the public SDF test anchor
+  (`testanchor.stellar.org`) — the read-only probe runs against a real anchor
+  with no self-hosted infrastructure.
 
 ### Fixed
+
+- **The SEP-38 quote request was spec-invalid and every live anchor rejected
+  it.** The adapter sent `sell_asset: stellar:USDC` (no issuer — the anchor
+  answers 404 `sell_asset not found`) and omitted the required `context`
+  field (400 `Unsupported context`). Found by running the opt-in live suite
+  against the SDF test anchor; mocks never caught it. `requestQuote` now
+  sends `context: "sep31"` and the SEP-38 Asset Identification Format
+  (`stellar:CODE:ISSUER`, or `stellar:native` when the bridge asset is XLM),
+  with regression tests pinning the exact body. First live-verified firm
+  quote followed immediately.
 
 - `.env.example` documented `CORRIDOR_HORIZON_URL`, which nothing in the
   codebase reads — the real scripts read `HORIZON_URL`. Renamed, and added

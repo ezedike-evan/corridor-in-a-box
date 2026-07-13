@@ -40,10 +40,11 @@ function liveCorridor(): Corridor {
   const r = parseCorridor({
     id: "integration-live",
     source: { name: "Source", asset: "USDC", endpoints: { home_domain: "source.local" } },
-    dest: { name: homeDomain, asset: env.ANCHOR_DEST_ASSET ?? "iso4217:USD", endpoints },
+    // `||` not `??`: CI passes unset secrets through as empty strings.
+    dest: { name: homeDomain, asset: env.ANCHOR_DEST_ASSET || "iso4217:USD", endpoints },
     fx: { path: ["USDC", "USDC"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "US", dest_jurisdiction: "US" },
-    settlement: { network: "testnet", asset_issuer: env.ANCHOR_ASSET_ISSUER ?? "GTEST" },
+    settlement: { network: "testnet", asset_issuer: env.ANCHOR_ASSET_ISSUER || "GTEST" },
     recovery: {},
   });
   if (!r.ok) throw new Error(`invalid live corridor fixture: ${r.error.message}`);
@@ -60,8 +61,8 @@ const intent: PaymentIntent = {
   idempotencyKey: `integration-${Date.now()}`,
   corridorId: "integration-live",
   sender: { id: "integration-sender" },
-  recipient: { id: env.ANCHOR_RECIPIENT_ID ?? "integration-recipient" },
-  sourceAmount: { asset: "USDC", amount: env.ANCHOR_AMOUNT ?? "10" },
+  recipient: { id: env.ANCHOR_RECIPIENT_ID || "integration-recipient" },
+  sourceAmount: { asset: "USDC", amount: env.ANCHOR_AMOUNT || "10" },
 };
 
 describe.skipIf(!hasAnchor)("SEP-31 live anchor (read-only)", () => {
