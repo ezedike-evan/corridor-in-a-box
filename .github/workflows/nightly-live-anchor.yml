@@ -23,9 +23,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec vitest run tests/integration/sep31-live.test.ts
         env:
+          # Known-good public values for every var here (SDF test anchor) are
+          # documented in .env.example; only CORRIDOR_SIGNER_SECRET is sensitive.
           ANCHOR_HOME_DOMAIN: ${{ secrets.ANCHOR_HOME_DOMAIN }}
           ANCHOR_SEP31_TRANSFER_SERVER: ${{ secrets.ANCHOR_SEP31_TRANSFER_SERVER }}
           ANCHOR_SEP31_QUOTE_SERVER: ${{ secrets.ANCHOR_SEP31_QUOTE_SERVER }}
           ANCHOR_SEP31_WEB_AUTH: ${{ secrets.ANCHOR_SEP31_WEB_AUTH }}
           ANCHOR_SEP31_KYC_SERVER: ${{ secrets.ANCHOR_SEP31_KYC_SERVER }}
+          ANCHOR_ASSET_ISSUER: ${{ secrets.ANCHOR_ASSET_ISSUER }}
+          ANCHOR_DEST_ASSET: ${{ secrets.ANCHOR_DEST_ASSET }}
           CORRIDOR_SIGNER_SECRET: ${{ secrets.CORRIDOR_SIGNER_SECRET }}
