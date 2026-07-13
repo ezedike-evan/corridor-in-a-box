@@ -14,9 +14,17 @@ running migrations, and the project's versioning/release policy.
 This is the one open Phase-1 item: a real `open → settle → reconcile` against a
 live SEP-31 server, captured in the README.
 
-1. **Pick the anchor.** The Anchor Platform SEP-31 reference server on testnet
-   (corridor #0) needs no agreements. Read its `stellar.toml` for the
-   `DIRECT_PAYMENT_SERVER`, `WEB_AUTH_ENDPOINT`, `KYC_SERVER`, `QUOTE_SERVER`.
+1. **Pick the anchor.** Two zero-agreement options:
+   - **SDF test anchor** (`testanchor.stellar.org`) — public, always up, no
+     self-hosting. Its endpoints are documented as known-good values in
+     [`.env.example`](../.env.example) (read-only suite verified green
+     2026-07-12). Check its `/sep31/info` first: an empty `receive` list means
+     quotes/auth/KYC work but a money-moving transaction cannot be opened there
+     that day.
+   - **Self-hosted Anchor Platform reference server** (Docker) — full control
+     of the receive side; required if the public anchor exposes no receivable
+     asset. Read its `stellar.toml` for the `DIRECT_PAYMENT_SERVER`,
+     `WEB_AUTH_ENDPOINT`, `KYC_SERVER`, `QUOTE_SERVER`.
 2. **Fund a testnet distribution account** (Friendbot) and trustline the bridge
    asset. Keep the secret in `CORRIDOR_SIGNER_SECRET` (testnet only).
 3. **Smoke-test read-only first** with the opt-in integration suite (see

@@ -120,25 +120,38 @@ proprietary `RouteResolver` is the one piece injected from the private repo.
 ## Verifying against a real anchor
 
 The default `pnpm test` runs entirely against mocks. An **opt-in** integration
-test exercises the adapter against a live SEP-31 server (e.g. the Anchor Platform
-reference server on testnet). It is read-only — SEP-10 auth, the SEP-38 quote, and
-the conformance probes; it does **not** move funds — and is skipped unless the
-anchor env vars are set (see [`.env.example`](./.env.example)):
+test exercises the adapter against a live SEP-31 server. It is read-only —
+SEP-10 auth, a firm SEP-38 quote, and the conformance probes; it does **not**
+move funds — and is skipped unless the anchor env vars are set (see
+[`.env.example`](./.env.example)).
+
+The command below runs it against the **SDF test anchor** (public, testnet, no
+self-hosting needed) — last verified green 2026-07-12: real SEP-10
+challenge/response, a firm quote with a future expiry, and a SEP-12 status
+probe. Any [friendbot](https://friendbot.stellar.org)-funded testnet key works
+as the signer.
 
 ```bash
-ANCHOR_HOME_DOMAIN=anchor.example \
-ANCHOR_SEP31_TRANSFER_SERVER=https://anchor.example/sep31 \
-ANCHOR_SEP31_QUOTE_SERVER=https://anchor.example/sep38 \
-ANCHOR_SEP31_WEB_AUTH=https://anchor.example/auth \
+ANCHOR_HOME_DOMAIN=testanchor.stellar.org \
+ANCHOR_SEP31_TRANSFER_SERVER=https://testanchor.stellar.org/sep31 \
+ANCHOR_SEP31_QUOTE_SERVER=https://testanchor.stellar.org/sep38 \
+ANCHOR_SEP31_WEB_AUTH=https://testanchor.stellar.org/auth \
+ANCHOR_SEP31_KYC_SERVER=https://testanchor.stellar.org/sep12 \
+ANCHOR_ASSET_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 \
+ANCHOR_DEST_ASSET=iso4217:USD \
 CORRIDOR_SIGNER_SECRET=S...   # testnet only; enables SEP-10 auth
 pnpm exec vitest run tests/integration/sep31-live.test.ts
 ```
 
+The `nightly-live-anchor` workflow re-runs the same suite on a schedule once
+those values are configured as repo secrets, so the claim stays continuously
+verified rather than a one-off capture.
+
 The full money-moving end-to-end capture (open → settle → reconcile against a
 testnet anchor) is a manual step — the procedure is in
 [docs/operations.md](./docs/operations.md). This is the one Phase-1 roadmap item
-still open: until that trail is captured here, treat every settlement path as
-verified against mocks only.
+still open: until that trail is captured here, treat the **settle leg** as
+verified against mocks only (the auth/quote/KYC legs above are live-verified).
 
 ## License
 
