@@ -23,11 +23,21 @@ function res(body: unknown, ok = true, status = 200): FakeResponse {
 
 // Minimal router-style fetch fake. Keyed on `${METHOD} ${substring}`.
 function fakeFetch(routes: Record<string, FakeResponse>) {
-  const calls: { url: string; method: string; headers: Record<string, string> }[] = [];
+  const calls: {
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+    body?: unknown;
+  }[] = [];
   const fn = (async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const method = (init?.method ?? "GET").toUpperCase();
-    calls.push({ url, method, headers: (init?.headers as Record<string, string>) ?? {} });
+    calls.push({
+      url,
+      method,
+      headers: (init?.headers as Record<string, string>) ?? {},
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+    });
     const key = Object.keys(routes).find((k) => {
       const [m, sub] = k.split(" ");
       return m === method && url.includes(sub);
@@ -42,7 +52,10 @@ function fakeFetch(routes: Record<string, FakeResponse>) {
   return { fn, calls };
 }
 
-function corridor(endpoints: Record<string, string>): Corridor {
+function corridor(
+  endpoints: Record<string, string>,
+  settlement: Record<string, string> = {},
+): Corridor {
   const r = parseCorridor({
     id: "test",
     source: { name: "S", asset: "USDC", endpoints: { home_domain: "s.example" } },
@@ -53,7 +66,7 @@ function corridor(endpoints: Record<string, string>): Corridor {
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
-    settlement: { network: "public", asset_issuer: "GISSUER" },
+    settlement: { network: "public", asset_issuer: "GISSUER", ...settlement },
     recovery: {},
   });
   if (!r.ok) throw new Error("fixture invalid");
@@ -125,6 +138,51 @@ describe("SEP-10 auth", () => {
     const q = await adapter.requestQuote(intent, c);
     expect(q.ok).toBe(true);
     expect(calls.every((x) => !x.url.includes("/auth"))).toBe(true);
+  });
+});
+
+describe("SEP-38 quote request shape", () => {
+  const quoteRoute = {
+    "POST /sep38/quote": res({
+      id: "q1",
+      price: "1.0",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      sell_amount: "100",
+      buy_amount: "100",
+    }),
+  };
+  const endpoints = {
+    transfer_server_sep31: "https://d.example/sep31",
+    quote_server: "https://d.example/sep38",
+  };
+
+  // Live anchors reject issuer-less asset ids and quotes without a context —
+  // this pins the exact body SEP-38 requires.
+  it("sends context=sep31 and an issuer-qualified sell_asset", async () => {
+    const { fn, calls } = fakeFetch(quoteRoute);
+    const c = corridor(endpoints);
+    const q = await new Sep31Adapter(c, { fetchImpl: fn }).requestQuote(intent, c);
+    expect(q.ok).toBe(true);
+    const body = calls.find((x) => x.url.includes("/sep38/quote"))?.body as Record<
+      string,
+      string
+    >;
+    expect(body.context).toBe("sep31");
+    expect(body.sell_asset).toBe("stellar:USDC:GISSUER");
+    expect(body.buy_asset).toBe("iso4217:ARS");
+    expect(body.sell_amount).toBe("100");
+  });
+
+  it("sends stellar:native when the bridge asset is XLM", async () => {
+    const { fn, calls } = fakeFetch(quoteRoute);
+    const c = corridor(endpoints, { bridge_asset: "XLM" });
+    const q = await new Sep31Adapter(c, { fetchImpl: fn }).requestQuote(intent, c);
+    expect(q.ok).toBe(true);
+    const body = calls.find((x) => x.url.includes("/sep38/quote"))?.body as Record<
+      string,
+      string
+    >;
+    expect(body.sell_asset).toBe("stellar:native");
   });
 });
 

@@ -68,6 +68,18 @@ export function mapSep31Status(raw: string): {
   return { status, settled: false, terminalFailure: false };
 }
 
+/**
+ * SEP-38 Asset Identification Format for the corridor's bridge asset:
+ * `stellar:native` for XLM, `stellar:CODE:ISSUER` for everything else. Anchors
+ * reject issuer-less Stellar asset ids ("sell_asset not found").
+ */
+function sep38SellAsset(corridor: Corridor): string {
+  const code = corridor.settlement.bridge_asset;
+  return code.toUpperCase() === "XLM"
+    ? "stellar:native"
+    : `stellar:${code}:${corridor.settlement.asset_issuer}`;
+}
+
 /** Decode a JWT's `exp` claim (epoch ms) without verifying it. */
 function jwtExpiryMs(token: string): number | undefined {
   const payload = token.split(".")[1];
@@ -158,7 +170,9 @@ export class Sep31Adapter implements AnchorAdapter {
           ...(token ? { authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
-          sell_asset: `stellar:${corridor.settlement.bridge_asset}`,
+          // Required by SEP-38: the protocol the quote will be executed under.
+          context: "sep31",
+          sell_asset: sep38SellAsset(corridor),
           buy_asset: this.anchor.asset,
           sell_amount: intent.sourceAmount.amount,
         }),
