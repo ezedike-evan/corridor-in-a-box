@@ -77,6 +77,9 @@ CONFLICT DO NOTHING` in Postgres) implemented by both stores, plus regression
   (`testanchor.stellar.org`) — the read-only probe runs against a real anchor
   with no self-hosted infrastructure.
 
+- README links the live web dashboard (corridor-in-a-box.vercel.app), which
+  the Vercel GitHub integration deploys from `main`.
+
 ### Fixed
 
 - **The SEP-38 quote request was spec-invalid and every live anchor rejected

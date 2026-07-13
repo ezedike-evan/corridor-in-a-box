@@ -9,6 +9,10 @@ corridor is _configuration, not code_: the engine runs `quote → comply → set
 reconcile → recover` over any standards-compliant anchor pair, and adding a new
 corridor is a new `*.corridor.yaml` file — not a fork.
 
+**Live demo:** [corridor-in-a-box.vercel.app](https://corridor-in-a-box.vercel.app)
+— the corridor dashboard and a simulated payment walkthrough (corridor data is a
+build-time snapshot, labeled as such on the page).
+
 This repo is the **open half** of an open-core system. The proprietary half — the
 anchor health/conformance dataset and the route intelligence built on it — lives
 in a separate private repo and is injected at runtime through one interface
