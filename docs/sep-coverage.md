@@ -34,6 +34,25 @@ payment across two anchors** — exactly the SEP-31 topology:
 SEP-6/24 solve a different problem (one user, one anchor) and carry interactive
 state (SEP-24's webview) that doesn't belong in an unattended corridor runner.
 
+## What SEP-31 does not cover: refund initiation
+
+**Requesting a refund is out of scope for the generic adapter, because it is out
+of scope for the protocol.** SEP-31's endpoints are `GET /info`,
+`POST /transactions`, `GET /transactions/:id` and `PATCH /transactions/:id` —
+there is no sender-initiated refund call. A refund is something the _receiving_
+anchor decides to do on its own side, and it is only reported back to the sender
+through the `refunds` object on the transaction record: there is no request,
+only news.
+
+`Sep31Adapter.requestRefund()` therefore fails closed with a non-retryable
+`REFUND_UNSUPPORTED` and never touches the network; the engine escalates the
+run to `held` and the [operations runbook](./operations.md) takes over
+(out-of-band resolution with the anchor). Observing that a refund _happened_ is
+`getTransaction`'s job. An anchor that exposes a proprietary refund API is a
+bespoke integration: it implements `AnchorAdapter` itself and lives outside
+`packages/sep31`, keeping the generic adapter honest about what the standard
+actually guarantees.
+
 ## How the architecture would extend
 
 The boundary that makes this tractable is already in place: the engine knows only
