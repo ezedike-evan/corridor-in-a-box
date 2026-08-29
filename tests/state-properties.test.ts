@@ -20,6 +20,7 @@ const ALL: CorridorState[] = [
   "reconciled",
   "completed",
   "recovering",
+  "refund_pending",
   "refunded",
   "held",
   "failed",
@@ -115,6 +116,20 @@ describe("state machine structure", () => {
     );
   });
 
+  it("no path from refund_pending leads back into settling", () => {
+    // refund_pending is entered after money has left, exactly like
+    // recovering. The same rule applies with no exceptions: a path back to
+    // settling would re-submit a payment that already went out, so it must
+    // be unreachable by construction in the table — checked over ALL paths,
+    // not just direct edges, because that is how the settled -> recovering ->
+    // settling double-spend slipped past the direct check historically.
+    const reachable = reachableFrom("refund_pending");
+    expect(
+      reachable.has("settling"),
+      "refund_pending can re-enter settling via some path",
+    ).toBe(false);
+  });
+
   it("no path from reconciled or completed leads back into settling", () => {
     for (const s of ["reconciled", "completed"] as CorridorState[]) {
       expect(reachableFrom(s).has("settling"), `${s} can re-enter settling`).toBe(false);
@@ -141,11 +156,29 @@ describe("state machine structure", () => {
     expect(entrances).toEqual(["reconciled"]);
   });
 
-  it("refunded and held are only reachable through recovering", () => {
+  it("refunded and held are only reachable through the recovery family", () => {
+    // Both doors into "the payment did not complete normally" open only from
+    // recovery states: the synchronous split (`recovering`) or the async
+    // anchor-driven refund wait (`refund_pending`). Any other entrance would
+    // let a run park without having gone through recovery at all.
     for (const s of ["refunded", "held"] as CorridorState[]) {
-      const entrances = ALL.filter((from) => canTransition(from, s));
-      expect(entrances, `${s} bypasses recovering`).toEqual(["recovering"]);
+      const entrances = ALL.filter((from) => canTransition(from, s)).sort();
+      expect(entrances, `${s} bypasses recovery`).toEqual(["recovering", "refund_pending"]);
     }
+  });
+
+  it("refund_pending is only reachable through recovering", () => {
+    const entrances = ALL.filter((from) => canTransition(from, "refund_pending"));
+    expect(entrances).toEqual(["recovering"]);
+  });
+
+  it("refund_pending is not terminal — money is still in motion", () => {
+    // An async refund with no state of its own is a run that looks finished
+    // while funds are moving; the state exists precisely so the run stays
+    // visibly unfinished until the anchor answers.
+    expect(isTerminal("refund_pending")).toBe(false);
+    expect(TERMINAL.has("refund_pending")).toBe(false);
+    expect(successors("refund_pending").length).toBeGreaterThan(0);
   });
 
   it("failed is reachable from every non-terminal state", () => {
