@@ -79,11 +79,14 @@ refund was needed and could not be performed (see
 may have left the distribution account.
 
 1. Read `stellar_tx_hash` from the run. If set, the bridge payment went out and
-   is sitting with the receiving anchor. `lastError` carries the refund port's
-   refusal — with the real `StellarSettlementSubmitter` today that reads
-   `SETTLEMENT_FAILED: payment … cannot be reversed on-chain` (a dedicated
-   `REFUND_UNSUPPORTED` code is the planned replacement; the message is the
-   stable part).
+   is sitting with the receiving anchor. `lastError` tells you which door the
+   run came through: under a `hold` policy it carries the **original failure**
+   (`SETTLEMENT_TIMEOUT`, `RECONCILE_MISMATCH`, …) — the refund port was never
+   consulted; under `refund_sender` it carries the **refund port's refusal**,
+   which with the real `StellarSettlementSubmitter` today reads
+   `SETTLEMENT_FAILED: payment … cannot be reversed on-chain` (`@corridor/stellar`
+   is slated to adopt a dedicated `REFUND_UNSUPPORTED` code for this; the
+   "cannot be reversed" message is the stable part).
 2. **Contact the receiving anchor** — exactly that; there is no API for this
    step. Ask it to refund on its side or to complete the payout manually.
 3. Once settled out-of-band, the run stays `held` as an audit record. Do not
@@ -91,19 +94,31 @@ may have left the distribution account.
 
 ### `refunded`
 
-**No on-chain payment ever went out.** Despite the name, nothing was reversed —
-nothing can be (see
-[why there is no automated refund](#why-there-is-no-automated-refund)). This
-state is reachable only when the failure happened before settlement succeeded
+**The engine believes no on-chain payment went out.** Despite the name, nothing
+was reversed — nothing can be (see
+[why there is no automated refund](#why-there-is-no-automated-refund)). In
+today's engine this state is reachable only when settlement never succeeded
 under a `refund_sender` policy: the engine found no `stellar_tx_hash` on the
 run, so there was nothing to undo, and it recorded `refunded` without touching
-the chain. The sender's funds never left the distribution account.
+the chain. Verify the belief before closing the run:
 
-- Verify exactly that: `stellar_tx_hash` must be **unset** on a `refunded` run.
-- If it IS set (with the real `StellarSettlementSubmitter` that combination
-  should be impossible; the mock's `refund()` does succeed, so test data can
-  produce it), money left the account and the state is lying — treat the run as
-  `held`, follow the steps above, and file a bug.
+- `stellar_tx_hash` must be **unset**. If it IS set (with the real
+  `StellarSettlementSubmitter` that combination should be impossible; the
+  mock's `refund()` does succeed, so test data can produce it), money left the
+  account and the state is lying — treat the run as `held`, follow the steps
+  above, and file a bug.
+- An unset hash is the engine's belief, not proof: an **ambiguous submission**
+  can land on-chain without the engine ever learning the hash (the submit
+  succeeded but confirmation timed out on Horizon read lag, or the send itself
+  ended ambiguously). Read `lastError` — on `SETTLEMENT_TIMEOUT` or an
+  ambiguous-submit message, check Horizon for the distribution account's recent
+  payments (the same check "Crash mid-flight" below prescribes for `settling`)
+  before declaring the sender whole.
+
+If an anchor-driven refund path ever lands (a refund-wait state between
+`recovering` and `refunded`), a second, legitimate way into this state appears —
+one where a payment **did** go out and the anchor returned it, hash set. The
+run's trail tells the two apart.
 
 ### `failed` before `settled`
 

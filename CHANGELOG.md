@@ -15,7 +15,9 @@ the engine never reverses anything — `refund()` always fails and the run
 escalates to `held` — so `refunded` is reachable only when no on-chain payment
 ever went out. The old wording could send an operator away satisfied while
 money sat with an anchor. The section now states the precondition plainly
-(`stellar_tx_hash` must be unset; if set, treat as `held` and file a bug), the
+(`stellar_tx_hash` must be unset; if set, treat as `held` and file a bug —
+and an unset hash is the engine's belief, not proof: on an ambiguous
+submission, verify against Horizon before declaring the sender whole), the
 "why there is no automated refund" reasoning — on-chain reversal impossible,
 and SEP-31 offering the sender no refund endpoint — appears once in full and
 is linked from the `held`/`refunded` sections, and the `held` steps say

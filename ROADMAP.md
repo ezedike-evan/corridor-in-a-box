@@ -41,7 +41,8 @@ system. Items marked ✅ are done.
   recovery is escalation to `held` for manual intervention. A genuine refund
   path means the receiving anchor initiating a refund on its own side — SEP-31
   gives the sender no endpoint to trigger one, so this is an operational
-  arrangement with the anchor, not an API call. What ships today is the
+  arrangement with the anchor, not an API call (the full reasoning lives in
+  [the operations runbook](./docs/operations.md)). What ships today is the
   escalation, not the reversal.
 
 ## Phase 3 — Operability (required before close beta)
