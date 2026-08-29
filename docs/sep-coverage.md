@@ -45,8 +45,12 @@ through the `refunds` object on the transaction record: there is no request,
 only news.
 
 `Sep31Adapter.requestRefund()` therefore fails closed with a non-retryable
-`REFUND_UNSUPPORTED` and never touches the network; the engine escalates the
-run to `held` and the [operations runbook](./operations.md) takes over
+`REFUND_UNSUPPORTED` and never touches the network. Nothing calls it yet —
+whether refund initiation belongs on the `AnchorAdapter` port at all is a
+separate design decision — the method exists to occupy the name with the
+refusal, so the next integration reads the constraint before inventing an
+endpoint. The engine already parks any refused refund in `held` for a human
+(asserted in a test), and the [operations runbook](./operations.md) takes over
 (out-of-band resolution with the anchor). Observing that a refund _happened_ is
 `getTransaction`'s job. An anchor that exposes a proprietary refund API is a
 bespoke integration: it implements `AnchorAdapter` itself and lives outside

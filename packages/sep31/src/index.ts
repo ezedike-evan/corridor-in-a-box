@@ -544,11 +544,15 @@ export class Sep31Adapter implements AnchorAdapter {
   // endpoint dressed up as protocol conformance — exactly what this package
   // exists to avoid. If a particular anchor does expose a proprietary refund
   // API, that integration belongs in its own AnchorAdapter implementation, not
-  // here. The generic adapter fails closed instead, never touches the network,
-  // and the engine escalates the failed refund to `held` for a human — the
-  // out-of-band path in docs/operations.md. Learning that a refund *happened*
-  // is `getTransaction`'s job (the anchor flips the transaction's status once
-  // it refunds).
+  // here. The generic adapter fails closed instead and never touches the
+  // network. Learning that a refund *happened* is `getTransaction`'s job (the
+  // anchor flips the transaction's status once it refunds).
+  //
+  // Nothing calls this yet: whether refund initiation belongs on the
+  // AnchorAdapter port at all is a separate design decision. The method exists
+  // to occupy the name with the refusal — the engine already parks any refused
+  // refund in `held` for a human (the out-of-band path in docs/operations.md),
+  // and that is asserted at the engine seam in tests/engine.test.ts.
   async requestRefund(transactionId: string): Promise<Outcome<never>> {
     return fail(
       "REFUND_UNSUPPORTED",

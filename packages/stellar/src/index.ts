@@ -256,7 +256,8 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
     return fail(
       "SETTLEMENT_FAILED",
       `payment ${req.original.stellarTxHash} cannot be reversed on-chain; ` +
-        `initiate a SEP-31 anchor refund or manual recovery`,
+        `resolve out-of-band with the receiving anchor (SEP-31 gives the sender ` +
+        `no refund endpoint) — see the held runbook in docs/operations.md`,
       { retryable: false },
     );
   }
