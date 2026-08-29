@@ -39,8 +39,10 @@ system. Items marked ✅ are done.
   failure — an already-credited payment cannot be reversed unilaterally on
   chain, which is correct behaviour, but it means the engine's only real
   recovery is escalation to `held` for manual intervention. A genuine refund
-  path means driving the receiving anchor's SEP-31 refund flow. What ships
-  today is the escalation, not the reversal.
+  path means the receiving anchor initiating a refund on its own side — SEP-31
+  gives the sender no endpoint to trigger one, so this is an operational
+  arrangement with the anchor, not an API call. What ships today is the
+  escalation, not the reversal.
 
 ## Phase 3 — Operability (required before close beta)
 

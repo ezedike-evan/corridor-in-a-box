@@ -47,28 +47,63 @@ When that trail is in the README, check off the last Phase-1 box in the ROADMAP.
 ## 2. Recovering a stuck payment
 
 The engine drives recovery automatically per the manifest's `recovery.rollback`
-policy (`refund_sender` / `hold` / `manual`), but two terminal states need a human.
+policy (`refund_sender` / `hold` / `manual`). `held` always needs a human;
+`refunded` needs a one-line verification.
 
 Inspect any run by key: `GET /payments/:idempotencyKey` (or read the
 `corridor_runs` row directly). `lastError` tells you why it stopped.
 
+### Why there is no automated refund
+
+Two independent constraints, same conclusion:
+
+1. **On-chain reversal is impossible.** A credited Stellar payment is final;
+   nobody can pull it back unilaterally.
+   [`@corridor/stellar`'s `refund()`](../packages/stellar/src/index.ts) exists
+   to say exactly that — it always fails, non-retryably, instead of pretending.
+2. **SEP-31 gives the sender no refund endpoint.** In the protocol, a refund is
+   something the _receiving_ anchor initiates on its own side and merely reports
+   back on the transaction record. There is nothing for the engine to call.
+
+So when recovery wants to return money that has already left the distribution
+account, the engine cannot do it. It parks the run in `held` and a human
+resolves it with the anchor, out of band. The only "automated refund" in this
+system is the no-op case: nothing had gone out yet, so there was nothing to
+reverse (that is what `refunded` means — see below).
+
 ### `held`
 
-The engine reached a non-recoverable failure under a `hold` policy, **or** an
-on-chain refund itself failed. Funds may have left the distribution account.
+The engine reached a non-recoverable failure under a `hold` policy, **or** a
+refund was needed and could not be performed (see
+[why there is no automated refund](#why-there-is-no-automated-refund)). Funds
+may have left the distribution account.
 
 1. Read `stellar_tx_hash` from the run. If set, the bridge payment went out and
-   is sitting with the receiving anchor.
-2. Resolve out-of-band: trigger the **anchor's SEP-31 refund flow**, or complete
-   the payout manually with the anchor. On-chain unilateral reversal is not
-   possible (see [`@corridor/stellar`'s `refund()`](../packages/stellar/src/index.ts)).
+   is sitting with the receiving anchor. `lastError` carries the refund port's
+   refusal — with the real `StellarSettlementSubmitter` today that reads
+   `SETTLEMENT_FAILED: payment … cannot be reversed on-chain` (a dedicated
+   `REFUND_UNSUPPORTED` code is the planned replacement; the message is the
+   stable part).
+2. **Contact the receiving anchor** — exactly that; there is no API for this
+   step. Ask it to refund on its side or to complete the payout manually.
 3. Once settled out-of-band, the run stays `held` as an audit record. Do not
    re-submit the same `idempotencyKey` — the idempotency gate will reject it.
 
 ### `refunded`
 
-The engine reversed (or had nothing to reverse) and returned the sender's funds.
-No action needed beyond confirming the sender was made whole.
+**No on-chain payment ever went out.** Despite the name, nothing was reversed —
+nothing can be (see
+[why there is no automated refund](#why-there-is-no-automated-refund)). This
+state is reachable only when the failure happened before settlement succeeded
+under a `refund_sender` policy: the engine found no `stellar_tx_hash` on the
+run, so there was nothing to undo, and it recorded `refunded` without touching
+the chain. The sender's funds never left the distribution account.
+
+- Verify exactly that: `stellar_tx_hash` must be **unset** on a `refunded` run.
+- If it IS set (with the real `StellarSettlementSubmitter` that combination
+  should be impossible; the mock's `refund()` does succeed, so test data can
+  produce it), money left the account and the state is lying — treat the run as
+  `held`, follow the steps above, and file a bug.
 
 ### `failed` before `settled`
 

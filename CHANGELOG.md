@@ -7,6 +7,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Fixed — refunded runbook implied a reversal that never happens (2026-08-29)
+
+`docs/operations.md`'s `refunded` section said the engine "reversed (or had
+nothing to reverse)" the payment. With the real `StellarSettlementSubmitter`
+the engine never reverses anything — `refund()` always fails and the run
+escalates to `held` — so `refunded` is reachable only when no on-chain payment
+ever went out. The old wording could send an operator away satisfied while
+money sat with an anchor. The section now states the precondition plainly
+(`stellar_tx_hash` must be unset; if set, treat as `held` and file a bug), the
+"why there is no automated refund" reasoning — on-chain reversal impossible,
+and SEP-31 offering the sender no refund endpoint — appears once in full and
+is linked from the `held`/`refunded` sections, and the `held` steps say
+"contact the anchor" outright instead of gesturing at a refund flow that has
+no API. ROADMAP's refund item gets the same precision.
+
 ### Fixed — probe missed single-quoted stellar.toml values (2026-08-11)
 
 `tomlValue()` only matched double-quoted `KEY = "value"` lines. Both quote
