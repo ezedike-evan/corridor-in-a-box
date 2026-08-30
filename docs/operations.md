@@ -83,10 +83,10 @@ may have left the distribution account.
    run came through: under a `hold` policy it carries the **original failure**
    (`SETTLEMENT_TIMEOUT`, `RECONCILE_MISMATCH`, …) — the refund port was never
    consulted; under `refund_sender` it carries the **refund port's refusal**,
-   which with the real `StellarSettlementSubmitter` today reads
-   `SETTLEMENT_FAILED: payment … cannot be reversed on-chain` (`@corridor/stellar`
-   is slated to adopt a dedicated `REFUND_UNSUPPORTED` code for this; the
-   "cannot be reversed" message is the stable part).
+   which with the real `StellarSettlementSubmitter` reads
+   `REFUND_UNSUPPORTED: payment … cannot be reversed on-chain`. The code is
+   distinct from `SETTLEMENT_FAILED` on purpose: this is a design invariant,
+   not a settlement outage, so it should not page the settlement alert.
 2. **Contact the receiving anchor** — exactly that; there is no API for this
    step. Ask it to refund on its side or to complete the payout manually.
 3. Once settled out-of-band, the run stays `held` as an audit record. Do not
