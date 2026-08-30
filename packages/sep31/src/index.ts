@@ -28,6 +28,8 @@ import type {
   KycResult,
   OpenTransaction,
   Quote,
+  RefundInfo,
+  RefundPayment,
   TransactionStatus,
 } from "@corridor/adapter-kit";
 
@@ -86,6 +88,91 @@ export function mapSep31Status(raw: string): {
   return { status, settled: false, terminalFailure: false };
 }
 
+/** The `refunds` object as SEP-31 puts it on the wire — every field untrusted. */
+interface RawRefunds {
+  amount_refunded?: unknown;
+  amount_fee?: unknown;
+  payments?: unknown;
+}
+
+/**
+ * A decimal amount string, or undefined if the anchor sent anything else.
+ *
+ * Deliberately refuses numbers. An anchor that sends `100.1` as JSON has
+ * already put the value through a float64, and accepting it here would launder
+ * that into a `Money` the rest of the system trusts. Better to report nothing
+ * than to report a number that has already lost precision.
+ */
+function amountString(v: unknown): string | undefined {
+  return typeof v === "string" && isValidAmount(v.trim()) ? v.trim() : undefined;
+}
+
+/**
+ * Parse SEP-31's `refunds` object off a transaction record.
+ *
+ * Everything is optional and untrusted: anchors omit `refunds` entirely on the
+ * happy path, amounts arrive as strings, and a malformed field must never turn
+ * a poll into an error — the status classification is what the engine acts on
+ * and it is decided independently of this.
+ *
+ * Returns undefined rather than a zero-filled object when the refund cannot be
+ * read: "refunded nothing" and "said nothing" are different facts, and the
+ * engine must not be able to confuse them.
+ *
+ * @param settledAmount the amount that went out (`amount_in`), used to tell a
+ * partial refund from a full one. Compared with `compareAmounts` — "100" and
+ * "100.00" are the same amount of money and string equality says otherwise.
+ */
+export function parseRefunds(
+  refunds: unknown,
+  asset: string,
+  settledAmount?: string,
+): RefundInfo | undefined {
+  if (!refunds || typeof refunds !== "object" || Array.isArray(refunds)) return undefined;
+  const raw = refunds as RawRefunds;
+
+  const amountRefunded = amountString(raw.amount_refunded);
+  if (amountRefunded === undefined) return undefined;
+
+  // A missing fee is a real answer — nothing was withheld. A malformed one is
+  // not, but it does not invalidate the refunded amount, so it reads as zero.
+  const amountFee = amountString(raw.amount_fee) ?? "0";
+
+  const payments: RefundPayment[] = [];
+  if (Array.isArray(raw.payments)) {
+    for (const entry of raw.payments) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const p = entry as { id?: unknown; id_type?: unknown; amount?: unknown; fee?: unknown };
+      const amount = amountString(p.amount);
+      // An entry with no id or no readable amount says nothing; drop that entry
+      // rather than the whole refund, which the totals above still describe.
+      if (typeof p.id !== "string" || !p.id || amount === undefined) continue;
+      payments.push({
+        id: p.id,
+        ...(typeof p.id_type === "string" && p.id_type ? { idType: p.id_type } : {}),
+        amount: { asset, amount },
+        fee: { asset, amount: amountString(p.fee) ?? "0" },
+      });
+    }
+  }
+
+  const settled = settledAmount !== undefined ? amountString(settledAmount) : undefined;
+  let completeness: RefundInfo["completeness"] = "unknown";
+  if (settled !== undefined) {
+    const cmp = compareAmounts(amountRefunded, settled);
+    // An over-refund (cmp > 0) is anomalous but not partial: the whole payment
+    // came back and then some. Reporting it as "partial" would be a lie.
+    if (cmp.ok) completeness = cmp.value < 0 ? "partial" : "full";
+  }
+
+  return {
+    amountRefunded: { asset, amount: amountRefunded },
+    amountFee: { asset, amount: amountFee },
+    payments,
+    completeness,
+  };
+}
+
 /**
  * SEP-38 Asset Identification Format for the corridor's bridge asset:
  * `stellar:native` for XLM, `stellar:CODE:ISSUER` for everything else. Anchors
@@ -113,12 +200,15 @@ function jwtExpiryMs(token: string): number | undefined {
 export class Sep31Adapter implements AnchorAdapter {
   readonly name: string;
   private readonly anchor: AnchorConfig;
+  /** Bridge asset for this corridor — the denomination `amount_in` is reported in. */
+  private readonly settlementAsset: string;
   private readonly fetchImpl: FetchLike;
   private readonly sep10?: Sep10Signer;
   private cachedToken?: { token: string; expMs: number };
 
   constructor(corridor: Corridor, opts: Sep31AdapterOptions = {}) {
     this.anchor = corridor.dest;
+    this.settlementAsset = corridor.settlement.bridge_asset;
     this.name = corridor.dest.name;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.sep10 = opts.sep10;
@@ -519,8 +609,32 @@ export class Sep31Adapter implements AnchorAdapter {
           retryable: res.status >= 500,
         });
       }
-      const j = (await res.json()) as { transaction: { status: string } };
-      return ok<TransactionStatus>(mapSep31Status(j.transaction.status));
+      const j = (await res.json()) as {
+        transaction: {
+          status: string;
+          amount_in?: unknown;
+          amount_in_asset?: unknown;
+          refunds?: unknown;
+        };
+      };
+      const tx = j.transaction;
+      const mapped = mapSep31Status(tx.status);
+
+      // The asset the anchor itself names for `amount_in`, falling back to the
+      // corridor's bridge asset. Refund amounts are reported in the same
+      // denomination as the amount that went out; SEP-31 does not restate it.
+      const asset =
+        typeof tx.amount_in_asset === "string" && tx.amount_in_asset
+          ? tx.amount_in_asset
+          : this.settlementAsset;
+      const settledAmount = typeof tx.amount_in === "string" ? tx.amount_in : undefined;
+
+      // Parsed off the same record the poll already read, and kept strictly
+      // separate from the classification above: a malformed `refunds` object
+      // must never turn a readable status into an error.
+      const refunds = parseRefunds(tx.refunds, asset, settledAmount);
+
+      return ok<TransactionStatus>(refunds ? { ...mapped, refunds } : mapped);
     } catch (cause) {
       return fail("ANCHOR_UNAVAILABLE", `${this.name}: get-tx failed`, {
         retryable: true,
