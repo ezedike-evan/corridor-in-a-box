@@ -118,7 +118,25 @@ the chain. Verify the belief before closing the run:
 If an anchor-driven refund path ever lands (a refund-wait state between
 `recovering` and `refunded`), a second, legitimate way into this state appears —
 one where a payment **did** go out and the anchor returned it, hash set. The
-run's trail tells the two apart.
+run's trail tells the two apart — and `refund_id`, described below, records
+which refund it was.
+
+### `refund_id` on the run
+
+The run carries `refund_id` alongside `stellar_tx_hash`: the reference of a
+refund that has already been requested, empty until one is.
+
+It exists so a resumed run can tell "a refund was requested" from "a refund was
+never requested". Without it a process that crashed after requesting a refund
+comes back with no record of having done so and asks for a second one — not
+settling twice, but money moving twice all the same. The refund request path
+reads it and refuses to issue another.
+
+Consequently it is **write-once**: `migrate()` adds the column additively, and
+`put()` coalesces rather than overwrites, so a writer holding a stale copy of
+the run cannot erase the evidence. If you see a run whose `refund_id` is set,
+a refund reference exists at the submitter — check there before initiating
+anything by hand.
 
 ### `failed` before `settled`
 

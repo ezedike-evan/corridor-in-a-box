@@ -96,6 +96,89 @@ run("PostgresIdempotencyStore (live Postgres)", () => {
     expect(got?.stellarTxHash).toBe("hash_rp");
   });
 
+  it("round-trips refundId", async () => {
+    const s = store();
+    await s.create(newRun("k-refund"));
+    await s.put({
+      idempotencyKey: "k-refund",
+      corridorId: "c",
+      state: "refunded",
+      version: 3,
+      stellarTxHash: "hash_out",
+      refundId: "hash_back",
+    });
+    const got = await s.get("k-refund");
+    expect(got?.refundId).toBe("hash_back");
+    // A run with no refund reads back undefined, not null or "".
+    await s.create(newRun("k-no-refund"));
+    expect((await s.get("k-no-refund"))?.refundId).toBeUndefined();
+  });
+
+  it("never lets a later write erase a stored refundId", async () => {
+    // The stored id is the evidence that stops a second refund. A writer that
+    // lost it — an older in-memory copy of the run — must not be able to clear
+    // it, or the next resume would request the refund again.
+    const s = store();
+    await s.create(newRun("k-keep"));
+    await s.put({
+      idempotencyKey: "k-keep",
+      corridorId: "c",
+      state: "refunded",
+      version: 2,
+      refundId: "hash_back",
+    });
+    await s.put({
+      idempotencyKey: "k-keep",
+      corridorId: "c",
+      state: "refunded",
+      version: 3,
+      refundId: undefined,
+    });
+    expect((await s.get("k-keep"))?.refundId).toBe("hash_back");
+  });
+
+  it("adds refund_id to a table created by the previous version", async () => {
+    // The upgrade path, against a real server: build the pre-change table
+    // exactly as it was, run migrate(), and check the column arrives. This is
+    // what `add column if not exists` in ALTER_TABLE_SQL buys — a no-op on a
+    // fresh table, the whole migration on an existing one. Putting the column
+    // only in CREATE_TABLE_SQL would leave every existing deployment without
+    // it, silently.
+    await pool.query("drop table if exists corridor_runs");
+    await pool.query(`
+      create table corridor_runs (
+        idempotency_key text primary key,
+        corridor_id     text not null,
+        state           text not null,
+        version         integer not null,
+        transaction_id  text,
+        quote_id        text,
+        stellar_tx_hash text,
+        last_error      text,
+        owner           text,
+        updated_at      timestamptz not null default now()
+      );`);
+    await pool.query(
+      `insert into corridor_runs (idempotency_key, corridor_id, state, version)
+       values ('legacy', 'c', 'settled', 1)`,
+    );
+
+    await migrate(pool as unknown as Queryable);
+
+    const s = store();
+    // The pre-existing row survives and simply has no refund.
+    expect((await s.get("legacy"))?.refundId).toBeUndefined();
+    // And the column is really there — a write through it round-trips.
+    await s.put({
+      idempotencyKey: "legacy",
+      corridorId: "c",
+      state: "refunded",
+      version: 2,
+      refundId: "hash_back",
+    });
+    expect((await s.get("legacy"))?.refundId).toBe("hash_back");
+  });
+
   it("round-trips all columns and maps NULLs to undefined", async () => {
     const s = store();
     await s.create(newRun("k3"));
@@ -116,6 +199,7 @@ run("PostgresIdempotencyStore (live Postgres)", () => {
       stellarTxHash: "hash_1",
     });
     expect(got?.quoteId).toBeUndefined();
+    expect(got?.refundId).toBeUndefined();
     expect(got?.lastError).toBeUndefined();
   });
 });
