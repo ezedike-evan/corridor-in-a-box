@@ -14,6 +14,7 @@ export type CorridorState =
   | "reconciled"
   | "completed"
   | "recovering"
+  | "refund_pending"
   | "refunded"
   | "held"
   | "failed";
@@ -41,7 +42,19 @@ const NEXT: Record<CorridorState, readonly CorridorState[]> = {
   // control-flow bug, and it would not have caught that one. Splitting the two
   // kinds of recovery makes the double-spend unreachable by construction rather
   // than by careful reading of run.ts.
-  recovering: ["refunded", "held", "failed"],
+  recovering: ["refund_pending", "refunded", "held", "failed"],
+  // An anchor-driven refund has been requested and the answer has not come
+  // back yet. Not terminal: money is still in motion, and a run parked here
+  // must keep looking unfinished until the anchor confirms (`refunded`),
+  // rejects or we give up waiting (`held`), or something else goes wrong
+  // (`failed`).
+  //
+  // `refund_pending` inherits `recovering`'s contract in full: it is entered
+  // after money has left, so every successor is terminal and `settling` is
+  // unreachable from here by construction — the same double-spend guard the
+  // comment above exists to explain, enforced by this table rather than by
+  // careful reading of run.ts.
+  refund_pending: ["refunded", "held", "failed"],
   refunded: [],
   held: [],
   failed: [],

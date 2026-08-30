@@ -528,4 +528,39 @@ export class Sep31Adapter implements AnchorAdapter {
       });
     }
   }
+
+  // Refund initiation: NOT IMPLEMENTABLE over SEP-31, on purpose. Do not "fix"
+  // this by adding an HTTP call.
+  //
+  // SEP-31 defines four endpoints — GET /info, POST /transactions,
+  // GET /transactions/:id, PATCH /transactions/:id — and none of them lets the
+  // SENDING side ask for a refund. In the protocol, a refund is a decision the
+  // RECEIVING anchor makes on its own side (payout failed, compliance bounced
+  // it, funds came back), and it is only *reported* to us afterwards, through
+  // the `refunds` object on the transaction record. There is no request; there
+  // is only news.
+  //
+  // So anything this method could POST to would be a bespoke, anchor-specific
+  // endpoint dressed up as protocol conformance — exactly what this package
+  // exists to avoid. If a particular anchor does expose a proprietary refund
+  // API, that integration belongs in its own AnchorAdapter implementation, not
+  // here. The generic adapter fails closed instead and never touches the
+  // network. Learning that a refund *happened* is `getTransaction`'s job (the
+  // anchor flips the transaction's status once it refunds).
+  //
+  // Nothing calls this yet: whether refund initiation belongs on the
+  // AnchorAdapter port at all is a separate design decision. The method exists
+  // to occupy the name with the refusal — the engine already parks any refused
+  // refund in `held` for a human (the out-of-band path in docs/operations.md),
+  // and that is asserted at the engine seam in tests/engine.test.ts.
+  async requestRefund(transactionId: string): Promise<Outcome<never>> {
+    return fail(
+      "REFUND_UNSUPPORTED",
+      `${this.name}: SEP-31 has no sender-initiated refund endpoint — a refund is ` +
+        `initiated by the receiving anchor and only reported back on transaction ` +
+        `${transactionId}; resolve out-of-band with the anchor (see the held/refunded ` +
+        `runbook in docs/operations.md) and watch getTransaction() for the outcome`,
+      { retryable: false },
+    );
+  }
 }
