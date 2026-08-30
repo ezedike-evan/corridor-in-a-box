@@ -26,6 +26,22 @@ refusal message now points at the out-of-band runbook instead of a "SEP-31
 anchor refund" flow that does not exist, and `docs/sep-coverage.md` states
 the scope boundary plainly.
 
+### Added — `refund_pending` state for anchor-driven refunds (2026-08-29)
+
+The corridor state machine gains `refund_pending`: "we asked the receiving
+anchor to refund and are waiting to hear back." Today refunds always fail
+immediately and the run lands in `held`, so the state has no producer yet —
+but once refunds are anchor-driven they become asynchronous, and an async
+operation with no state of its own is a run that looks finished while money
+is still in motion. Entered only from `recovering`; exits only to
+`refunded`, `held`, or `failed`; not terminal. It inherits `recovering`'s
+double-spend contract in full — every successor is terminal, so `settling`
+is unreachable from it by construction, and the property suite now asserts
+that over all paths (the same all-paths check that historically caught
+`settled -> recovering -> settling`). Both idempotency stores round-trip the
+new state (it is just a string, but the tests assert it rather than assume
+it, including against real Postgres).
+
 ### Fixed — probe missed single-quoted stellar.toml values (2026-08-11)
 
 `tomlValue()` only matched double-quoted `KEY = "value"` lines. Both quote

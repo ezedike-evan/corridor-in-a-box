@@ -184,6 +184,40 @@ function fakeDb(): Queryable & { table: Map<string, Record<string, unknown>> } {
   };
 }
 
+describe("state round-trips", () => {
+  // refund_pending is just a string to both stores — but a run parked in it
+  // is a run with money in motion, so "it comes back exactly as written and
+  // still reads as non-terminal" is asserted rather than assumed.
+  it("InMemoryIdempotencyStore persists and reads back refund_pending", async () => {
+    const store = new InMemoryIdempotencyStore();
+    await store.put({
+      idempotencyKey: "k-rp",
+      corridorId: "c",
+      state: "refund_pending",
+      version: 4,
+      stellarTxHash: "hash_rp",
+    });
+    const got = await store.get("k-rp");
+    expect(got?.state).toBe("refund_pending");
+    expect(got?.stellarTxHash).toBe("hash_rp");
+  });
+
+  it("PostgresIdempotencyStore persists and reads back refund_pending", async () => {
+    const db = fakeDb();
+    const store = new PostgresIdempotencyStore(db);
+    await store.put({
+      idempotencyKey: "k-rp",
+      corridorId: "c",
+      state: "refund_pending",
+      version: 4,
+      stellarTxHash: "hash_rp",
+    });
+    const got = await store.get("k-rp");
+    expect(got?.state).toBe("refund_pending");
+    expect(got?.stellarTxHash).toBe("hash_rp");
+  });
+});
+
 describe("PostgresIdempotencyStore", () => {
   it("round-trips a run and maps null columns to undefined", async () => {
     const db = fakeDb();
