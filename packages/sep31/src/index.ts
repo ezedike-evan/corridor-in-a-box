@@ -61,14 +61,46 @@ export interface Sep31AdapterOptions {
   sep10?: Sep10Signer;
 }
 
+/** Terminal non-success at the anchor: stop polling, hand over to recovery. */
+const TERMINAL_FAILURE_STATUSES = new Set(["refunded", "expired", "error"]);
+
+/**
+ * In flight and blocked on input from outside the engine — the anchor is not
+ * working on the transfer, it is waiting for someone to supply something.
+ * `incomplete` is the Anchor Platform's "the SEP-12 customer record isn't
+ * complete yet"; the two `*_info_update` statuses are the anchor explicitly
+ * asking for a correction via `PATCH /transactions/:id`.
+ */
+const AWAITING_INPUT_STATUSES = new Set([
+  "incomplete",
+  "pending_customer_info_update",
+  "pending_transaction_info_update",
+]);
+
+/**
+ * In flight with the work on the anchor's side (or the network's). Classified
+ * explicitly rather than left to the default so that "we know this status and
+ * it means keep waiting" is distinguishable from "we have never seen this".
+ */
+const IN_FLIGHT_STATUSES = new Set([
+  "pending_sender",
+  "pending_receiver",
+  "pending_external",
+  "pending_anchor",
+  "pending_stellar",
+]);
+
 /**
  * Classify a SEP-31 transaction status into the engine's reconcile model.
  *
  * SEP-31 defines a lifecycle of `pending_*` / `incomplete` (in flight) plus the
  * terminals `completed` (success), `refunded`, `expired`, and `error`. The engine
- * only needs three buckets:
+ * needs these buckets:
  *   - settled         → `completed`
  *   - terminalFailure → `refunded` | `expired` | `error`  (stop polling, recover)
+ *   - awaitingInput   → `incomplete` | `pending_customer_info_update` |
+ *                       `pending_transaction_info_update` (in flight, but the
+ *                       hold-up is someone else's input, not the anchor's work)
  *   - otherwise        → still in flight, keep polling
  * Unknown statuses are treated as in-flight (fail-open to polling, never to a
  * false "settled"). Exported so it can grow as real anchors surface new statuses.
@@ -77,13 +109,24 @@ export function mapSep31Status(raw: string): {
   status: string;
   settled: boolean;
   terminalFailure: boolean;
+  awaitingInput: boolean;
 } {
   const status = (raw ?? "").toLowerCase();
-  if (status === "completed") return { status, settled: true, terminalFailure: false };
-  if (status === "refunded" || status === "expired" || status === "error") {
-    return { status, settled: false, terminalFailure: true };
+  if (status === "completed") {
+    return { status, settled: true, terminalFailure: false, awaitingInput: false };
   }
-  return { status, settled: false, terminalFailure: false };
+  if (TERMINAL_FAILURE_STATUSES.has(status)) {
+    return { status, settled: false, terminalFailure: true, awaitingInput: false };
+  }
+  if (AWAITING_INPUT_STATUSES.has(status)) {
+    return { status, settled: false, terminalFailure: false, awaitingInput: true };
+  }
+  if (IN_FLIGHT_STATUSES.has(status)) {
+    return { status, settled: false, terminalFailure: false, awaitingInput: false };
+  }
+  // Unrecognised status. Same shape as a known in-flight one on purpose: the
+  // default must stay fail-open to polling and never to a false "settled".
+  return { status, settled: false, terminalFailure: false, awaitingInput: false };
 }
 
 /**

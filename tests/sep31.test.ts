@@ -191,36 +191,75 @@ describe("SEP-38 quote request shape", () => {
 });
 
 describe("SEP-31 status mapping", () => {
-  it("classifies the SEP-31 lifecycle into settled / terminalFailure / in-flight", () => {
+  it("classifies `completed` as settled and nothing else", () => {
     expect(mapSep31Status("completed")).toEqual({
       status: "completed",
       settled: true,
       terminalFailure: false,
+      awaitingInput: false,
     });
+  });
+
+  it("classifies the terminal non-success statuses as terminalFailure", () => {
     for (const terminal of ["error", "expired", "refunded"]) {
-      expect(mapSep31Status(terminal)).toMatchObject({
+      expect(mapSep31Status(terminal)).toEqual({
+        status: terminal,
         settled: false,
         terminalFailure: true,
+        awaitingInput: false,
       });
     }
+  });
+
+  it("classifies the Anchor Platform's in-flight statuses as in-flight", () => {
     for (const pending of [
-      "incomplete",
       "pending_sender",
-      "pending_stellar",
       "pending_receiver",
       "pending_external",
-      "something_new_we_dont_know",
+      "pending_anchor",
+      "pending_stellar",
     ]) {
-      expect(mapSep31Status(pending)).toMatchObject({
+      expect(mapSep31Status(pending)).toEqual({
+        status: pending,
         settled: false,
         terminalFailure: false,
+        awaitingInput: false,
       });
     }
+  });
+
+  it("flags the statuses that are blocked on someone else's input", () => {
+    // Still in flight — the engine keeps polling — but the hold-up is a party
+    // owing the anchor information, not the anchor doing its work.
+    for (const blocked of [
+      "incomplete",
+      "pending_customer_info_update",
+      "pending_transaction_info_update",
+    ]) {
+      expect(mapSep31Status(blocked)).toEqual({
+        status: blocked,
+        settled: false,
+        terminalFailure: false,
+        awaitingInput: true,
+      });
+    }
+  });
+
+  it("treats an unrecognised status as in-flight, never as settled", () => {
+    expect(mapSep31Status("something_new_we_dont_know")).toEqual({
+      status: "something_new_we_dont_know",
+      settled: false,
+      terminalFailure: false,
+      awaitingInput: false,
+    });
+    expect(mapSep31Status("").settled).toBe(false);
   });
 
   it("is case-insensitive on the raw anchor status", () => {
     expect(mapSep31Status("COMPLETED").settled).toBe(true);
     expect(mapSep31Status("Error").terminalFailure).toBe(true);
+    expect(mapSep31Status("Pending_Customer_Info_Update").awaitingInput).toBe(true);
+    expect(mapSep31Status("PENDING_ANCHOR").awaitingInput).toBe(false);
   });
 
   it("getTransaction reflects the mapping for the anchor's reported status", async () => {

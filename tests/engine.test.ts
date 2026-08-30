@@ -10,7 +10,7 @@ import {
   type EngineDeps,
   type SettlementSubmitter,
 } from "@corridor/engine";
-import { fail, type PaymentIntent } from "@corridor/types";
+import { fail, ok, type PaymentIntent } from "@corridor/types";
 
 function corridor(): Corridor {
   const r = parseCorridor({
@@ -213,6 +213,44 @@ describe("engine recovery", () => {
     if (!r.ok) expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
     // a settlement went out, so the engine must have reversed it on-chain
     expect(refunded).toHaveLength(1);
+  });
+
+  it("says so in the timeout when the anchor was blocked on someone's input", async () => {
+    // An operator reading a SETTLEMENT_TIMEOUT needs to know who to chase. A run
+    // that timed out on `pending_customer_info_update` was waiting on a party to
+    // supply information, not on a slow anchor — the message must say which.
+    let t = 0;
+    const base = createMockAdapter({ settled: false });
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => ({
+        ...base,
+        getTransaction: async () =>
+          ok({
+            status: "pending_customer_info_update",
+            settled: false,
+            terminalFailure: false,
+            awaitingInput: true,
+          }),
+      })),
+      submitter: createMockSubmitter(),
+      idempotency: new InMemoryIdempotencyStore(),
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+    };
+    const r = await execute(
+      intent("awaiting-input"),
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "hold" }),
+      d,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+      expect(r.error.message).toContain("pending_customer_info_update");
+      expect(r.error.message).toContain("awaiting input from another party");
+    }
   });
 
   it("bails out of reconcile immediately on a terminal anchor failure", async () => {

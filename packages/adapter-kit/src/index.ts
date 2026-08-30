@@ -53,6 +53,15 @@ export interface TransactionStatus {
    * the corridor timeout. Absent/false means "not settled yet, keep polling".
    */
   readonly terminalFailure?: boolean;
+  /**
+   * In flight, but blocked on input from outside the engine rather than on the
+   * anchor doing its work (SEP-31 `incomplete`, `pending_customer_info_update`,
+   * `pending_transaction_info_update`). Polling continues either way — the
+   * distinction is operational: a run that times out here timed out waiting on
+   * a human, not on a slow anchor. Optional and purely informational; absent
+   * means "not known to be blocked".
+   */
+  readonly awaitingInput?: boolean;
 }
 
 export interface AnchorAdapter {

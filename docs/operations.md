@@ -92,6 +92,16 @@ may have left the distribution account.
 3. Once settled out-of-band, the run stays `held` as an audit record. Do not
    re-submit the same `idempotencyKey` — the idempotency gate will reject it.
 
+**Timed out waiting on whom?** A `SETTLEMENT_TIMEOUT` message ends with the last
+status the anchor reported. When that status is one the engine classifies as
+_awaiting input_ — `incomplete`, `pending_customer_info_update`,
+`pending_transaction_info_update` — the message also says
+`awaiting input from another party`. That is the anchor telling you it was
+blocked on information (usually a SEP-12 customer record or a
+`PATCH /transactions/:id` correction), not that it was slow. Chase the party that
+owes the information, not the anchor's throughput. Any other status — including
+one the engine has never seen — means the anchor was working on it.
+
 ### `refunded`
 
 **The engine believes no on-chain payment went out.** Despite the name, nothing
