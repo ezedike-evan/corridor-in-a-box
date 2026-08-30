@@ -1,0 +1,30 @@
+{
+  "name": "@corridor/registry",
+  "version": "0.1.0",
+  "description": "Read SEP conformance attestations for Stellar anchors from the on-chain corridor registry.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ezedike-evan/corridor-in-a-box.git",
+    "directory": "packages/registry"
+  },
+  "bugs": {
+    "url": "https://github.com/ezedike-evan/corridor-in-a-box/issues"
+  },
+  "homepage": "https://github.com/ezedike-evan/corridor-in-a-box#readme",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "main": "./src/index.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@corridor/types": "workspace:*",
+    "@stellar/stellar-sdk": "^16.2.0"
+  }
+}

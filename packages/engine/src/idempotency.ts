@@ -18,6 +18,14 @@ export interface StoredRun {
   quoteId?: string;
   stellarTxHash?: string;
   lastError?: string;
+  /**
+   * Opaque tenant id that owns this run, so a read can be scoped to its creator.
+   * Set by the caller from an already-VALIDATED credential — never from a
+   * request body. Undefined when the deployment runs without auth, in which case
+   * no scoping is possible and every run is readable by anyone who can reach the
+   * service.
+   */
+  readonly owner?: string;
 }
 
 export interface IdempotencyStore {

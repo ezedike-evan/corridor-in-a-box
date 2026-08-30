@@ -27,6 +27,12 @@ const env = process.env;
 const transferServer = env.ANCHOR_SEP31_TRANSFER_SERVER;
 const homeDomain = env.ANCHOR_HOME_DOMAIN;
 const hasAnchor = Boolean(transferServer && homeDomain);
+// Separate gate from hasAnchor, deliberately. Every assertion below goes
+// through SEP-38 or SEP-12, and a real anchor answers both with 403 unless the
+// request carries a SEP-10 JWT — so without a signer these do not test the
+// adapter, they test that an anchor rejects anonymous callers. `||` not `??`:
+// CI passes an unset secret through as an empty string.
+const hasSigner = Boolean(env.CORRIDOR_SIGNER_SECRET || "");
 
 function liveCorridor(): Corridor {
   const endpoints: Record<string, string> = {
@@ -57,16 +63,28 @@ function adapterFor(c: Corridor): Sep31Adapter {
   return new Sep31Adapter(c, { sep10 });
 }
 
+// A SEP-12 customer id issued by THIS anchor for the receiver. There is no way
+// to obtain one read-only — it comes back from `PUT /customer`, a write, and
+// this suite deliberately performs none. So it has to be supplied, and when it
+// is absent the compliance probe is not run rather than counted as a failure:
+// `ensureCompliance` correctly refuses to settle on a recipient it cannot
+// identify, and asserting that a fail-closed control fails closed proves
+// nothing about the anchor's conformance.
+const recipientSep12Id = env.ANCHOR_RECIPIENT_SEP12_ID || undefined;
+
 const intent: PaymentIntent = {
   idempotencyKey: `integration-${Date.now()}`,
   corridorId: "integration-live",
   sender: { id: "integration-sender" },
-  recipient: { id: env.ANCHOR_RECIPIENT_ID || "integration-recipient" },
+  recipient: {
+    id: env.ANCHOR_RECIPIENT_ID || "integration-recipient",
+    ...(recipientSep12Id ? { sep12Id: recipientSep12Id } : {}),
+  },
   sourceAmount: { asset: "USDC", amount: env.ANCHOR_AMOUNT || "10" },
 };
 
 describe.skipIf(!hasAnchor)("SEP-31 live anchor (read-only)", () => {
-  it("returns a firm quote with a future expiry", async () => {
+  it.skipIf(!hasSigner)("returns a firm quote with a future expiry", async () => {
     const c = liveCorridor();
     if (!c.dest.endpoints.quote_server) {
       // No SEP-38 server configured for this anchor — nothing to assert here.
@@ -77,13 +95,16 @@ describe.skipIf(!hasAnchor)("SEP-31 live anchor (read-only)", () => {
     if (q.ok) expect(q.value.expiresAt).toBeGreaterThan(Date.now());
   });
 
-  it("passes the adapter conformance probes", async () => {
+  it.skipIf(!hasSigner)("passes the adapter conformance probes", async () => {
     const c = liveCorridor();
+    // Matched on the probe's own name because conformanceSuite() returns a
+    // fixed list and exposes no other handle on it. If that list grows, this
+    // filter is the thing to revisit.
+    const suite = conformanceSuite(adapterFor(c), intent, c).filter(
+      (p) => recipientSep12Id || p.name !== "compliance resolves to a known status",
+    );
     const results = await Promise.all(
-      conformanceSuite(adapterFor(c), intent, c).map(async (p) => ({
-        name: p.name,
-        pass: await p.run(),
-      })),
+      suite.map(async (p) => ({ name: p.name, pass: await p.run() })),
     );
     for (const r of results) {
       expect(r.pass, `probe failed: ${r.name}`).toBe(true);
@@ -93,8 +114,18 @@ describe.skipIf(!hasAnchor)("SEP-31 live anchor (read-only)", () => {
 
 // A tiny always-present assertion so the file is never an empty suite when the
 // anchor vars are unset (keeps the default test run green and explicit).
+//
+// Skipping is only honest because something says so out loud: the two gates
+// below are each mirrored by a step in nightly-live-anchor.yml that annotates
+// the run when the corresponding value is missing. A silent skip would be the
+// "check that cannot fail" this repo keeps arguing against — it was one, for
+// months, and the fix is the warning, not the removal of the gate.
 describe("SEP-31 live anchor (gating)", () => {
   it("is skipped unless ANCHOR_SEP31_TRANSFER_SERVER + ANCHOR_HOME_DOMAIN are set", () => {
     expect(typeof hasAnchor).toBe("boolean");
+  });
+
+  it("skips the auth-dependent cases unless CORRIDOR_SIGNER_SECRET is set", () => {
+    expect(typeof hasSigner).toBe("boolean");
   });
 });

@@ -8,6 +8,9 @@ export interface Endpoints {
   web_auth?: string;
   kyc_server?: string;
   quote_server?: string;
+  /** ISO date the URLs above were confirmed against the anchor's published
+   *  stellar.toml. Unset = nobody has checked. See liveness() below. */
+  endpoints_verified_at?: string;
 }
 
 export interface Corridor {
@@ -43,11 +46,12 @@ export const corridors: Corridor[] = [
     recovery: { max_retries: 3, timeout_seconds: 900, rollback: "refund_sender" },
   },
   {
-    id: "mx-bitso",
-    status_note: "Destination runs SEP-31 receive-side. Verify endpoints from the live stellar.toml.",
+    id: "mx-example",
+    status_note:
+      "TEMPLATE — endpoints are fictional placeholders. No anchor relationship exists. Not runnable.",
     source: { name: "USD Sending Anchor", asset: "USDC", endpoints: { home_domain: "sending-anchor.example" } },
     dest: {
-      name: "Mexico Off-Ramp (Bitso-class)",
+      name: "Mexico Off-Ramp (example — not a real anchor)",
       asset: "iso4217:MXN",
       endpoints: {
         home_domain: "anchor.example.mx",
@@ -59,6 +63,33 @@ export const corridors: Corridor[] = [
     },
     fx: { path: ["USD", "USDC", "MXN"], quote_source: "sep38", who_holds_risk: "receiving_anchor", quote_ttl_seconds: 60 },
     compliance: { source_jurisdiction: "US", dest_jurisdiction: "MX" },
+    settlement: { bridge_asset: "USDC", network: "public", asset_issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" },
+    recovery: { max_retries: 3, timeout_seconds: 900, rollback: "refund_sender" },
+  },
+  {
+    id: "ng-cowrie",
+    status_note:
+      "REAL — Cowrie Exchange (Lagos, Nigeria), issuer of NGNT. Confirmed 2026-08-11 by " +
+      "@corridor/probe against the anchor's live production API: SEP-10 challenge signed " +
+      "and exchanged for a JWT, SEP-12 answered, and SEP-31 GET /info returned a non-empty " +
+      "receive list (NGNT, USDC). No SEP-38 quote server is published, so pricing is " +
+      "off-protocol (quote_source=external) — this corridor cannot get a firm on-chain " +
+      "quote today. No payment has been attempted; a real settlement still needs a KYC'd " +
+      "business relationship with Cowrie, which this repo does not have.",
+    source: { name: "USD Sending Anchor", asset: "USDC", endpoints: { home_domain: "sending-anchor.example" } },
+    dest: {
+      name: "Cowrie Exchange (Nigeria)",
+      asset: "iso4217:NGN",
+      endpoints: {
+        home_domain: "cowrie.exchange",
+        transfer_server_sep31: "https://api.cowrie.exchange/sep31/direct",
+        web_auth: "https://api.cowrie.exchange/web_auth",
+        kyc_server: "https://api.cowrie.exchange/kyc",
+        endpoints_verified_at: "2026-08-11",
+      },
+    },
+    fx: { path: ["USD", "USDC", "NGN"], quote_source: "external", who_holds_risk: "receiving_anchor", quote_ttl_seconds: 60 },
+    compliance: { source_jurisdiction: "US", dest_jurisdiction: "NG" },
     settlement: { bridge_asset: "USDC", network: "public", asset_issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" },
     recovery: { max_retries: 3, timeout_seconds: 900, rollback: "refund_sender" },
   },
@@ -82,24 +113,55 @@ export function getCorridor(id: string): Corridor | undefined {
   return corridors.find((c) => c.id === id);
 }
 
+export type LivenessState = "verified" | "unverified" | "not-runnable";
+
 export interface Liveness {
+  state: LivenessState;
+  /** True only for "verified". Never gate a UI affordance on an endpoint URL existing. */
   runnable: boolean;
+  verifiedAt?: string;
   warnings: string[];
 }
 
-// Mirrors `corridor plan` in packages/cli.
+export const LIVENESS_LABEL: Record<LivenessState, string> = {
+  verified: "verified",
+  unverified: "unverified",
+  "not-runnable": "not runnable",
+};
+
+// MIRROR of packages/manifest/src/liveness.ts. Keep the two in lockstep — this
+// app is deliberately outside the pnpm workspace (see web/README.md) so it cannot
+// import the package directly.
+//
+// Three states, not two. A manifest naming an endpoint is not evidence the
+// endpoint exists; a lane whose URLs have never been checked is UNVERIFIED and
+// must never render green.
 export function liveness(c: Corridor): Liveness {
   const warnings: string[] = [];
-  if (!c.dest.endpoints.transfer_server_sep31) {
+  const endpoints = c.dest.endpoints;
+  const verifiedAt = endpoints.endpoints_verified_at;
+
+  if (!endpoints.transfer_server_sep31) {
     warnings.push("dest has no SEP-31 transfer server — corridor cannot settle. NOT runnable.");
+  } else if (!verifiedAt) {
+    warnings.push(
+      "dest endpoints are UNVERIFIED — the URLs have never been confirmed against a published stellar.toml. Do not treat this lane as runnable.",
+    );
   }
-  if (c.fx.quote_source === "sep38" && !c.dest.endpoints.quote_server) {
+  if (c.fx.quote_source === "sep38" && !endpoints.quote_server) {
     warnings.push("fx.quote_source=sep38 but dest exposes no SEP-38 quote server — quotes will fail.");
   }
-  if (!c.dest.endpoints.kyc_server) {
+  if (!endpoints.kyc_server) {
     warnings.push("dest has no SEP-12 KYC server — assuming 1:1 delivery with no per-customer KYC.");
   }
-  return { runnable: Boolean(c.dest.endpoints.transfer_server_sep31), warnings };
+
+  const state: LivenessState = !endpoints.transfer_server_sep31
+    ? "not-runnable"
+    : verifiedAt
+      ? "verified"
+      : "unverified";
+
+  return { state, runnable: state === "verified", verifiedAt, warnings };
 }
 
 export const VERBS = [

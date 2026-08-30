@@ -18,6 +18,9 @@ export interface SettlementRef {
 export interface SettlementRequest {
   readonly to: string;
   readonly memo?: string;
+  /** How to encode `memo` on-chain. SEP-31 anchors are not all "text": the
+   *  Anchor Platform issues base64 `hash` memos, which cannot be text-encoded. */
+  readonly memoType?: "text" | "hash" | "id";
   readonly amount: Money;
   readonly corridor: Corridor;
 }

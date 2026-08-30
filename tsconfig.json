@@ -13,16 +13,15 @@
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "baseUrl": ".",
     "paths": {
-      "@corridor/types": ["packages/types/src/index.ts"],
-      "@corridor/manifest": ["packages/manifest/src/index.ts"],
-      "@corridor/adapter-kit": ["packages/adapter-kit/src/index.ts"],
-      "@corridor/sep31": ["packages/sep31/src/index.ts"],
-      "@corridor/router": ["packages/router/src/index.ts"],
-      "@corridor/engine": ["packages/engine/src/index.ts"],
-      "@corridor/stellar": ["packages/stellar/src/index.ts"],
-      "@corridor/service": ["packages/service/src/index.ts"]
+      "@corridor/types": ["./packages/types/src/index.ts"],
+      "@corridor/manifest": ["./packages/manifest/src/index.ts"],
+      "@corridor/adapter-kit": ["./packages/adapter-kit/src/index.ts"],
+      "@corridor/sep31": ["./packages/sep31/src/index.ts"],
+      "@corridor/router": ["./packages/router/src/index.ts"],
+      "@corridor/engine": ["./packages/engine/src/index.ts"],
+      "@corridor/stellar": ["./packages/stellar/src/index.ts"],
+      "@corridor/service": ["./packages/service/src/index.ts"]
     }
   },
   "include": ["packages/*/src/**/*.ts", "examples/**/*.ts", "tests/**/*.ts"]

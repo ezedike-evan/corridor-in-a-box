@@ -10,9 +10,31 @@ export const STROOP_SCALE = 7;
 
 const AMOUNT_RE = /^-?\d+(\.\d+)?$/;
 
-/** True if `s` is a well-formed decimal amount string. */
+/**
+ * True if `s` is a well-formed decimal amount string. **Signed** — this accepts
+ * "-100.00", because subAmounts()/compareAmounts() legitimately produce and
+ * compare negative values.
+ *
+ * This is a SYNTAX check, not an authorization check. Never use it to validate
+ * an amount that is about to be sent to an anchor or the chain: a negative
+ * sourceAmount is well-formed and completely invalid as a payment. Use
+ * `isSettleableAmount` at those boundaries.
+ */
 export function isValidAmount(s: string): boolean {
   return AMOUNT_RE.test(s.trim());
+}
+
+/**
+ * True if `s` is an amount a payment may actually be created for: well-formed,
+ * **strictly positive**, and within `scale` decimal places.
+ *
+ * This is the guard for anything crossing a trust boundary — the HTTP API, the
+ * engine's entry point. `isValidAmount` alone let "-100.00" walk the whole state
+ * machine to `completed` and be handed to the settlement submitter.
+ */
+export function isSettleableAmount(s: string, scale = STROOP_SCALE): boolean {
+  const scaled = toScaled(s, scale);
+  return scaled.ok && scaled.value > 0n;
 }
 
 /** Parse a decimal string into a scaled BigInt (units of 10^-scale). */

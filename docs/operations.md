@@ -47,28 +47,78 @@ When that trail is in the README, check off the last Phase-1 box in the ROADMAP.
 ## 2. Recovering a stuck payment
 
 The engine drives recovery automatically per the manifest's `recovery.rollback`
-policy (`refund_sender` / `hold` / `manual`), but two terminal states need a human.
+policy (`refund_sender` / `hold` / `manual`). `held` always needs a human;
+`refunded` needs a one-line verification.
 
 Inspect any run by key: `GET /payments/:idempotencyKey` (or read the
 `corridor_runs` row directly). `lastError` tells you why it stopped.
 
+### Why there is no automated refund
+
+Two independent constraints, same conclusion:
+
+1. **On-chain reversal is impossible.** A credited Stellar payment is final;
+   nobody can pull it back unilaterally.
+   [`@corridor/stellar`'s `refund()`](../packages/stellar/src/index.ts) exists
+   to say exactly that — it always fails, non-retryably, instead of pretending.
+2. **SEP-31 gives the sender no refund endpoint.** In the protocol, a refund is
+   something the _receiving_ anchor initiates on its own side and merely reports
+   back on the transaction record. There is nothing for the engine to call.
+
+So when recovery wants to return money that has already left the distribution
+account, the engine cannot do it. It parks the run in `held` and a human
+resolves it with the anchor, out of band. The only "automated refund" in this
+system is the no-op case: nothing had gone out yet, so there was nothing to
+reverse (that is what `refunded` means — see below).
+
 ### `held`
 
-The engine reached a non-recoverable failure under a `hold` policy, **or** an
-on-chain refund itself failed. Funds may have left the distribution account.
+The engine reached a non-recoverable failure under a `hold` policy, **or** a
+refund was needed and could not be performed (see
+[why there is no automated refund](#why-there-is-no-automated-refund)). Funds
+may have left the distribution account.
 
 1. Read `stellar_tx_hash` from the run. If set, the bridge payment went out and
-   is sitting with the receiving anchor.
-2. Resolve out-of-band: trigger the **anchor's SEP-31 refund flow**, or complete
-   the payout manually with the anchor. On-chain unilateral reversal is not
-   possible (see [`@corridor/stellar`'s `refund()`](../packages/stellar/src/index.ts)).
+   is sitting with the receiving anchor. `lastError` tells you which door the
+   run came through: under a `hold` policy it carries the **original failure**
+   (`SETTLEMENT_TIMEOUT`, `RECONCILE_MISMATCH`, …) — the refund port was never
+   consulted; under `refund_sender` it carries the **refund port's refusal**,
+   which with the real `StellarSettlementSubmitter` today reads
+   `SETTLEMENT_FAILED: payment … cannot be reversed on-chain` (`@corridor/stellar`
+   is slated to adopt a dedicated `REFUND_UNSUPPORTED` code for this; the
+   "cannot be reversed" message is the stable part).
+2. **Contact the receiving anchor** — exactly that; there is no API for this
+   step. Ask it to refund on its side or to complete the payout manually.
 3. Once settled out-of-band, the run stays `held` as an audit record. Do not
    re-submit the same `idempotencyKey` — the idempotency gate will reject it.
 
 ### `refunded`
 
-The engine reversed (or had nothing to reverse) and returned the sender's funds.
-No action needed beyond confirming the sender was made whole.
+**The engine believes no on-chain payment went out.** Despite the name, nothing
+was reversed — nothing can be (see
+[why there is no automated refund](#why-there-is-no-automated-refund)). In
+today's engine this state is reachable only when settlement never succeeded
+under a `refund_sender` policy: the engine found no `stellar_tx_hash` on the
+run, so there was nothing to undo, and it recorded `refunded` without touching
+the chain. Verify the belief before closing the run:
+
+- `stellar_tx_hash` must be **unset**. If it IS set (with the real
+  `StellarSettlementSubmitter` that combination should be impossible; the
+  mock's `refund()` does succeed, so test data can produce it), money left the
+  account and the state is lying — treat the run as `held`, follow the steps
+  above, and file a bug.
+- An unset hash is the engine's belief, not proof: an **ambiguous submission**
+  can land on-chain without the engine ever learning the hash (the submit
+  succeeded but confirmation timed out on Horizon read lag, or the send itself
+  ended ambiguously). Read `lastError` — on `SETTLEMENT_TIMEOUT` or an
+  ambiguous-submit message, check Horizon for the distribution account's recent
+  payments (the same check "Crash mid-flight" below prescribes for `settling`)
+  before declaring the sender whole.
+
+If an anchor-driven refund path ever lands (a refund-wait state between
+`recovering` and `refunded`), a second, legitimate way into this state appears —
+one where a payment **did** go out and the anchor returned it, hash set. The
+run's trail tells the two apart.
 
 ### `failed` before `settled`
 

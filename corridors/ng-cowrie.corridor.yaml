@@ -1,0 +1,54 @@
+# Corridor — USD → Nigeria (NGN) via Cowrie Exchange, a real SEP-31 anchor.
+#
+# Unlike mx-example, every endpoint below is REAL. Confirmed 2026-08-11 by
+# actually running `@corridor/probe` against cowrie.exchange's live production
+# API (see CHANGELOG.md): the URLs are copied verbatim from its published
+# stellar.toml, SEP-10 signed a challenge and got back a real JWT, SEP-12
+# answered, and SEP-31 `/info` returned a non-empty receive list (NGNT, USDC).
+# That is why `dest.endpoints.endpoints_verified_at` is set below and
+# `corridor plan` reports this lane VERIFIED.
+#
+# What is NOT true: no payment has been attempted, and none should be without
+# a KYC'd business relationship with Cowrie — this repo has no such
+# relationship. Cowrie also publishes no ANCHOR_QUOTE_SERVER (no SEP-38), so
+# `fx.quote_source` is `external`: there is no on-chain firm-quote path today,
+# only whatever off-protocol pricing Cowrie's own KYC'd integration exposes.
+id: ng-cowrie
+status_note: "REAL — Cowrie Exchange (Lagos, Nigeria), confirmed 2026-08-11. No SEP-38, no payment attempted, no business relationship in place."
+
+source:
+  name: USD Sending Anchor
+  asset: USDC
+  endpoints:
+    home_domain: sending-anchor.example
+
+dest:
+  name: Cowrie Exchange (Nigeria)
+  asset: "iso4217:NGN"
+  endpoints:
+    home_domain: cowrie.exchange
+    transfer_server_sep31: https://api.cowrie.exchange/sep31/direct
+    web_auth: https://api.cowrie.exchange/web_auth
+    kyc_server: https://api.cowrie.exchange/kyc
+    endpoints_verified_at: "2026-08-11"
+
+fx:
+  path: ["USD", "USDC", "NGN"]
+  quote_source: external
+  who_holds_risk: receiving_anchor
+  quote_ttl_seconds: 60
+
+compliance:
+  source_jurisdiction: US
+  dest_jurisdiction: NG
+  travel_rule_profile: default
+
+settlement:
+  bridge_asset: USDC
+  network: public
+  asset_issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN # USDC mainnet issuer
+
+recovery:
+  max_retries: 3
+  timeout_seconds: 900
+  rollback: refund_sender

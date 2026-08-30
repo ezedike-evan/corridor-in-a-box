@@ -52,16 +52,38 @@ describe("corridor CLI", () => {
     expect(r.stderr).toContain("cannot read or parse");
   });
 
-  it("plan: reports full liveness for a fully-specified corridor", () => {
+  // Liveness has three states. The distinction that matters: a corridor whose
+  // endpoints are merely PRESENT must never be reported as runnable — that is
+  // how tooling ends up certifying a lane nobody has checked.
+
+  it("plan: reports VERIFIED only when endpoints_verified_at is set", () => {
+    const r = run(["plan", "tests/fixtures/verified.corridor.yaml"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("liveness: ✓ VERIFIED");
+    expect(r.stdout).toContain("2026-01-01");
+  });
+
+  it("plan: reports UNVERIFIED for a fully-specified but unchecked corridor", () => {
     const r = run(["plan", "corridors/reference.corridor.yaml"]);
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain("liveness: ✓ endpoints present for all five steps");
+    expect(r.stdout).toContain("liveness: ? UNVERIFIED");
+    expect(r.stdout).toContain("NOT runnable");
+    // Regression guard for the claim that got the project rejected: a corridor
+    // with unconfirmed endpoints must never carry the green marker.
+    expect(r.stdout).not.toContain("✓ VERIFIED");
+  });
+
+  it("plan: never reports a placeholder-endpoint corridor as runnable", () => {
+    const r = run(["plan", "corridors/mx-example.corridor.yaml"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("UNVERIFIED");
+    expect(r.stdout).not.toContain("✓ VERIFIED");
   });
 
   it("plan: reports all three liveness warnings for a corridor missing dest endpoints", () => {
     const r = run(["plan", "corridors/ng-cn.corridor.yaml"]);
     expect(r.status).toBe(0); // warnings don't fail the command
-    expect(r.stdout).toContain("NOT runnable");
+    expect(r.stdout).toContain("NOT RUNNABLE");
     expect(r.stdout).toContain("quotes will fail");
     expect(r.stdout).toContain("no per-customer KYC");
   });

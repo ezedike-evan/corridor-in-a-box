@@ -13,23 +13,43 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
+    # Job-level, deliberately. The `secrets` context is NOT available in a
+    # step-level `if:` — using it there is not a no-op, it makes the whole
+    # workflow file invalid, and GitHub then fails every run at 0s without ever
+    # starting a step. Lifting the secret into `env` here is what lets the
+    # `if:` below actually evaluate. Same fix as attest-anchors.yml.
+    env:
+      SIGNER_SECRET: ${{ secrets.CORRIDOR_SIGNER_SECRET }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+
+      # The values below are PUBLIC (the SDF test anchor) and are documented in
+      # .env.example. Defaulting to them means the probe actually probes on every
+      # run instead of self-skipping — this job passed green for months while
+      # executing nothing, which is worse than no job at all because it looked
+      # like evidence. Only CORRIDOR_SIGNER_SECRET is a real secret; without it
+      # the auth-dependent legs skip and the step below says so out loud.
       - run: pnpm exec vitest run tests/integration/sep31-live.test.ts
         env:
           # Known-good public values for every var here (SDF test anchor) are
           # documented in .env.example; only CORRIDOR_SIGNER_SECRET is sensitive.
-          ANCHOR_HOME_DOMAIN: ${{ secrets.ANCHOR_HOME_DOMAIN }}
-          ANCHOR_SEP31_TRANSFER_SERVER: ${{ secrets.ANCHOR_SEP31_TRANSFER_SERVER }}
-          ANCHOR_SEP31_QUOTE_SERVER: ${{ secrets.ANCHOR_SEP31_QUOTE_SERVER }}
-          ANCHOR_SEP31_WEB_AUTH: ${{ secrets.ANCHOR_SEP31_WEB_AUTH }}
-          ANCHOR_SEP31_KYC_SERVER: ${{ secrets.ANCHOR_SEP31_KYC_SERVER }}
-          ANCHOR_ASSET_ISSUER: ${{ secrets.ANCHOR_ASSET_ISSUER }}
-          ANCHOR_DEST_ASSET: ${{ secrets.ANCHOR_DEST_ASSET }}
-          CORRIDOR_SIGNER_SECRET: ${{ secrets.CORRIDOR_SIGNER_SECRET }}
+          ANCHOR_HOME_DOMAIN: ${{ secrets.ANCHOR_HOME_DOMAIN || 'testanchor.stellar.org' }}
+          ANCHOR_SEP31_TRANSFER_SERVER: ${{ secrets.ANCHOR_SEP31_TRANSFER_SERVER || 'https://testanchor.stellar.org/sep31' }}
+          ANCHOR_SEP31_QUOTE_SERVER: ${{ secrets.ANCHOR_SEP31_QUOTE_SERVER || 'https://testanchor.stellar.org/sep38' }}
+          ANCHOR_SEP31_WEB_AUTH: ${{ secrets.ANCHOR_SEP31_WEB_AUTH || 'https://testanchor.stellar.org/auth' }}
+          ANCHOR_SEP31_KYC_SERVER: ${{ secrets.ANCHOR_SEP31_KYC_SERVER || 'https://testanchor.stellar.org/sep12' }}
+          ANCHOR_ASSET_ISSUER: ${{ secrets.ANCHOR_ASSET_ISSUER || 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5' }}
+          ANCHOR_DEST_ASSET: ${{ secrets.ANCHOR_DEST_ASSET || 'iso4217:USD' }}
+          CORRIDOR_SIGNER_SECRET: ${{ env.SIGNER_SECRET }}
+
+      - name: Warn when the auth-dependent legs could not run
+        if: ${{ env.SIGNER_SECRET == '' }}
+        run: |
+          echo "::warning::CORRIDOR_SIGNER_SECRET is not set, so the SEP-10 and" \
+               "SEP-12 legs were skipped. This run verified less than it looks like."

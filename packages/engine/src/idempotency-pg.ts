@@ -32,11 +32,19 @@ create table if not exists corridor_runs (
   quote_id        text,
   stellar_tx_hash text,
   last_error      text,
+  owner           text,
   updated_at      timestamptz not null default now()
 );`;
 
+/** Additive migrations for tables created by an earlier version. `add column if
+ *  not exists` is a no-op on a fresh table and the upgrade path on an existing
+ *  one — without this, a deployment that predates run ownership would keep
+ *  serving unscoped reads because the column silently isn't there. */
+const ALTER_TABLE_SQL = [`alter table corridor_runs add column if not exists owner text;`];
+
 export async function migrate(db: Queryable): Promise<void> {
   await db.query(CREATE_TABLE_SQL);
+  for (const sql of ALTER_TABLE_SQL) await db.query(sql);
 }
 
 interface Row {
@@ -48,6 +56,7 @@ interface Row {
   quote_id: string | null;
   stellar_tx_hash: string | null;
   last_error: string | null;
+  owner: string | null;
 }
 
 function toRun(r: Row): StoredRun {
@@ -60,6 +69,7 @@ function toRun(r: Row): StoredRun {
     quoteId: r.quote_id ?? undefined,
     stellarTxHash: r.stellar_tx_hash ?? undefined,
     lastError: r.last_error ?? undefined,
+    owner: r.owner ?? undefined,
   };
 }
 
@@ -78,8 +88,8 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
     const res = await this.db.query<{ idempotency_key: string }>(
       `insert into corridor_runs
          (idempotency_key, corridor_id, state, version, transaction_id,
-          quote_id, stellar_tx_hash, last_error, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8, now())
+          quote_id, stellar_tx_hash, last_error, owner, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
        on conflict (idempotency_key) do nothing
        returning idempotency_key`,
       [
@@ -91,6 +101,7 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
         run.quoteId ?? null,
         run.stellarTxHash ?? null,
         run.lastError ?? null,
+        run.owner ?? null,
       ],
     );
     return res.rows.length > 0;
@@ -99,7 +110,7 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
   async get(key: string): Promise<StoredRun | undefined> {
     const res = await this.db.query<Row>(
       `select idempotency_key, corridor_id, state, version, transaction_id,
-              quote_id, stellar_tx_hash, last_error
+              quote_id, stellar_tx_hash, last_error, owner
          from corridor_runs where idempotency_key = $1`,
       [key],
     );
@@ -112,13 +123,17 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
    * strictly higher `version` than what's stored. A stale writer (e.g. a
    * resumed-then-superseded worker) is silently ignored, which is exactly the
    * double-advance protection we want.
+   *
+   * `owner` is deliberately absent from the `do update set` list: ownership is
+   * established once by create() and must be immutable thereafter, or a later
+   * write could quietly reassign a run to a different tenant.
    */
   async put(run: StoredRun): Promise<void> {
     await this.db.query(
       `insert into corridor_runs
          (idempotency_key, corridor_id, state, version, transaction_id,
-          quote_id, stellar_tx_hash, last_error, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8, now())
+          quote_id, stellar_tx_hash, last_error, owner, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
        on conflict (idempotency_key) do update set
          state           = excluded.state,
          version         = excluded.version,
@@ -137,6 +152,7 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
         run.quoteId ?? null,
         run.stellarTxHash ?? null,
         run.lastError ?? null,
+        run.owner ?? null,
       ],
     );
   }

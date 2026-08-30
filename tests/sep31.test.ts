@@ -77,7 +77,11 @@ const intent: PaymentIntent = {
   idempotencyKey: "k",
   corridorId: "test",
   sender: { id: "s" },
-  recipient: { id: "recipient-acct" },
+  // sep12Id is the customer id the RECEIVING anchor issued at registration. It
+  // is what SEP-12 status is looked up by and what SEP-31 open sends as
+  // receiver_id; without it the adapter fails closed rather than checking the
+  // operator's own account (see tests/security.test.ts).
+  recipient: { id: "recipient-acct", sep12Id: "anchor-cust-1" },
   sourceAmount: { asset: "USDC", amount: "100" },
 };
 
@@ -265,5 +269,29 @@ describe("SEP-12 compliance", () => {
       const r = await adapter.ensureCompliance(intent, c);
       expect(r.ok && r.value.status).toBe(expected);
     }
+  });
+});
+
+describe("refund initiation (deliberately unsupported)", () => {
+  // SEP-31 has no sender-initiated refund endpoint: a refund is initiated by
+  // the RECEIVING anchor and only reported back on the transaction record.
+  // The generic adapter must fail closed rather than invent an endpoint.
+  it("fails closed with a non-retryable REFUND_UNSUPPORTED", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn, calls } = fakeFetch({});
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+
+    const r = await adapter.requestRefund("tx-1");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("REFUND_UNSUPPORTED");
+      expect(r.error.retryable).toBe(false);
+      // The message must carry the reason and the alternative, so an operator
+      // reading a run's lastError knows this is protocol, not an outage.
+      expect(r.error.message).toContain("no sender-initiated refund endpoint");
+      expect(r.error.message).toContain("out-of-band");
+    }
+    // Fail-closed means CLOSED: no bespoke HTTP call dressed up as SEP-31.
+    expect(calls).toHaveLength(0);
   });
 });

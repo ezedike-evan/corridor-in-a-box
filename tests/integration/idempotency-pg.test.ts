@@ -79,6 +79,23 @@ run("PostgresIdempotencyStore (live Postgres)", () => {
     expect(got?.version).toBe(5);
   });
 
+  it("persists and reads back refund_pending against real Postgres", async () => {
+    // The state column is plain text with no CHECK constraint, so the new
+    // state needs no migration — asserted here rather than assumed.
+    const s = store();
+    await s.create(newRun("k-rp"));
+    await s.put({
+      idempotencyKey: "k-rp",
+      corridorId: "c",
+      state: "refund_pending",
+      version: 2,
+      stellarTxHash: "hash_rp",
+    });
+    const got = await s.get("k-rp");
+    expect(got?.state).toBe("refund_pending");
+    expect(got?.stellarTxHash).toBe("hash_rp");
+  });
+
   it("round-trips all columns and maps NULLs to undefined", async () => {
     const s = store();
     await s.create(newRun("k3"));

@@ -7,6 +7,212 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Fixed — refunded runbook implied a reversal that never happens (2026-08-29)
+
+`docs/operations.md`'s `refunded` section said the engine "reversed (or had
+nothing to reverse)" the payment. With the real `StellarSettlementSubmitter`
+the engine never reverses anything — `refund()` always fails and the run
+escalates to `held` — so `refunded` is reachable only when no on-chain payment
+ever went out. The old wording could send an operator away satisfied while
+money sat with an anchor. The section now states the precondition plainly
+(`stellar_tx_hash` must be unset; if set, treat as `held` and file a bug —
+and an unset hash is the engine's belief, not proof: on an ambiguous
+submission, verify against Horizon before declaring the sender whole), the
+"why there is no automated refund" reasoning — on-chain reversal impossible,
+and SEP-31 offering the sender no refund endpoint — appears once in full and
+is linked from the `held`/`refunded` sections, and the `held` steps say
+"contact the anchor" outright instead of gesturing at a refund flow that has
+no API. ROADMAP's refund item gets the same precision.
+
+### Added — SEP-31 refund initiation fails closed with `REFUND_UNSUPPORTED` (2026-08-29)
+
+SEP-31 defines no sender-initiated refund endpoint: a refund is a decision the
+receiving anchor makes on its own side, only reported back through the
+transaction record's `refunds` object. So `Sep31Adapter.requestRefund()` is
+now an explicit, documented fail-closed — it returns the new non-retryable
+`REFUND_UNSUPPORTED` error code without touching the network, and the message
+points at the out-of-band runbook path instead. Anything else would be a
+bespoke, anchor-specific endpoint dressed up as protocol conformance; anchors
+that do expose a proprietary refund API belong behind their own
+`AnchorAdapter` implementation, not in `packages/sep31`. Nothing calls the
+method yet (whether refund initiation belongs on the `AnchorAdapter` port is
+a separate design decision); it exists to occupy the name with the refusal.
+The engine's escalation of a refused refund to `held` is asserted at the
+engine seam, the service maps the code to HTTP 501, the on-chain submitter's
+refusal message now points at the out-of-band runbook instead of a "SEP-31
+anchor refund" flow that does not exist, and `docs/sep-coverage.md` states
+the scope boundary plainly.
+
+### Added — `refund_pending` state for anchor-driven refunds (2026-08-29)
+
+The corridor state machine gains `refund_pending`: "we asked the receiving
+anchor to refund and are waiting to hear back." Today refunds always fail
+immediately and the run lands in `held`, so the state has no producer yet —
+but once refunds are anchor-driven they become asynchronous, and an async
+operation with no state of its own is a run that looks finished while money
+is still in motion. Entered only from `recovering`; exits only to
+`refunded`, `held`, or `failed`; not terminal. It inherits `recovering`'s
+double-spend contract in full — every successor is terminal, so `settling`
+is unreachable from it by construction, and the property suite now asserts
+that over all paths (the same all-paths check that historically caught
+`settled -> recovering -> settling`). Both idempotency stores round-trip the
+new state (it is just a string, but the tests assert it rather than assume
+it, including against real Postgres).
+
+### Fixed — probe missed single-quoted stellar.toml values (2026-08-11)
+
+`tomlValue()` only matched double-quoted `KEY = "value"` lines. Both quote
+styles are valid TOML, and real anchors use both — `cowrie.exchange`'s live
+`stellar.toml` is entirely single-quoted, so a live probe against it detected
+only SEP-1 (the toml itself) and silently missed its real SEP-10, SEP-12, and
+SEP-31 support. Found by actually running `@corridor/probe` against a real
+anchor rather than only against test fixtures, which had only ever used
+double quotes. Fixed to accept either quote style; regression tests in
+`tests/probe.test.ts` cover both. Re-probing after the fix confirmed
+`cowrie.exchange` for real: SEP-10 challenge signed and exchanged for a JWT,
+SEP-12 answered, SEP-31 `/info` returned a non-empty receive list (NGNT,
+USDC) — added as the `ng-cowrie` corridor in `web/lib/corridors.ts`, the
+first corridor in the repo with `endpoints_verified_at` actually set. No
+SEP-38 quote server is published, so its `quote_source` is `external`, and no
+payment has been attempted — a real settlement still needs a KYC'd business
+relationship with Cowrie that this repo does not have.
+
+### Fixed — correctness & security (2026-08-10 audit)
+
+A second audit pass, this time over the settle leg, the on-chain registry
+probe, and credential comparisons. Each finding below is covered by a new
+regression test (`tests/stellar.test.ts`, `tests/engine.test.ts`,
+`tests/probe.test.ts`, `tests/types.test.ts`).
+
+- **An ambiguous Stellar submission was blindly retried — a real
+  double-payment path.** `StellarSettlementSubmitter.submit()` caught every
+  exception from `submitTransaction()` identically, including a client-side
+  network timeout that can happen AFTER Horizon already applied the
+  transaction. The retry loop then built and sent an independently-valid
+  second payment for the same amount and destination. `submit()` now
+  distinguishes a confirmed Horizon rejection (`TransactionFailedError`,
+  e.g. `tx_bad_seq` — safe to retry) from a genuinely ambiguous failure,
+  which it resolves by looking the transaction up by its precomputed hash
+  before deciding, mirroring the pattern `@corridor/attester` already used
+  correctly. `confirm()`'s own poll-timeout path was also flipped from
+  retryable to non-retryable for the same reason — a confirmation timeout on
+  an already-accepted transaction is read-side lag, not proof of failure.
+- **No serialization across concurrent settlements from one signer.**
+  `loadAccount()` was called fresh, unlocked, on every `submit()` — two
+  concurrent payments from the same account could read the same sequence
+  number and race. Added a minimal per-instance async lock around
+  `loadAccount → build → sign → submitTransaction`, released immediately
+  after submission (not held through the slower `confirm()` poll, so one
+  ambiguous submission can't head-of-line-block every other in-flight
+  payment).
+- **A firm quote's expiry was checked once, then never again for the rest of
+  the settle/retry loop.** A slow anchor or a couple of retries could settle
+  at a stale, no-longer-honoured rate with no error. The retry loop now
+  re-checks `expiresAt` on every pass and fails closed (`QUOTE_EXPIRED`)
+  rather than submitting against a dead quote.
+- **SSRF via unvalidated `stellar.toml` endpoints in `@corridor/probe`.**
+  `WEB_AUTH_ENDPOINT` / `ANCHOR_QUOTE_SERVER` / `KYC_SERVER` /
+  `DIRECT_PAYMENT_SERVER` were fetched straight out of a target domain's own
+  toml with no host or scheme validation — reachable via the repo's own
+  "open a PR to add an anchor domain" flow. Added `isSafeUrl()`
+  (`packages/probe/src/url-safety.ts`), a single choke point in the shared
+  `get()` helper that refuses non-`https` and loopback/link-local/RFC1918/
+  metadata-endpoint hosts. Hostname/IP-literal only — does not close DNS
+  rebinding, tracked as a follow-up.
+- **Non-constant-time credential comparisons.** The web payments route's
+  bearer check and `@corridor/service`'s API-key/owner checks used ordinary
+  `!==`/`Set.has()`, which leak timing information about how much of a
+  presented credential matched. Added `constantTimeEqual` (`@corridor/types`)
+  and used it at every credential-comparison site; `Set.has()` lookups now
+  iterate and compare every candidate in constant time rather than
+  short-circuiting on the first (or hash-bucket) match.
+- **`release.yml`'s tag/version-match guard could be bypassed via manual
+  `workflow_dispatch`.** The check only ran `if:` the ref was a `cli-v*` tag
+  push; a manual dispatch run skipped it entirely and published whatever
+  `package.json` said. The check now runs unconditionally on both trigger
+  paths, looking up a matching tag by commit SHA when the ref itself isn't
+  one.
+- `contracts/{registry,attester}/test_snapshots/` (soroban-sdk `testutils`
+  ledger-state dumps) are no longer tracked in git — nothing reads them
+  back, they regenerated dirty on every `cargo test` run, and their missing
+  trailing newline broke `pnpm lint` for anyone who ran the contract tests
+  first.
+- Bumped `typescript-eslint` and `tsup` to clear their patched advisories
+  (brace-expansion DoS, esbuild dev-server file read). `vitest` and `eslint`
+  carry the remaining dev-only advisories but need a major-version bump
+  (2→5, 9→10) to clear — deferred as a separate, deliberate upgrade;
+  `pnpm audit --prod` is clean and none of these ship in a built artifact.
+
+### Fixed — correctness & security
+
+Findings from an audit of this repo. Each was confirmed by execution against the
+code as shipped, and each is now covered by a regression test in
+`tests/security.test.ts`.
+
+- **Negative amounts settled.** `isValidAmount` is a _signed_ syntax check
+  (`subAmounts` needs negatives) and was the only guard at both the HTTP boundary
+  and the engine entry point, so `POST /payments` with `"-100.00"` returned
+  `200 completed` and handed the negative amount to the settlement submitter.
+  Added `isSettleableAmount` (well-formed **and** strictly positive) and used it
+  at both boundaries, plus an optional per-corridor `limits.max_amount` ceiling.
+- **KYC was checked against the wrong account.** The SEP-12 status query was
+  keyed to the operator's own SEP-10 signing account whenever a signer was
+  configured — which is every production wiring — so `comply` answered "is the
+  operator in good standing?" and recorded the result as the _recipient's_
+  verdict. It now queries the recipient's SEP-12 customer id
+  (`PartyRef.sep12Id`) and fails closed when there isn't one. Relatedly,
+  `openTransaction` now sends `receiver_id`/`sender_id`, which it previously
+  omitted entirely.
+- **SEP-10 authentication failed open.** `authToken()` returned `undefined` on
+  every failure path and callers proceeded _anonymously_, so an anchor that
+  errored on `/auth` still had its SEP-12 answer accepted as an authenticated
+  compliance verdict. Auth failure is now a hard, retryable error whenever a
+  signer is configured.
+- **`GET /payments/:key` leaked across tenants.** Any valid API key could read
+  any run — including its `stellarTxHash` — by guessing a caller-chosen
+  idempotency key. Runs now carry an `owner` set from the validated credential,
+  reads are scoped to it, and only the error _code_ is returned rather than the
+  stored message (which carries anchor URLs and upstream response bodies).
+- **Failed authentication was not rate-limited.** The `401` returned before the
+  limiter, so API keys could be brute-forced at line rate. Rate limiting now runs
+  first.
+- **The rate limiter was bypassable.** It keyed off the _unvalidated_ bearer
+  token, so rotating the token minted a fresh bucket per request. It now keys off
+  a recognised key, falling back to the client IP.
+- **The SEP-38 `sell_amount` was discarded.** The anchor's own sell amount was
+  parsed and thrown away, so the settle leg paid the amount originally requested
+  rather than the one the firm quote bound to. Quotes are also now rejected when
+  `buy_amount` contradicts `price × sell_amount` beyond a rounding tolerance.
+- **The web API route lent out its credentials.** It proxied any anonymous
+  caller's body to the internal `@corridor/service` _with the server's API key_
+  attached. Proxying now requires `CORRIDOR_WEB_API_KEY` and fails closed if the
+  proxy is configured without one. Added a request body-size cap; the demo's
+  in-memory run store is now bounded.
+- **Security headers.** The web app now sends CSP, `X-Frame-Options`,
+  `X-Content-Type-Options`, `Referrer-Policy` and `Permissions-Policy`.
+- **Stuck spinner.** A failed `fetch` in the payment runner threw with `running`
+  still true, disabling the button until a page reload. Also fixed the failed-step
+  highlight, which was computed from a hardcoded state and never rendered.
+
+### Changed — honesty of reported status
+
+- **Liveness now has three states, not two.** `runnable`/`not runnable` was
+  derived purely from whether an endpoint string was non-empty, so a manifest
+  naming a fictional anchor was reported as healthy by both `corridor plan` and
+  the dashboard. Corridors are now `VERIFIED` (endpoints confirmed against a
+  published `stellar.toml` on a recorded date, via the new
+  `dest.endpoints.endpoints_verified_at`), `UNVERIFIED` (present but unchecked —
+  **the honest default**, and where every corridor in this repo currently sits),
+  or `NOT RUNNABLE`.
+- **`mx-bitso.corridor.yaml` renamed to `mx-example.corridor.yaml`** and stripped
+  of the company name. Its endpoints are and always were fictional; naming a real
+  company on it implied a relationship that does not exist.
+- **Two ROADMAP items reverted from ✅ to ⬜** because they did not survive a code
+  read: Corridor #1 (a template with placeholder endpoints, not a live lane) and
+  "Real refund path (reverse settlement)" (`refund()` unconditionally fails —
+  what ships is escalation to a manual `held`, not a reversal). The grant
+  proposal's corresponding claims were corrected the same way.
+
 ### Added
 
 - GitHub issue and PR templates.
@@ -77,6 +283,55 @@ CONFLICT DO NOTHING` in Postgres) implemented by both stores, plus regression
   (`testanchor.stellar.org`) — the read-only probe runs against a real anchor
   with no self-hosted infrastructure.
 
+- README links the live web dashboard (corridor-in-a-box.vercel.app), which
+  the Vercel GitHub integration deploys from `main`.
+- **On-chain anchor conformance registry.** New Soroban contracts
+  (`contracts/registry`, `contracts/attester`) let an enrolled attester write
+  probe-based SEP conformance data on-chain per anchor domain: the registry
+  only accepts writes forwarded by the configured attester contract
+  (`require_auth` chained through both), enforces a per-domain attestation
+  cooldown, and caps storage (`MAX_DOMAINS`). Deployed to testnet — contract
+  IDs committed in `contracts/deployments.json`; mainnet fields stay `null`
+  by policy until a testnet deployment has been exercised for a wave. 21
+  Rust tests, clippy clean.
+- `@corridor/probe` — runs real SEP-10/SEP-38/SEP-31 conformance probes
+  against a domain's published `stellar.toml` (auth challenge, firm-quote
+  expiry check, non-empty SEP-31 receive list) and reports which SEPs are
+  advertised vs. actually served.
+- `@corridor/attester` — signs and submits a `ProbeResult` through the
+  on-chain attester contract; maps raw Soroban host errors to
+  operator-readable messages ("not an enrolled attester", "too soon: within
+  the cooldown window").
+- `attest-anchors.yml` (scheduled + manual dispatch) probes every domain in
+  the new `contracts/anchors.json` and submits attestations on-chain when
+  `ATTESTER_SECRET` is configured; `nightly-live-anchor.yml` now defaults
+  `ANCHOR_*` env vars to public SDF testanchor values when the matching
+  secrets are unset, so its live-anchor assertions actually run in CI
+  instead of skipping.
+- The web dashboard's "Attested anchors" panel now reads the on-chain
+  registry (`web/lib/registry.ts`, via a Soroban simulation call — no
+  signing key, no fee) instead of showing only the static corridor list.
+  The page is incrementally re-rendered on an hourly `revalidate`, so what
+  you see is real chain data up to an hour old — **not** a read per request,
+  as this entry previously claimed. Each card still reports its own
+  attestation age in ledgers, which is the number that actually matters.
+  The Corridors section, which is still the static manifest, is explicitly
+  labeled "manifest snapshot — not a live liveness probe" so the two are
+  never confused.
+- `@corridor/router` gained a registry-gated `RouteResolver`
+  (`RegistryRouteResolver`): fails closed on an unreachable registry,
+  refuses unattested domains, and enforces a max-staleness bound. Opt-in
+  alongside the existing static resolver — not yet the default for
+  `@corridor/engine` callers.
+- `tests/money-properties.test.ts` and `tests/state-properties.test.ts` —
+  property-based tests (round-trip/commutativity/associativity for money
+  math over ~400 generated cases each; an exhaustive walk of the engine's
+  state-transition graph). The state-graph walk found
+  `settled -> recovering -> settling` was reachable in the transition table
+  (never taken by actual control flow, but reachable by the table alone) —
+  see the `retrying`/`recovering` split below.
+- Upgraded `@stellar/stellar-sdk` 13 → 16 across every workspace package.
+
 ### Fixed
 
 - **The SEP-38 quote request was spec-invalid and every live anchor rejected
@@ -107,6 +362,32 @@ CONFLICT DO NOTHING` in Postgres) implemented by both stores, plus regression
   `trustProxy`.
 - A thrown error inside the HTTP request handler (e.g. an unreachable idempotency
   DB) now returns `500` instead of hanging the socket / risking a process crash.
+- **First real testnet settlement.** `pnpm verify:settle`
+  (`examples/verify-settle-leg.ts`) executed a real payment on Stellar
+  testnet — transaction hash and ledger committed in ROADMAP.md — closing
+  the "settle leg never actually run" gap.
+- **Five spec bugs found by running against a real SEP-31 anchor.** Standing
+  up the Anchor Platform reference server locally and running the full
+  quote → comply → settle flow against it (rather than mocks) surfaced and
+  fixed: a SEP-38 `price`/`total_price` inversion, memo type sent as text
+  instead of hash, a missing `destination_asset`/`fields.transaction`, a
+  SEP-12 `type` mismatch, and Horizon error responses swallowing
+  `result_codes`. The resulting corridor run — SEP-10 auth, SEP-12
+  registration for both parties, SEP-38 firm quote, SEP-31 transaction
+  open, and a settle tx the anchor attributed by hash memo — landed with
+  its transaction hash and ledger committed in ROADMAP.md. Separately, the
+  new probe/attest packages above independently confirmed
+  `testanchor.stellar.org`'s own SEP-31 receive list is empty, so it does
+  not actually serve SEP-31 despite advertising it.
+- **A settle failure that already moved money could be retried into a
+  second payment.** The `recovering` state used to allow re-entering
+  `settling`, so a settle failure discovered after reconcile (money already
+  on-chain) could, per the state table alone, loop back into resubmitting.
+  Found by the new exhaustive state-graph property test, not by any code
+  path actually taking it. `recovering` is now split from `retrying`:
+  `retrying` is the only state permitted to re-enter `settling`, reserved
+  for failures known to have happened before money moved; `recovering` is
+  terminal and cannot.
 
 ## [0.1.0] — 2026-06-18
 

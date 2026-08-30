@@ -4,6 +4,8 @@
 // handle, not exceptions that unwind the stack and lose the in-flight payment's
 // state.
 
+import { timingSafeEqual } from "node:crypto";
+
 export type Ok<T> = { readonly ok: true; readonly value: T };
 export type Err<E> = { readonly ok: false; readonly error: E };
 export type Outcome<T, E = CorridorError> = Ok<T> | Err<E>;
@@ -24,6 +26,7 @@ export type CorridorErrorCode =
   | "ANCHOR_UNAVAILABLE"
   | "SETTLEMENT_FAILED"
   | "SETTLEMENT_TIMEOUT"
+  | "REFUND_UNSUPPORTED"
   | "RECONCILE_MISMATCH"
   | "IDEMPOTENCY_CONFLICT";
 
@@ -42,6 +45,23 @@ export const fail = (
 ): Err<CorridorError> =>
   err({ code, message, retryable: opts.retryable ?? false, cause: opts.cause });
 
+/**
+ * Compare two strings without leaking equality through early-exit timing —
+ * for credential comparisons (bearer tokens, API keys), where `a !== b` lets
+ * an attacker learn how many leading bytes matched from response latency.
+ *
+ * The length check runs first: a length mismatch only leaks the length, not
+ * the value, so short-circuiting there doesn't reintroduce the leak
+ * `timingSafeEqual` exists to close (it throws on unequal-length buffers
+ * rather than comparing them).
+ */
+export function constantTimeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
 // --- Money ---------------------------------------------------------------
 // Amounts are strings on purpose. Never represent money as a JS number;
 // FX math and stroop-level precision both lose data through float64.
@@ -56,8 +76,20 @@ export interface Money {
 
 /** Opaque reference to a party. Real PII lives behind the anchor's SEP-12, never here. */
 export interface PartyRef {
+  /** OUR internal reference for this party. Meaningless to the anchor. */
   readonly id: string;
   readonly jurisdiction?: string;
+  /**
+   * Customer id issued by the RECEIVING anchor's SEP-12, obtained by registering
+   * this party with that anchor (SEP-12 `PUT /customer`) before the payment.
+   *
+   * This is the only identifier the receiving anchor can resolve. `id` above is
+   * ours and means nothing to them, and the operator's own SEP-10 account
+   * identifies the OPERATOR, not the customer — checking KYC against it answers
+   * a question nobody asked. A corridor whose dest exposes a `kyc_server`
+   * requires this to be set; the engine fails closed without it.
+   */
+  readonly sep12Id?: string;
 }
 
 export interface PaymentIntent {
@@ -68,6 +100,20 @@ export interface PaymentIntent {
   readonly recipient: PartyRef;
   /** What the sender is putting in, in the corridor's source asset. */
   readonly sourceAmount: Money;
+  /**
+   * SEP-31 transaction fields the DESTINATION anchor requires in order to pay
+   * out — routing number, account number, deposit type, and so on.
+   *
+   * The anchor decides the names: they come from `fields.transaction` in its
+   * `GET /sep31/info` response, where each is marked optional or not. Send an
+   * empty set to an anchor that requires them and it rejects the transaction
+   * ("'fields' field cannot be empty"). The values are per-payment, which is why
+   * they live on the intent rather than the manifest.
+   *
+   * These are payout instructions, not identity documents — customer PII still
+   * goes to the anchor through SEP-12, never through here.
+   */
+  readonly destinationFields?: Readonly<Record<string, string>>;
 }
 
 // --- Decimal-safe money math ---------------------------------------------

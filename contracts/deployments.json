@@ -1,0 +1,27 @@
+{
+  "$comment": [
+    "Deployed contract addresses. Committed so consumers of @corridor/registry",
+    "and the dashboard resolve the same registry the attester writes to, without",
+    "a lookup service or an env var everyone has to be told about.",
+    "Mainnet stays null until the testnet deployment has been exercised for a",
+    "wave and the upgrade path verified — a mainnet contract is a public artifact",
+    "that cannot be quietly withdrawn."
+  ],
+  "testnet": {
+    "networkPassphrase": "Test SDF Network ; September 2015",
+    "rpcUrl": "https://soroban-testnet.stellar.org",
+    "registry": "CDFOVONWR3GGMGH2OC7YATRZE64RKSRAS7UMF7R2TSC6LNNO5G32RSX4",
+    "attester": "CAHSKTAVHIES6MX2DUGNBA4VDB77WYNKEIZPOT7QX2RMJUL5RUIVKX2L",
+    "deployedAt": "2026-08-08",
+    "wasm": {
+      "registry": "target/wasm32v1-none/release/corridor_registry.wasm",
+      "attester": "target/wasm32v1-none/release/corridor_attester.wasm"
+    }
+  },
+  "public": {
+    "networkPassphrase": "Public Global Stellar Network ; September 2015",
+    "rpcUrl": "https://mainnet.sorobanrpc.com",
+    "registry": null,
+    "attester": null
+  }
+}

@@ -1,11 +1,21 @@
 import Link from "next/link";
-import { ArrowRight, CircleCheck, CircleAlert } from "lucide-react";
+import { ArrowRight, CircleCheck, CircleHelp, CircleSlash } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { liveness, type Corridor } from "@/lib/corridors";
 
+// Green is reserved for corridors whose endpoints someone has actually checked.
+// A lane with plausible-looking URLs that nobody has confirmed is amber, not
+// green — the badge reports what we know, not what the YAML claims.
+const BADGE = {
+  verified: { variant: "success", Icon: CircleCheck, label: "verified" },
+  unverified: { variant: "warning", Icon: CircleHelp, label: "unverified" },
+  "not-runnable": { variant: "default", Icon: CircleSlash, label: "not runnable" },
+} as const;
+
 export function CorridorCard({ corridor }: { corridor: Corridor }) {
   const live = liveness(corridor);
+  const badge = BADGE[live.state];
 
   return (
     <Card className="flex flex-col gap-4">
@@ -21,15 +31,9 @@ export function CorridorCard({ corridor }: { corridor: Corridor }) {
             ))}
           </div>
         </div>
-        {live.runnable ? (
-          <Badge variant="success">
-            <CircleCheck size={12} /> runnable
-          </Badge>
-        ) : (
-          <Badge variant="warning">
-            <CircleAlert size={12} /> not runnable
-          </Badge>
-        )}
+        <Badge variant={badge.variant}>
+          <badge.Icon size={12} /> {badge.label}
+        </Badge>
       </div>
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">

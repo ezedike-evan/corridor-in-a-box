@@ -1,0 +1,23 @@
+[package]
+name = "corridor-attester"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "Authorisation policy and submission path for the corridor anchor registry."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+# NOT a normal dependency: linking the registry's implementation into this wasm
+# collides on the __constructor symbol. The interface is declared locally via
+# #[contractclient]; the real contract is only needed to test the cross-call,
+# which compiles native.
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+corridor-registry = { path = "../registry", features = ["testutils"] }

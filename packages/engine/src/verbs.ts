@@ -69,6 +69,7 @@ export async function settle(
   const req: SettlementRequest = {
     to: opened.depositAddress,
     memo: opened.memo,
+    memoType: opened.memoType,
     amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
     corridor,
   };

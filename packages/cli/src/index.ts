@@ -9,7 +9,7 @@
 // you ever touch the network. This is the off-ramp check from the conversation,
 // reduced to one command.
 
-import { loadCorridor, type Corridor } from "@corridor/manifest";
+import { liveness, loadCorridor, type Corridor } from "@corridor/manifest";
 
 function main(argv: string[]): number {
   const [cmd, file] = argv;
@@ -60,28 +60,24 @@ function printPlan(c: Corridor): void {
   line("  5. reconcile  SEP-31  GET /transactions/:id");
   line();
 
-  const warnings: string[] = [];
-  if (!c.dest.endpoints.transfer_server_sep31) {
-    warnings.push(
-      "dest has no SEP-31 transfer server — corridor cannot settle. NOT runnable.",
-    );
-  }
-  if (c.fx.quote_source === "sep38" && !c.dest.endpoints.quote_server) {
-    warnings.push(
-      "fx.quote_source=sep38 but dest exposes no SEP-38 quote server — quotes will fail.",
-    );
-  }
-  if (!c.dest.endpoints.kyc_server) {
-    warnings.push(
-      "dest has no SEP-12 KYC server — assuming 1:1 delivery with no per-customer KYC.",
-    );
+  // Liveness comes from @corridor/manifest so this command and the web dashboard
+  // can never describe the same corridor differently. Note the three states: a
+  // lane whose endpoints exist but have never been checked reports UNVERIFIED,
+  // not runnable — the presence of a URL is not evidence the anchor is real.
+  const live = liveness(c);
+
+  if (live.state === "verified") {
+    line(`liveness: ✓ VERIFIED — endpoints confirmed ${live.verifiedAt} for all five steps`);
+  } else if (live.state === "unverified") {
+    line("liveness: ? UNVERIFIED — endpoints present but unconfirmed. NOT runnable.");
+  } else {
+    line("liveness: ✗ NOT RUNNABLE — a required endpoint is missing.");
   }
 
-  if (warnings.length === 0) {
-    line("liveness: ✓ endpoints present for all five steps");
-  } else {
+  if (live.warnings.length > 0) {
+    line();
     line("liveness warnings:");
-    for (const w of warnings) line(`  ! ${w}`);
+    for (const w of live.warnings) line(`  ! ${w}`);
   }
 }
 

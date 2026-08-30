@@ -1,0 +1,19 @@
+{
+  "name": "@corridor/attester",
+  "version": "0.1.0",
+  "description": "Submit SEP conformance attestations to the on-chain corridor registry.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "main": "./src/index.ts",
+  "dependencies": {
+    "@corridor/probe": "workspace:*",
+    "@corridor/types": "workspace:*",
+    "@stellar/stellar-sdk": "^16.2.0"
+  }
+}

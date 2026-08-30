@@ -32,3 +32,12 @@ export class StaticRouteResolver implements RouteResolver {
     return { receiving: this.adapterFor(corridor) };
   }
 }
+
+// The registry-backed resolver: the open half of the seam, in code.
+// StaticRouteResolver above trusts the manifest; this one requires evidence.
+export {
+  RegistryRouteResolver,
+  UnattestedAnchorError,
+  type AttestationSource,
+  type RegistryResolverOptions,
+} from "./registry-resolver";

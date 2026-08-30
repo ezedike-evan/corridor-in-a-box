@@ -1,10 +1,20 @@
 import Link from "next/link";
-import { ArrowRight, Boxes, ShieldCheck, Repeat, Activity, Info } from "lucide-react";
+import { ArrowRight, Boxes, ShieldCheck, Repeat, Activity, Info, Link2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { CorridorCard } from "@/components/CorridorCard";
-import { corridors } from "@/lib/corridors";
+import { AnchorCard } from "@/components/AnchorCard";
+import { corridors, liveness } from "@/lib/corridors";
+import { fetchAttestations, REGISTRY_ID, REGISTRY_NETWORK } from "@/lib/registry";
 
-export default function Home() {
+// Anchor facts are read from the chain at request time, not baked in at build.
+// Revalidate hourly: attestations change on the order of hours, and a page that
+// caches them forever would start asserting stale facts as current — the exact
+// habit this project is correcting.
+export const revalidate = 3600;
+
+export default async function Home() {
+  const attestations = await fetchAttestations();
+  const verifiedCount = corridors.filter((c) => liveness(c).state === "verified").length;
   return (
     <div className="flex flex-col gap-16">
       {/* Hero */}
@@ -55,18 +65,65 @@ export default function Home() {
         />
       </section>
 
+      {/* Anchors — read live from the on-chain registry */}
+      <section className="flex flex-col gap-5">
+        <div className="flex items-end justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-semibold">Attested anchors</h2>
+            <p className="max-w-2xl text-secondary-text">
+              Read live from the on-chain registry. Each card separates what an anchor&apos;s{" "}
+              <code className="rounded bg-bg-subtle px-1 py-0.5 text-xs">stellar.toml</code>{" "}
+              <em>advertises</em> from what actually <em>worked</em> when it was probed — because
+              those are different claims, and treating them as one is how a lane that does not
+              exist comes to look healthy.
+            </p>
+          </div>
+          {REGISTRY_ID && (
+            <a
+              href={`https://stellar.expert/explorer/${REGISTRY_NETWORK}/contract/${REGISTRY_ID}`}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-bg-subtle px-3 py-1 text-xs font-medium text-secondary-text hover:underline"
+            >
+              <Link2 size={13} className="text-blue-600" /> verify on chain
+            </a>
+          )}
+        </div>
+
+        {!attestations.ok ? (
+          <div className="rounded-xl border border-border bg-bg-subtle p-5 text-sm text-secondary-text">
+            Could not reach the registry ({attestations.error}). No anchor data is shown rather
+            than stale or assumed data.
+          </div>
+        ) : attestations.anchors.length === 0 ? (
+          <div className="rounded-xl border border-border bg-bg-subtle p-5 text-sm text-secondary-text">
+            No anchors have been attested yet.
+          </div>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {attestations.anchors.map((a) => (
+              <AnchorCard key={a.domain} anchor={a} />
+            ))}
+          </div>
+        )}
+      </section>
+
       {/* Corridors */}
       <section className="flex flex-col gap-5">
         <div className="flex items-end justify-between">
           <div>
             <h2 className="text-2xl font-semibold">Corridors</h2>
             <p className="text-secondary-text">
-              Liveness is surfaced at build time — the binding constraint is a live receiving anchor,
-              not code.
+              The binding constraint is a live receiving anchor, not code. A corridor only shows{" "}
+              <span className="font-medium">verified</span> once its endpoints have been confirmed
+              against the anchor&apos;s published <code>stellar.toml</code> —{" "}
+              {verifiedCount === 0
+                ? "none have been yet."
+                : `${verifiedCount} of ${corridors.length} ${verifiedCount === 1 ? "has" : "have"} been.`}
             </p>
           </div>
           <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg-subtle px-3 py-1 text-xs font-medium text-secondary-text">
-            <Info size={13} className="text-blue-600" /> Build-time snapshot, not a live liveness feed
+            <Info size={13} className="text-blue-600" /> Manifest snapshot — not a live liveness probe
           </span>
         </div>
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">

@@ -13,7 +13,12 @@ import {
 } from "node:http";
 import type { Corridor } from "@corridor/manifest";
 import { execute, type EngineDeps } from "@corridor/engine";
-import { isValidAmount, type CorridorErrorCode, type PaymentIntent } from "@corridor/types";
+import {
+  constantTimeEqual,
+  isSettleableAmount,
+  type CorridorErrorCode,
+  type PaymentIntent,
+} from "@corridor/types";
 
 export interface RateLimitOptions {
   /** Bucket size (max burst). */
@@ -95,6 +100,7 @@ const STATUS_BY_CODE: Record<CorridorErrorCode, number> = {
   ANCHOR_UNAVAILABLE: 502,
   SETTLEMENT_FAILED: 500,
   SETTLEMENT_TIMEOUT: 504,
+  REFUND_UNSUPPORTED: 501,
   RECONCILE_MISMATCH: 500,
   IDEMPOTENCY_CONFLICT: 409,
 };
@@ -176,14 +182,19 @@ export function createService(options: ServiceOptions): Service {
     options.rateLimiter ??
     (options.rateLimit ? new TokenBucket(options.rateLimit, now) : undefined);
 
-  // Rate-limit identity: an API key if present (most specific), else the client
-  // IP resolved by the transport. We deliberately do NOT key off a raw
-  // X-Forwarded-For here — that's resolved into `clientIp` under `trustProxy`
-  // control by server(); trusting it blindly would let a client forge a new
-  // bucket per request.
+  // Rate-limit identity: a VALIDATED API key if present (most specific), else
+  // the client IP resolved by the transport.
+  //
+  // The key must be one we actually recognise. Keying off the raw bearer let a
+  // client mint a fresh bucket per request just by rotating the token — with
+  // auth disabled (the documented dev mode) the limiter was a no-op, and each
+  // forged token also left a map entry behind until the next sweep. An
+  // unrecognised bearer now falls through to the IP bucket, which a client
+  // cannot forge. Same reasoning as X-Forwarded-For, which server() only honours
+  // under `trustProxy`.
   const clientKey = (req: RouteRequest): string => {
-    const auth = req.headers?.["authorization"];
-    if (auth?.startsWith("Bearer ")) return `key:${auth.slice(7)}`;
+    const key = bearer(req.headers);
+    if (key && matchesKey(options.apiKeys, key)) return `key:${key}`;
     return `ip:${req.clientIp ?? "anon"}`;
   };
 
@@ -206,18 +217,22 @@ export function createService(options: ServiceOptions): Service {
       };
     }
 
-    // --- auth ---
-    if (options.apiKeys) {
-      const auth = headers["authorization"];
-      const key = auth?.startsWith("Bearer ") ? auth.slice(7) : undefined;
-      if (!key || !options.apiKeys.has(key)) {
-        return { status: 401, body: { error: "unauthorized" } };
-      }
-    }
-
     // --- rate limit ---
+    // BEFORE auth, deliberately. Returning 401 first meant failed credentials
+    // were never metered, so API keys could be brute-forced at line rate — a
+    // wrong key cost the attacker nothing. An unrecognised bearer keys to the
+    // caller's IP bucket (see clientKey), so guessing is now rate-limited per
+    // client while legitimate keyed traffic keeps its own bucket.
     if (limiter && !(await limiter.take(clientKey(req)))) {
       return { status: 429, body: { error: "rate_limited" } };
+    }
+
+    // --- auth ---
+    const presentedKey = bearer(headers);
+    if (options.apiKeys) {
+      if (!matchesKey(options.apiKeys, presentedKey)) {
+        return { status: 401, body: { error: "unauthorized" } };
+      }
     }
 
     // --- POST /payments ---
@@ -226,8 +241,14 @@ export function createService(options: ServiceOptions): Service {
         return { status: 400, body: { error: "invalid payment body" } };
       }
       const intent = req.body;
-      if (!isValidAmount(intent.sourceAmount.amount)) {
-        return { status: 422, body: { error: "AMOUNT_INVALID", message: "invalid amount" } };
+      // isSettleableAmount, not isValidAmount: the latter is a signed syntax
+      // check (subAmounts needs negatives) and let "-100.00" through to the
+      // engine, which settled it.
+      if (!isSettleableAmount(intent.sourceAmount.amount)) {
+        return {
+          status: 422,
+          body: { error: "AMOUNT_INVALID", message: "amount must be a positive decimal" },
+        };
       }
       const corridor = options.corridors.get(intent.corridorId);
       if (!corridor) {
@@ -236,7 +257,9 @@ export function createService(options: ServiceOptions): Service {
           body: { error: "unknown corridor", corridorId: intent.corridorId },
         };
       }
-      const result = await execute(intent, corridor, options.deps);
+      // Owner comes from the VALIDATED bearer, never from the body — a client
+      // must not be able to claim another tenant's runs by asking.
+      const result = await execute(intent, corridor, options.deps, { owner: presentedKey });
       if (result.ok) {
         return { status: 200, body: result.value };
       }
@@ -250,8 +273,22 @@ export function createService(options: ServiceOptions): Service {
     const m = path.match(/^\/payments\/([^/]+)$/);
     if (req.method === "GET" && m) {
       const store = options.deps.idempotency;
-      const run = store ? await store.get(decodeURIComponent(m[1])) : undefined;
-      if (!run) return { status: 404, body: { error: "not found" } };
+      // A caller-chosen idempotency key is often guessable ("demo-0001"), so the
+      // key alone cannot be the authorization. Scope the read to the tenant that
+      // created the run.
+      let key: string;
+      try {
+        key = decodeURIComponent(m[1]);
+      } catch {
+        // Malformed percent-encoding — nothing can match it.
+        return { status: 404, body: { error: "not found" } };
+      }
+      const run = store ? await store.get(key) : undefined;
+      // 404 rather than 403 on an ownership mismatch: a 403 would confirm the
+      // key exists, which is itself the enumeration oracle we are closing.
+      if (!run || (options.apiKeys && !ownerMatches(run.owner, presentedKey))) {
+        return { status: 404, body: { error: "not found" } };
+      }
       return {
         status: 200,
         body: {
@@ -260,7 +297,10 @@ export function createService(options: ServiceOptions): Service {
           state: run.state,
           transactionId: run.transactionId,
           stellarTxHash: run.stellarTxHash,
-          lastError: run.lastError,
+          // Only the error CODE, never the stored message: lastError is
+          // `${code}: ${message}` and the message carries anchor URLs, upstream
+          // HTTP bodies and other internals the caller has no business seeing.
+          error: errorCode(run.lastError),
         },
       };
     }
@@ -352,6 +392,39 @@ export function createService(options: ServiceOptions): Service {
   }
 
   return { route, server };
+}
+
+/** Extract a bearer token from an Authorization header, if present. */
+function bearer(headers: Record<string, string> | undefined): string | undefined {
+  const auth = headers?.["authorization"];
+  return auth?.startsWith("Bearer ") ? auth.slice(7) : undefined;
+}
+
+/** `Set.has()` short-circuits on hash-bucket lookup, which leaks timing
+ *  about the presented key. Iterate and compare every candidate in constant
+ *  time instead — the set of configured API keys is small (operator-sized,
+ *  not user-sized), so this stays cheap. */
+function matchesKey(keys: Set<string> | undefined, presented: string | undefined): boolean {
+  if (!keys || !presented) return false;
+  let matched = false;
+  for (const key of keys) {
+    if (constantTimeEqual(key, presented)) matched = true;
+  }
+  return matched;
+}
+
+/** Same constant-time treatment for the ownership check on GET /payments/:key. */
+function ownerMatches(owner: string | undefined, presented: string | undefined): boolean {
+  if (owner === undefined || presented === undefined) return false;
+  return constantTimeEqual(owner, presented);
+}
+
+/** `lastError` is stored as "CODE: message". Surface only the code — the message
+ *  carries anchor URLs and upstream response text that must not leave the box. */
+function errorCode(lastError: string | undefined): string | undefined {
+  if (!lastError) return undefined;
+  const idx = lastError.indexOf(":");
+  return idx > 0 ? lastError.slice(0, idx) : lastError;
 }
 
 /** First hop in an X-Forwarded-For list (the original client). */

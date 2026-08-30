@@ -2,11 +2,17 @@
 
 **Status:** draft. Milestones and scope below are derived directly from
 [ROADMAP.md](../ROADMAP.md) and the maintainer's own readiness checklist — they
-are not new commitments invented for this document. Dollar figures are marked
-`[PLACEHOLDER]` and need maintainer input before submission; everything else is
-ready to use as-is or lightly edit.
+are not new commitments invented for this document. Dollar figures and
+timelines below are drafted estimates grounded in each milestone's actual
+scope — **the maintainer should adjust them before submission**, not treat
+them as final.
 
-`[PLACEHOLDER: submission date / target wave]`
+**Target wave: the next SCF Tier-2 submission window after M1 closes.**
+M0 is now done (see §3) — submitting today is possible, but M1's live
+third-party anchor relationship (see below) strengthens the application
+considerably and is worth waiting for if the window allows. Exact calendar
+date is the maintainer's call once that relationship is in hand — not
+guessed here.
 
 ## 1. One-line summary
 
@@ -39,40 +45,73 @@ per counterparty.
 Pulled directly from [ROADMAP.md](../ROADMAP.md), which tracks this with
 ✅/⬜ per phase:
 
-- **Phase 1 (move real money on testnet):** SEP-10 challenge/response auth,
-  SEP-12 KYC handoff, and a real `@stellar/stellar-sdk`-backed settlement
-  submitter are all implemented and unit-tested. The one open item — a
-  demonstrated end-to-end run against a live anchor, captured in the README —
-  is milestone M0 below.
+- **Phase 1 (move real money on testnet): DONE.** SEP-10 challenge/response
+  auth, SEP-12 KYC handoff, and a real `@stellar/stellar-sdk`-backed
+  settlement submitter are implemented and unit-tested, and the end-to-end
+  run against a live anchor (M0, below) has been captured: a real testnet
+  settlement transaction, and a full quote → comply → settle corridor run
+  against the Anchor Platform reference server, both with transaction
+  hashes committed in ROADMAP.md. The one remaining gap is narrower than
+  "no live run happened" — reconcile never reached `completed` against that
+  run's own observer, which stayed on a stale cursor; that gap is folded
+  into M1 below alongside extending the live run to a real third-party
+  anchor (the reference server is self-hosted, not an outside counterparty).
 - **Phase 2 (durability):** decimal-safe `Money` arithmetic, a durable
   Postgres-backed idempotency store with crash-resume, atomic double-settlement
-  protection, enforced reconcile timeouts with retry/backoff, and a real
-  refund/hold recovery path — all shipped and tested, including a live-Postgres
-  integration test that runs in CI.
+  protection, and enforced reconcile timeouts with retry/backoff — all shipped
+  and tested, including a live-Postgres integration test that runs in CI.
+  The recovery path escalates a failed settlement to a manual `held` state;
+  **automated refund is not implemented** (an already-credited payment cannot be
+  reversed unilaterally on chain, and SEP-31 gives the sender no refund
+  endpoint — a real refund means the receiving anchor initiating one on its
+  own side, an operational arrangement rather than an API call; see the
+  [operations runbook](./operations.md) — which is milestone M5).
 - **Phase 3 (operability):** structured logging, an append-only audit trail,
   Prometheus-format metrics, an `ExternalSigner` port (KMS/HSM-ready — see
   [docs/key-management.md](./key-management.md)), and a thin HTTP service
   layer with API-key auth and rate limiting.
-- **Phase 4 (corridors):** a runnable manifest for a live MX/Bitso-class
-  receiving anchor; the NG→CN case study is intentionally documented as
-  pending until a compliant RMB SEP-31 off-ramp exists — the engine needs no
-  code change when one does.
+- **Phase 4 (corridors):** a manifest **template** for a Mexico lane
+  (`mx-example.corridor.yaml`) whose endpoints are fictional placeholders — it
+  demonstrates the manifest shape; **no anchor relationship stands behind it**,
+  and tooling reports it `UNVERIFIED`. The NG→CN case study is likewise
+  documented as pending until a compliant RMB SEP-31 off-ramp exists. The engine
+  needs no code change when either becomes real; what is missing is an anchor
+  relationship, not software.
 - **CI:** lint + typecheck + full mock-backed test suite on every push/PR,
   SHA-pinned actions, CodeQL static analysis, dependency review on PRs, and a
   scheduled probe against a live anchor once one is configured.
+- **New since the phases above were drafted — an on-chain anchor
+  conformance registry.** `contracts/{registry,attester}` are deployed
+  Soroban contracts (testnet, contract IDs in `contracts/deployments.json`)
+  that let an enrolled attester write real, probed SEP conformance data
+  per anchor domain on-chain — distinct from what a `stellar.toml` merely
+  _advertises_. `@corridor/probe` runs the actual protocol checks (SEP-10
+  handshake, firm-quote expiry, non-empty SEP-31 receive list) and
+  `@corridor/attester` submits the result; `@corridor/router` gained an
+  opt-in `RegistryRouteResolver` that fails closed on stale or unattested
+  domains. This is the closest thing in the codebase to a novel primitive
+  for the ecosystem — a reputation/attestation oracle for anchor conformance
+  — and the web dashboard's "Attested anchors" panel reads it live.
 
-See also [CHANGELOG.md](../CHANGELOG.md) for the full, dated history.
+See [CHANGELOG.md](../CHANGELOG.md) for the dated commit-level history behind
+every claim above, including exact transaction hashes and contract IDs.
 
 ## 4. Milestones & itemized budget
 
-| Milestone | Deliverable                                                                                                                                                      | Maps to                                                                               | Est. cost       | Timeline        |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | --------------- | --------------- |
-| M0        | Captured end-to-end run against the Anchor Platform SEP-31 reference server on testnet, trail + tx hash in the README                                            | ROADMAP Phase 1 (last open item)                                                      | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
-| M1        | Demonstrate all four SEP flows (SEP-10, SEP-12, SEP-31, SEP-38) against a live anchor, with tests, plus the nightly CI probe running green against a real target | MAINTAINER §3                                                                         | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
-| M2        | Corridor #1 live: `mx-bitso.corridor.yaml` filled from a real, verified anchor `stellar.toml`; `corridor plan` reports the lane runnable                         | MAINTAINER §3 / ROADMAP Phase 4 — blocked on a verified anchor relationship, not code | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
-| M3        | Additional real corridors as off-ramps come online                                                                                                               | ROADMAP Phase 4 / MAINTAINER §4                                                       | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
-| M4        | `@corridor/*` published to npm (or at minimum the CLI) with a runnable example; `web/` wired to a live `@corridor/service` instance via `CORRIDOR_SERVICE_URL`   | MAINTAINER §1 ("strongest entry story")                                               | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
-| **Total** |                                                                                                                                                                  |                                                                                       | `[PLACEHOLDER]` |                 |
+| Milestone | Deliverable                                                                                                                                                                                                                                                                              | Maps to                                                                               | Est. cost          | Timeline                                                               |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------ | ---------------------------------------------------------------------- |
+| M0        | **DONE (2026-08-08).** Captured end-to-end run: a real testnet settlement tx, plus a full quote→comply→settle corridor run against the Anchor Platform reference server, tx hashes committed in ROADMAP.md                                                                               | ROADMAP Phase 1 (last open item)                                                      | $0 — delivered     | Complete                                                               |
+| M1        | Extend the live run to a real THIRD-PARTY SEP-31 anchor (the reference server above is self-hosted, not an outside counterparty), all four SEP flows with tests, close the reconcile-never-reached-`completed` gap, nightly CI probe green against the real target                       | MAINTAINER §3                                                                         | `[DRAFT: ~$1,500]` | `[DRAFT: ~3 weeks — mostly relationship/access time, not engineering]` |
+| M2        | Corridor #1 live: `mx-example.corridor.yaml` filled from a real anchor's published `stellar.toml` with `endpoints_verified_at` set, so `corridor plan` reports it `VERIFIED`                                                                                                             | MAINTAINER §3 / ROADMAP Phase 4 — blocked on a verified anchor relationship, not code | `[DRAFT: ~$1,000]` | `[DRAFT: ~2 weeks after M1's anchor relationship]`                     |
+| M3        | Additional real corridors as off-ramps come online                                                                                                                                                                                                                                       | ROADMAP Phase 4 / MAINTAINER §4                                                       | `[DRAFT: ~$2,000]` | `[DRAFT: ongoing, per off-ramp as available]`                          |
+| M4        | Publish `@corridor/cli` to npm (pipeline is built and tested, blocked only on an `NPM_TOKEN` secret) and `@corridor/*` more broadly; `web/` wired to a live `@corridor/service` instance                                                                                                 | MAINTAINER §1 ("strongest entry story")                                               | `[DRAFT: ~$500]`   | `[DRAFT: ~1 week — mostly an access/process step, not engineering]`    |
+| M5        | Real refund path: an anchor-side refund arrangement (SEP-31 offers the sender no refund endpoint — this is integration/ops work with the receiving anchor, plus observing the outcome on the transaction record) instead of escalating every unrecoverable settlement to a manual `held` | ROADMAP Phase 2 (reopened — not implemented today)                                    | `[DRAFT: ~$4,000]` | `[DRAFT: ~4-6 weeks]`                                                  |
+| **Total** |                                                                                                                                                                                                                                                                                          |                                                                                       | `[DRAFT: ~$9,000]` |                                                                        |
+
+All `[DRAFT: ...]` figures are placeholder-replacing estimates, not final —
+the maintainer should adjust every one before submission. M0's $0/Complete
+is the one row that isn't a draft: it reflects work already shipped, not a
+funding ask.
 
 ## 5. Team
 
@@ -92,9 +131,19 @@ See also [CHANGELOG.md](../CHANGELOG.md) for the full, dated history.
 
 ## 7. Success metrics
 
-`[PLACEHOLDER: e.g. number of live corridors, volume settled on testnet/mainnet,
-external contributors, npm downloads, uptime of the nightly live-anchor probe
-once configured]`
+`[DRAFT — maintainer to adjust before submission]`
+
+- 3+ real, `VERIFIED` SEP-31 corridors live by M3, each backed by a genuine
+  anchor relationship (not a template manifest).
+- `@corridor/cli` published to npm (M4) with a runnable example a stranger
+  can use without cloning the repo.
+- `nightly-live-anchor` CI probe green for 30 consecutive days once
+  `ANCHOR_*` secrets are configured against a real third-party anchor.
+- The on-chain anchor conformance registry (`contracts/registry`) holding
+  attestations for 5+ real anchor domains, kept fresh by the scheduled
+  `attest-anchors.yml` job.
+- 5+ external contributors with merged PRs, tracked via the existing
+  Trivial/Medium/High issue-point ladder in CONTRIBUTING.md.
 
 ## 8. Risks
 

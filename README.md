@@ -9,6 +9,13 @@ corridor is _configuration, not code_: the engine runs `quote → comply → set
 reconcile → recover` over any standards-compliant anchor pair, and adding a new
 corridor is a new `*.corridor.yaml` file — not a fork.
 
+**Live demo:** [corridor-in-a-box.vercel.app](https://corridor-in-a-box.vercel.app)
+— the corridor dashboard and a payment walkthrough. **The walkthrough is a
+simulation**: it drives a re-implementation of the state machine and never
+touches the Stellar network. No corridor in this repo has yet been confirmed
+against a live anchor, so every one of them renders `UNVERIFIED` or
+`NOT RUNNABLE` (see [Liveness](#liveness-has-three-states-and-green-has-to-be-earned)).
+
 This repo is the **open half** of an open-core system. The proprietary half — the
 anchor health/conformance dataset and the route intelligence built on it — lives
 in a separate private repo and is injected at runtime through one interface
@@ -81,22 +88,157 @@ Three boundaries do the work:
 Picking the destination is the binding constraint, not the code. SEP-31 needs a
 _live receiving anchor_ on the destination side, so corridors ship in this order:
 
-| Stage  | Corridor                                                       | Why                                                                                                                                                                        |
-| ------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet) | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.**                                         |
-| **#1** | `mx-bitso.corridor.yaml` (Mexico, Bitso-class) / Anclap        | Real money. These anchors run SEP-31 receive-side today, so `corridor plan` reports the lane runnable (fill endpoints from the live stellar.toml).                         |
-| later  | `ng-cn.corridor.yaml` (Nigeria → China)                        | The headline case study, **not** corridor #1. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else. |
+| Stage  | Corridor                                                              | Why                                                                                                                                                                                                                                                                |
+| ------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet)        | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.**                                                                                                                                 |
+| **#1** | `mx-example.corridor.yaml` (Mexico) — **a template, not a live lane** | Shows the shape of a real corridor. **Every endpoint in it is fictional** and `corridor plan` reports it `UNVERIFIED`. Becomes real when an anchor relationship exists: replace the URLs from the anchor's published stellar.toml and set `endpoints_verified_at`. |
+| later  | `ng-cn.corridor.yaml` (Nigeria → China)                               | The headline case study, **not** corridor #1. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else.                                                                                         |
 
 The CLI makes the constraint visible. `ng-cn` validates structurally, but:
 
 ```
 $ pnpm cli plan corridors/ng-cn.corridor.yaml
+liveness: ✗ NOT RUNNABLE — a required endpoint is missing.
+
 liveness warnings:
   ! dest has no SEP-31 transfer server — corridor cannot settle. NOT runnable.
 ```
 
 That warning _is_ the off-ramp scarcity, surfaced at build time instead of in
 production.
+
+### Liveness has three states, and green has to be earned
+
+A manifest naming an endpoint is not evidence the endpoint exists — anyone can
+type a URL into a YAML file. So `corridor plan` and the dashboard report:
+
+| State          | Meaning                                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------- |
+| `NOT RUNNABLE` | A required endpoint is missing outright. The lane cannot settle.                         |
+| `UNVERIFIED`   | Endpoints are present but **nobody has confirmed they resolve**. Not runnable.           |
+| `VERIFIED`     | Endpoints were checked against the anchor's published `stellar.toml` on a recorded date. |
+
+`VERIFIED` requires `dest.endpoints.endpoints_verified_at` — a date a human sets
+only after actually looking. **Every corridor in this repo is currently
+`UNVERIFIED` or `NOT RUNNABLE`**, which is the honest state of the project: no
+lane here has been confirmed against a live anchor yet.
+
+## The anchor registry (on-chain)
+
+The engine answers "can this corridor settle?". The registry answers the question
+underneath it: **does this anchor actually do what its `stellar.toml` claims?**
+
+Two Soroban contracts, live on testnet:
+
+|          |                                                                                                                                                                         |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| registry | [`CDFOVONWR3GGMGH2OC7YATRZE64RKSRAS7UMF7R2TSC6LNNO5G32RSX4`](https://stellar.expert/explorer/testnet/contract/CDFOVONWR3GGMGH2OC7YATRZE64RKSRAS7UMF7R2TSC6LNNO5G32RSX4) |
+| attester | [`CAHSKTAVHIES6MX2DUGNBA4VDB77WYNKEIZPOT7QX2RMJUL5RUIVKX2L`](https://stellar.expert/explorer/testnet/contract/CAHSKTAVHIES6MX2DUGNBA4VDB77WYNKEIZPOT7QX2RMJUL5RUIVKX2L) |
+
+The registry stores **facts**: which SEPs a domain advertises, the SHA-256 of the
+`stellar.toml` they were read from, which conformance probes passed, and the
+ledger someone last checked. No score, no ranking, no recommendation — those are
+judgements, they depend on your risk appetite, and they belong in your
+`RouteResolver`, not in a public record. **Verifiable facts are the public good;
+the interpretation is the product.**
+
+### Why it separates "advertises" from "works"
+
+A live attestation of `testanchor.stellar.org`, produced by `pnpm probe:anchor`
+and submitted on chain:
+
+```
+$ pnpm registry:read
+
+testanchor.stellar.org
+  advertises     SEP-1, SEP-6, SEP-10, SEP-12, SEP-24, SEP-31, SEP-38
+  probes passed  toml_fetch, sep10_auth, sep38_quote, sep12_status
+  probes FAILED  sep31_info
+  attested at    ledger 4032636
+  serves SEP-31  NO
+
+usable SEP-31 off-ramps (attested + fresh): none
+```
+
+That anchor **advertises SEP-31 in its toml and returns an empty receive list**.
+Anything reading the toml alone would call the lane runnable. `serves_sep31()`
+returns `NO` because it requires the capability to be both advertised _and_
+probed green — the same distinction the three-state liveness above enforces, now
+as a public artifact anyone can check rather than a claim in this repo.
+
+Every record carries `attested_ledger`, so staleness is visible on chain. An
+attestation is never wrong, only old, and a consumer must be able to see the
+difference without trusting the writer to have pruned it.
+
+```bash
+pnpm probe:anchor testanchor.stellar.org   # probe a live anchor, print the facts
+pnpm registry:read                         # read the registry via @corridor/registry
+cd contracts && cargo test                 # 21 contract tests
+```
+
+## Proof against a real SEP-31 anchor
+
+`scripts/reference-anchor.sh up` stands up the SDF **Anchor Platform reference
+server** locally under podman — a conformant SEP-31 counterparty, no agreements
+and no credentials required. `pnpm fund:testnet` then gives the sending account a
+USDC trustline and balance, and `pnpm testnet` drives a payment across it.
+
+A captured run on **2026-08-08**, corridor `reference-testnet`:
+
+```
+created → quoted → compliant → opened → settling → settled → (polling reconcile)
+```
+
+Every leg below happened against the anchor and is visible in _its_ logs, not
+just ours:
+
+| Leg               | Standard | Evidence                                                                                                                                                                                                 |
+| ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| auth              | SEP-10   | challenge signed and exchanged for a JWT                                                                                                                                                                 |
+| register sender   | SEP-12   | `GET /customer?id=…&type=sep31-sender`                                                                                                                                                                   |
+| register receiver | SEP-12   | `GET /customer?id=…&type=sep31-receiver`                                                                                                                                                                 |
+| quote             | SEP-38   | `GET /rate?type=firm&sell_asset=stellar:USDC:GBBD47IF…` → `quote_created`                                                                                                                                |
+| open              | SEP-31   | `POST /transactions` → `transaction_created`, tx `06e721a9-96c3-49f0-86e2-83c02f75306c`                                                                                                                  |
+| **settle**        | Horizon  | [`4aea2432…7f183897`](https://stellar.expert/explorer/testnet/tx/4aea2432696c43104662fea98c86cecdfb12e2e831426e3a90e616eb7f183897) — **10.0000000 USDC** to the anchor's deposit address, ledger 4030910 |
+
+The settle memo is a `hash` memo whose base64 decodes to `06e721a9-96c3-49f0-86e2-83c02f75`
+— the anchor's own transaction id, which is how it attributes the incoming payment.
+
+**Where it stops, precisely.** `reconcile` did **not** reach `completed`. The
+payment is on the ledger and correctly attributed, but the reference server's
+Stellar observer never advanced past a stale cursor, so it never matched the
+payment to its transaction and the transaction stayed `pending_sender`. That is
+the anchor's back-office plumbing, not the engine — but it means **the
+`reconcile → completed` leg is still unproven against a real counterparty**, and
+the engine's timeout/recovery path is what actually ran. Closing that is the
+remaining Phase-1 item.
+
+## Proof the settle leg is real
+
+The settle leg has been executed against live Stellar testnet. Reproduce it in
+one command — it funds throwaway keys via friendbot, so it costs nothing:
+
+```bash
+pnpm verify:settle
+```
+
+A captured run:
+
+|           |                                                                                                                                                                                   |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| tx hash   | [`855933c73b85b9071318ff0bfd9213096a1edfaef68417dea1c2e8fb08dfd245`](https://stellar.expert/explorer/testnet/tx/855933c73b85b9071318ff0bfd9213096a1edfaef68417dea1c2e8fb08dfd245) |
+| ledger    | 4024693                                                                                                                                                                           |
+| date      | 2026-08-07                                                                                                                                                                        |
+| operation | `payment` 12.5000000 native → `GBHY4SAO…JC4EOWC6`                                                                                                                                 |
+| memo      | `corridor-settle`                                                                                                                                                                 |
+
+**Scope, precisely.** This proves `StellarSettlementSubmitter` really does build →
+sign (through the `ExternalSigner` port) → submit → poll Horizon until the
+transaction is in a ledger, against the live network. It is **not** a SEP-31
+corridor run: there is no anchor in it, so no SEP-38 quote, no SEP-12 KYC, no
+SEP-31 open/reconcile. Those legs need a conformant receiving anchor and are
+still outstanding — see [ROADMAP](./ROADMAP.md) Phase 1 and
+[docs/operations.md](./docs/operations.md) §1.
 
 ## Going live
 

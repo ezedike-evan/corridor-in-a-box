@@ -103,20 +103,81 @@ async function main(): Promise<void> {
     logger: consoleLogger,
   };
 
+  // --- SEP-12 registration ------------------------------------------------
+  // The receiving anchor pays out to a customer IT knows, identified by an id it
+  // issued. Registering is the sending side's job — it holds the PII — and the
+  // engine never does it, which is what keeps PII out of the payment path. So do
+  // it here, before execute(), and carry only the returned id on the intent.
+  //
+  // Reuse an id with RECIPIENT_SEP12_ID to skip re-registering.
+  // Which fields an anchor requires is ITS decision, published in its
+  // `GET /sep12/customer` response under `fields` with `optional: false`. These
+  // defaults are what the Anchor Platform reference server asks for; any other
+  // anchor will want a different set. If registration leaves a customer at
+  // NEEDS_INFO, read that response and fill in what it names.
+  const register = async (role: "receiver" | "sender", type: string): Promise<string> => {
+    console.log(`registering ${role} with ${corridor.dest.name} (SEP-12)…`);
+    const reg = await adapter.registerCustomer(
+      {
+        first_name: process.env[`${role.toUpperCase()}_FIRST_NAME`] ?? "Alice",
+        last_name: process.env[`${role.toUpperCase()}_LAST_NAME`] ?? "Example",
+        email_address: process.env[`${role.toUpperCase()}_EMAIL`] ?? `${role}@example.com`,
+        bank_account_number: "12345678901234",
+        bank_number: "021000021",
+        bank_account_type: "checking",
+        clabe_number: "032180000118359719",
+      },
+      { type },
+    );
+    if (!reg.ok) {
+      console.error(
+        `✗ SEP-12 ${role} registration failed: ${reg.error.code} — ${reg.error.message}`,
+      );
+      console.error(
+        `  The anchor decides which fields it needs; read its GET /sep12/customer ` +
+          `response (fields with optional:false) and supply those.`,
+      );
+      process.exit(1);
+    }
+    console.log(`  ${role} sep12 id: ${reg.value}`);
+    return reg.value;
+  };
+
+  // SEP-31 identifies BOTH parties to the receiving anchor: the sender because
+  // the anchor must know who the funds came from for its own compliance, the
+  // receiver because it is who gets paid.
+  const senderSep12Id =
+    process.env.SENDER_SEP12_ID ??
+    (await register("sender", corridor.compliance.sep12_sender_type));
+  const recipientSep12Id =
+    process.env.RECIPIENT_SEP12_ID ??
+    (await register("receiver", corridor.compliance.sep12_receiver_type));
+  console.log();
+
   const intent: PaymentIntent = {
     idempotencyKey: process.env.IDEMPOTENCY_KEY ?? `testnet-${Date.now()}`,
     corridorId: corridor.id,
     sender: {
       id: process.env.SENDER_ID ?? "sender-1",
       jurisdiction: corridor.compliance.source_jurisdiction,
+      sep12Id: senderSep12Id,
     },
     recipient: {
       id: process.env.RECIPIENT_ID ?? "recipient-1",
       jurisdiction: corridor.compliance.dest_jurisdiction,
+      sep12Id: recipientSep12Id,
     },
     sourceAmount: {
       asset: corridor.settlement.bridge_asset,
       amount: process.env.AMOUNT ?? "10.00",
+    },
+    // Payout instructions the destination anchor requires. The names come from
+    // its GET /sep31/info `fields.transaction`; these are what the Anchor
+    // Platform reference server asks for.
+    destinationFields: {
+      receiver_routing_number: process.env.RECEIVER_ROUTING_NUMBER ?? "021000021",
+      receiver_account_number: process.env.RECEIVER_ACCOUNT_NUMBER ?? "12345678901234",
+      type: process.env.RECEIVER_DEPOSIT_TYPE ?? "SWIFT",
     },
   };
 

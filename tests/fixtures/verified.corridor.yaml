@@ -1,0 +1,43 @@
+# Fixture: a corridor whose dest endpoints carry endpoints_verified_at, so
+# `corridor plan` reports it VERIFIED. Nothing here points at a real anchor —
+# it exists purely to exercise the third liveness state, which no shipped
+# manifest can reach until someone has actually checked a live stellar.toml.
+id: verified-fixture
+
+source:
+  name: Fixture Sending Anchor
+  asset: USDC
+  endpoints:
+    home_domain: localhost:8080
+
+dest:
+  name: Fixture Receiving Anchor
+  asset: "iso4217:USD"
+  endpoints:
+    home_domain: localhost:8080
+    transfer_server_sep31: http://localhost:8080/sep31
+    web_auth: http://localhost:8080/auth
+    kyc_server: http://localhost:8080/sep12
+    quote_server: http://localhost:8080/sep38
+    endpoints_verified_at: "2026-01-01"
+
+fx:
+  path: ["USD", "USDC", "USD"]
+  quote_source: sep38
+  who_holds_risk: receiving_anchor
+  quote_ttl_seconds: 60
+
+compliance:
+  source_jurisdiction: US
+  dest_jurisdiction: US
+  travel_rule_profile: default
+
+settlement:
+  bridge_asset: USDC
+  network: testnet
+  asset_issuer: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+
+recovery:
+  max_retries: 3
+  timeout_seconds: 900
+  rollback: refund_sender

@@ -118,7 +118,7 @@ Body is a \`PaymentIntent\`:
 \`\`\`json
 {
   "idempotencyKey": "demo-0001",
-  "corridorId": "mx-bitso",
+  "corridorId": "mx-example",
   "sender": { "id": "sender-1" },
   "recipient": { "id": "recipient-1" },
   "sourceAmount": { "asset": "USDC", "amount": "100.00" }

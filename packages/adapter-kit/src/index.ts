@@ -31,6 +31,14 @@ export interface OpenTransaction {
   readonly transactionId: string;
   readonly depositAddress: string;
   readonly memo?: string;
+  /**
+   * How to encode `memo` on the settlement transaction. SEP-31 anchors return
+   * this alongside the memo and it is NOT always "text" — the Anchor Platform
+   * reference server issues base64 `hash` memos, which are 32 bytes and blow
+   * past the 28-byte text limit if encoded as text. Defaults to "text" only when
+   * the anchor says nothing.
+   */
+  readonly memoType?: "text" | "hash" | "id";
 }
 
 export interface TransactionStatus {

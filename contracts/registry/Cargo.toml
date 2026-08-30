@@ -1,0 +1,21 @@
+[package]
+name = "corridor-registry"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "On-chain registry of SEP conformance attestations for Stellar anchors."
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+
+# Lets the attester crate pull in this contract's generated test client.
+[features]
+testutils = ["soroban-sdk/testutils"]

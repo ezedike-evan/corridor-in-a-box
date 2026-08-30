@@ -28,12 +28,20 @@
     "cli": "tsx packages/cli/src/index.ts",
     "example": "tsx examples/run-payment.ts",
     "testnet": "tsx examples/run-testnet.ts",
-    "serve": "tsx examples/run-service.ts"
+    "serve": "tsx examples/run-service.ts",
+    "verify:settle": "tsx examples/verify-settle-leg.ts",
+    "fund:testnet": "tsx examples/fund-testnet-sender.ts",
+    "probe:anchor": "tsx examples/probe-anchor.ts",
+    "registry:read": "tsx examples/read-registry.ts",
+    "attest": "tsx examples/attest.ts"
   },
   "dependencies": {
     "@corridor/adapter-kit": "workspace:*",
+    "@corridor/attester": "workspace:*",
     "@corridor/engine": "workspace:*",
     "@corridor/manifest": "workspace:*",
+    "@corridor/probe": "workspace:*",
+    "@corridor/registry": "workspace:*",
     "@corridor/router": "workspace:*",
     "@corridor/sep31": "workspace:*",
     "@corridor/service": "workspace:*",
@@ -42,16 +50,16 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
-    "@stellar/stellar-sdk": "^13.0.0",
+    "@stellar/stellar-sdk": "^16.2.0",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.11.0",
-    "eslint": "^9.17.0",
+    "eslint": "^10.9.1",
     "eslint-config-prettier": "^10.1.8",
     "pg": "^8.13.0",
     "prettier": "^3.4.0",
-    "tsx": "^4.23.0",
+    "tsx": "^4.23.12",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.63.0",
+    "typescript-eslint": "^8.67.0",
     "vitest": "^2.1.0"
   },
   "packageManager": "pnpm@9.12.0"

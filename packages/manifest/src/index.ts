@@ -25,6 +25,21 @@ export const AnchorEndpointsSchema = z.object({
   kyc_server: z.string().url().optional(),
   /** SEP-38 QUOTE_SERVER */
   quote_server: z.string().url().optional(),
+  /**
+   * ISO date (YYYY-MM-DD) on which the URLs above were confirmed against this
+   * anchor's PUBLISHED stellar.toml, or — for a self-hosted lane like the Anchor
+   * Platform reference server — against a running instance.
+   *
+   * Presence of a URL proves nothing: a manifest can name an endpoint that has
+   * never existed. This field is the difference between "someone typed a URL"
+   * and "someone checked it", and it is what `liveness()` requires before it
+   * will report a corridor as verified. Leave it unset until you have actually
+   * looked. Never set it speculatively.
+   */
+  endpoints_verified_at: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "expected an ISO date, YYYY-MM-DD")
+    .optional(),
 });
 
 export const AnchorSchema = z.object({
@@ -49,6 +64,19 @@ export const ComplianceSchema = z.object({
   source_jurisdiction: z.string().min(1),
   dest_jurisdiction: z.string().min(1),
   travel_rule_profile: z.string().default("default"),
+  /**
+   * SEP-12 customer `type` for the receiving party.
+   *
+   * This is NOT free-form and cannot be synthesised from a jurisdiction: it must
+   * be one of the types the destination anchor advertises under
+   * `sep12.receiver.types` in its `GET /sep31/info` response. Send a type the
+   * anchor doesn't publish and registration is rejected. `sep31-receiver` is the
+   * conventional name and what the Anchor Platform reference server uses; check
+   * /info for anything else.
+   */
+  sep12_receiver_type: z.string().default("sep31-receiver"),
+  /** SEP-12 customer `type` for the sending party, from `sep12.sender.types`. */
+  sep12_sender_type: z.string().default("sep31-sender"),
 });
 
 export const SettlementSchema = z.object({
@@ -57,6 +85,17 @@ export const SettlementSchema = z.object({
   network: z.enum(["public", "testnet"]),
   /** Issuer account of the bridge asset on the chosen network. */
   asset_issuer: z.string().min(1),
+});
+
+/** Per-corridor payment ceilings. Optional, but a lane with no ceiling accepts
+ *  any positive amount the caller asks for — set one before real money. */
+export const LimitsSchema = z.object({
+  /** Largest single payment this corridor will accept, as a decimal string in
+   *  the source asset. Omit for no ceiling (dev/testnet only). */
+  max_amount: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
+    .optional(),
 });
 
 export const RecoverySchema = z.object({
@@ -75,6 +114,7 @@ export const CorridorSchema = z.object({
   compliance: ComplianceSchema,
   settlement: SettlementSchema,
   recovery: RecoverySchema,
+  limits: LimitsSchema.optional(),
 });
 
 export type Corridor = z.infer<typeof CorridorSchema>;
@@ -103,3 +143,9 @@ export function loadCorridor(path: string): Outcome<Corridor> {
 function formatZodError(e: z.ZodError): string {
   return e.issues.map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`).join("; ");
 }
+
+// Liveness lives beside the schema because it is a statement ABOUT a manifest:
+// whether the lane it describes can actually settle, and whether anyone has
+// checked. Both the CLI and the web dashboard read it, so neither can report a
+// corridor as healthy on its own authority.
+export { liveness, LIVENESS_LABEL, type Liveness, type LivenessState } from "./liveness";
