@@ -320,7 +320,15 @@ export async function execute(
     // Poll until the anchor confirms payout or we hit the corridor timeout.
     // reconcileUntil returns a non-retryable error, so we never re-settle here.
     const r = await timed("reconcile", () =>
-      reconcileUntil(adapter, opened.value.transactionId, { now, sleep, deadlineMs, pollMs }),
+      reconcileUntil(adapter, opened.value.transactionId, {
+        now,
+        sleep,
+        deadlineMs,
+        pollMs,
+        corridorId: corridor.id,
+        logger: deps.logger,
+        metrics: deps.metrics,
+      }),
     );
     if (!r.ok) return finishFailure(r.error);
     {
@@ -422,6 +430,9 @@ async function resumeRun(
       sleep,
       deadlineMs: now() + corridor.recovery.timeout_seconds * 1000,
       pollMs,
+      corridorId: corridor.id,
+      logger: deps.logger,
+      metrics: deps.metrics,
     });
     if (!r.ok) {
       const from = run.state;

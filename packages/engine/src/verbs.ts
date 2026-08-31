@@ -13,6 +13,7 @@ import type {
   TransactionStatus,
 } from "@corridor/adapter-kit";
 import type { SettlementRef, SettlementRequest, SettlementSubmitter } from "./ports";
+import type { Logger, Metrics } from "./observability";
 
 // 1. QUOTE — SEP-38. Get a price and verify the firm-quote window hasn't already
 //    closed. who_holds_risk in the manifest records who eats slippage if it does.
@@ -101,6 +102,12 @@ export interface PollOptions {
   deadlineMs: number;
   /** Delay between polls. */
   pollMs: number;
+  /** Corridor ID for metric tagging. Optional. */
+  corridorId?: string;
+  /** Logger for per-poll debug logs. Optional. */
+  logger?: Logger;
+  /** Metrics sink for per-poll counter. Optional. */
+  metrics?: Metrics;
 }
 
 // 4'. RECONCILE (production) — poll the anchor until the payout settles or the
@@ -112,8 +119,26 @@ export async function reconcileUntil(
   opts: PollOptions,
 ): Promise<Outcome<TransactionStatus>> {
   let lastStatus = "unknown";
+  let poll = 0;
+  const startedAt = opts.now();
   for (;;) {
+    poll += 1;
     const s = await adapter.getTransaction(transactionId);
+    const rawStatus = s.ok ? s.value.status : "error";
+    const elapsedMs = opts.now() - startedAt;
+
+    opts.logger?.log("debug", "corridor.reconcile.poll", {
+      transactionId,
+      status: rawStatus,
+      poll,
+      elapsedMs,
+    });
+
+    opts.metrics?.increment("corridor.reconcile.poll", {
+      ...(opts.corridorId ? { corridor: opts.corridorId } : {}),
+      status: rawStatus,
+    });
+
     if (s.ok && s.value.settled) return s;
     // A terminal non-success at the anchor (error/expired/refunded): stop polling
     // now and let the engine recover, rather than waiting out the timeout. Non-
