@@ -7,6 +7,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — `reference-anchor.sh doctor` (2026-08-31)
+
+When the reference anchor's observer falls behind, the symptom is a corridor run
+that reaches `settled`, polls for the whole of `recovery.timeout_seconds` and
+then fails with `SETTLEMENT_TIMEOUT` — minutes spent discovering something that
+was knowable before the run started.
+
+`doctor` checks the stack up front and exits non-zero, naming the failing check,
+so it can gate a CI job or a `verify:corridor` run: every expected container is
+running, SEP-1 serves, SEP-31 `/info` advertises a non-empty receive list (the
+asset codes are printed, since "which asset can I receive today" is the question
+§1 tells you to ask), and the observer's cursor lag against Horizon.
+
+The lag is reported as a number of ledgers rather than a boolean, because the
+borderline cases are the ones worth seeing. It fails past
+`CURSOR_LAG_FAIL_LEDGERS`, defaulting to 180 — the default
+`recovery.timeout_seconds` of 900s at testnet's ~5s close time, past which an
+observer cannot catch up to a fresh payment before the engine stops waiting.
+
 ### Fixed — reference anchor started its observer on a stale cursor (2026-08-31)
 
 `scripts/reference-anchor.sh up` started the Stellar observer with whatever

@@ -52,10 +52,45 @@ agreement with anybody. It needs `podman`; everything is testnet.
 
 ```bash
 scripts/reference-anchor.sh up      # start, wait for SEP-1 to serve
+scripts/reference-anchor.sh doctor  # is the stack fit to run a corridor?
 scripts/reference-anchor.sh status  # what is running
 scripts/reference-anchor.sh logs    # tail ap-sep (pass a name for another)
 scripts/reference-anchor.sh down    # tear it all down
 ```
+
+#### `doctor` - check before you run, not after
+
+A corridor run against a sick stack does not fail fast. It reaches `settled`,
+polls for the whole of `recovery.timeout_seconds` (900s by default) and then
+fails with `SETTLEMENT_TIMEOUT`. Every one of those minutes was spent learning
+something that was knowable beforehand. Run `doctor` first:
+
+```
+reference anchor doctor
+
+  ✓ containers       db reference-db kafka ap-sep ap-ref ap-obs
+  ✓ sep1             http://localhost:8080/.well-known/stellar.toml
+  ✓ sep31-info       receive: JPYC USDC
+  ✓ cursor-lag       11 ledgers behind Horizon (limit 180)
+
+✓ stack is fit to run a corridor
+```
+
+It exits non-zero and names the failing check otherwise, so it can gate a CI job
+or a `verify:corridor` run:
+
+```
+  ✗ cursor-lag       5002 ledgers behind Horizon (limit 180) - a fresh payment will not be seen in time
+
+✗ 1 check(s) failed
+```
+
+The lag is reported as a **number of ledgers**, not a yes/no, because the
+interesting cases are the borderline ones. The default limit of 180 ledgers is
+the default `recovery.timeout_seconds` (900s) at testnet's ~5s close time: an
+observer further back than that cannot catch up to a fresh payment before the
+engine stops waiting for it. Set `CURSOR_LAG_FAIL_LEDGERS` if your corridor's
+timeout differs.
 
 #### The observer cursor
 
@@ -79,11 +114,12 @@ range, and prints the ledger it chose:
 Override it when you need a specific starting point — replaying an older ledger
 while debugging, or starting without network access to Horizon:
 
-| Variable                | Default                               | Effect                                                                 |
-| ----------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
-| `START_LEDGER`          | _(unset)_                             | Start the observer at exactly this ledger, skipping the Horizon lookup |
-| `CURSOR_MARGIN_LEDGERS` | `10`                                  | Ledgers of slack below Horizon's tip                                   |
-| `HORIZON_URL`           | `https://horizon-testnet.stellar.org` | Horizon to read the current ledger from                                |
+| Variable                  | Default                               | Effect                                                                 |
+| ------------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
+| `START_LEDGER`            | _(unset)_                             | Start the observer at exactly this ledger, skipping the Horizon lookup |
+| `CURSOR_MARGIN_LEDGERS`   | `10`                                  | Ledgers of slack below Horizon's tip                                   |
+| `HORIZON_URL`             | `https://horizon-testnet.stellar.org` | Horizon to read the current ledger from                                |
+| `CURSOR_LAG_FAIL_LEDGERS` | `180`                                 | Lag at which `doctor`'s cursor check fails                             |
 
 ```bash
 START_LEDGER=4030900 scripts/reference-anchor.sh up

@@ -7,6 +7,7 @@
 #   scripts/reference-anchor.sh down    tear it down
 #   scripts/reference-anchor.sh logs    tail the platform logs
 #   scripts/reference-anchor.sh status  show what is running
+#   scripts/reference-anchor.sh doctor  check the stack is fit to run a corridor
 #
 # Uses podman (rootless, no daemon).
 #
@@ -37,6 +38,14 @@
 #   CURSOR_MARGIN_LEDGERS=<n>   ledgers of slack below Horizon's tip (default 10)
 #   HORIZON_URL=<url>           Horizon to read the current ledger from
 #
+# `doctor` is the counterpart to that seeding: it reports how far the observer's
+# cursor has drifted behind Horizon *before* a run, rather than letting the run
+# discover it by polling for the full recovery timeout and failing with
+# SETTLEMENT_TIMEOUT. It exits non-zero on any failed check, so it can gate CI or
+# a verify:corridor run.
+#
+#   CURSOR_LAG_FAIL_LEDGERS=<n>  lag at which the cursor check fails (default 180)
+#
 # Config is extracted from the image itself rather than vendored, so it stays in
 # step with whatever AP_IMAGE points at. Credentials come from the platform's own
 # bundled docker-compose (POSTGRES_PASSWORD=password) — nothing invented here,
@@ -54,6 +63,10 @@ CONFIG_DIR="${CONFIG_DIR:-${TMPDIR:-/tmp}/corridor-anchor-config}"
 HORIZON_URL="${HORIZON_URL:-https://horizon-testnet.stellar.org}"
 CURSOR_MARGIN_LEDGERS="${CURSOR_MARGIN_LEDGERS:-10}"
 START_LEDGER="${START_LEDGER:-}"
+# ~180 ledgers is the default recovery.timeout_seconds (900s) at testnet's ~5s
+# close time: beyond that an observer starting this far back cannot catch up to
+# a fresh payment before the engine gives up on it.
+CURSOR_LAG_FAIL_LEDGERS="${CURSOR_LAG_FAIL_LEDGERS:-180}"
 
 log() { printf '• %s\n' "$*"; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
@@ -230,6 +243,108 @@ wait_for() {
   log "$name ready"
 }
 
+DOCTOR_FAILURES=0
+pass_() { printf '  ✓ %-16s %s\n' "$1" "$2"; }
+fail_() { printf '  ✗ %-16s %s\n' "$1" "$2"; DOCTOR_FAILURES=$((DOCTOR_FAILURES + 1)); }
+
+container_running() {
+  [ "$(podman inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]
+}
+
+# Asset codes one level inside SEP-31 /info's `receive` object. A depth-aware
+# scan rather than a regex: the nested sep12 blocks put quoted braces and commas
+# in the way of anything simpler.
+sep31_receive_codes() {
+  awk '
+    { s = s $0 }
+    END {
+      i = index(s, "\"receive\"")
+      if (i == 0) exit
+      s = substr(s, i)
+      i = index(s, "{")
+      if (i == 0) exit
+      depth = 0; inq = 0; esc = 0; key = ""; capturing = 0; expect = 0
+      for (n = i; n <= length(s); n++) {
+        c = substr(s, n, 1)
+        if (inq) {
+          if (esc) { esc = 0; if (capturing) key = key c; continue }
+          if (c == "\\") { esc = 1; continue }
+          if (c == "\"") { inq = 0; if (capturing) { print key; capturing = 0; key = "" }; continue }
+          if (capturing) key = key c
+          continue
+        }
+        if (c == "\"") { inq = 1; if (depth == 1 && expect) { capturing = 1; key = ""; expect = 0 }; continue }
+        if (c == "{") { depth++; if (depth == 1) expect = 1; continue }
+        if (c == "}") { depth--; if (depth == 0) break; continue }
+        if (c == ",") { if (depth == 1) expect = 1; continue }
+      }
+    }'
+}
+
+doctor() {
+  require_podman
+  printf 'reference anchor doctor\n\n'
+
+  local missing="" c
+  for c in db reference-db kafka ap-sep ap-ref ap-obs; do
+    container_running "$c" || missing="$missing $c"
+  done
+  if [ -n "$missing" ]; then
+    fail_ containers "not running:$missing"
+  else
+    pass_ containers "db reference-db kafka ap-sep ap-ref ap-obs"
+  fi
+
+  if curl -fsS --max-time 5 "$SEP_URL/.well-known/stellar.toml" >/dev/null 2>&1; then
+    pass_ sep1 "$SEP_URL/.well-known/stellar.toml"
+  else
+    fail_ sep1 "$SEP_URL/.well-known/stellar.toml does not serve"
+  fi
+
+  local info codes count
+  info="$(curl -fsS --max-time 5 "$SEP_URL/sep31/info" 2>/dev/null)" || info=""
+  if [ -z "$info" ]; then
+    fail_ sep31-info "$SEP_URL/sep31/info did not respond"
+  else
+    codes="$(printf '%s' "$info" | sep31_receive_codes | tr '\n' ' ' | sed 's/ *$//')"
+    count="$(printf '%s' "$info" | sep31_receive_codes | grep -c . || true)"
+    if [ "$count" -gt 0 ]; then
+      pass_ sep31-info "receive: $codes"
+    else
+      fail_ sep31-info "receive list is empty - no asset can be received today"
+    fi
+  fi
+
+  # The check this command exists for. Report the gap as ledgers, so a
+  # borderline stack is legible rather than a bare pass/fail.
+  local cursor tip lag
+  cursor="$(psql_platform -c 'SELECT cursor FROM stellar_payment_observer_page_token;' 2>/dev/null | head -1 | tr -d '[:space:]')" || cursor=""
+  tip="$(horizon_latest_ledger)"
+  case "$cursor" in
+    ''|*[!0-9]*) cursor="" ;;
+  esac
+  if [ -z "$cursor" ]; then
+    fail_ cursor-lag "no observer cursor stored - run \`up\` to seed one"
+  elif [ -z "$tip" ]; then
+    fail_ cursor-lag "could not read the current ledger from $HORIZON_URL"
+  else
+    lag=$(( tip - cursor / 4294967296 ))
+    if [ "$lag" -gt "$CURSOR_LAG_FAIL_LEDGERS" ]; then
+      fail_ cursor-lag "$lag ledgers behind Horizon (limit $CURSOR_LAG_FAIL_LEDGERS) - a fresh payment will not be seen in time"
+    else
+      pass_ cursor-lag "$lag ledgers behind Horizon (limit $CURSOR_LAG_FAIL_LEDGERS)"
+    fi
+  fi
+
+  printf '\n'
+  if [ "$DOCTOR_FAILURES" -eq 0 ]; then
+    printf '✓ stack is fit to run a corridor\n'
+    return 0
+  fi
+  printf '✗ %s check(s) failed\n' "$DOCTOR_FAILURES"
+  return 1
+}
+
 down() {
   require_podman
   podman rm -f ap ap-sep ap-ref ap-obs ap-extract kafka db reference-db >/dev/null 2>&1 || true
@@ -242,5 +357,6 @@ case "${1:-up}" in
   down) down ;;
   logs) podman logs -f "${2:-ap-sep}" ;;
   status) podman ps --filter network="$NET" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' ;;
-  *) die "usage: $0 <up|down|logs|status>" ;;
+  doctor) doctor ;;
+  *) die "usage: $0 <up|down|logs|status|doctor>" ;;
 esac
