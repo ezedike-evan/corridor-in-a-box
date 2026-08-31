@@ -7,6 +7,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — `pnpm verify:corridor` (2026-08-31)
+
+`pnpm verify:settle` proves the settle leg on live testnet. There was no
+equivalent for a whole corridor run — quote → comply → open → settle → reconcile
+→ completed — against the local reference server, so "does the full corridor
+work end to end" was a manual, undocumented procedure.
+
+`examples/verify-corridor.ts` drives one payment through every leg against the
+Anchor Platform reference server and exits non-zero unless the terminal state is
+`completed`. It is a gate rather than a capture: distinct exit codes let CI tell
+"the stack was not ready" from "the corridor ran and did not complete", and the
+trail is printed on both paths — reconstructed from the audit sink, so the
+FAILING run gets one too, which is the case worth reading.
+
+It fails early rather than hanging: `reference-anchor.sh doctor` runs before a
+payment is opened, and the bridge asset is checked against the anchor's SEP-38
+`/info` (its own statement of what it will quote) so a wrong issuer is named up
+front instead of surfacing well after the quote. Every leg is pinned to the local
+reference server regardless of what the manifest says, and a `network: public`
+manifest is refused outright with no override — this runner drives payments at
+localhost, so mainnet here is always a mistake rather than a decision.
+
 ### Added — `reference-anchor.sh doctor` (2026-08-31)
 
 When the reference anchor's observer falls behind, the symptom is a corridor run

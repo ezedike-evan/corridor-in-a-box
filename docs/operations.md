@@ -125,6 +125,39 @@ while debugging, or starting without network access to Horizon:
 START_LEDGER=4030900 scripts/reference-anchor.sh up
 ```
 
+### `pnpm verify:corridor` — the whole run, as a gate
+
+```bash
+scripts/reference-anchor.sh up
+CORRIDOR_SIGNER_SECRET=S… pnpm verify:corridor
+```
+
+Drives one payment through every leg against the local reference server and
+exits non-zero unless the terminal state is `completed`. It prints the trail on
+both paths — the failing run is the one worth reading:
+
+```
+trail: created -> quoted -> compliant -> opened -> settling -> retrying -> settling -> recovering -> refunded
+
+✗ SETTLEMENT_FAILED — settlement submit failed: tx_failed operations=[op_src_no_trust]
+  terminal state: refunded
+```
+
+Exit codes are distinct so CI can tell the cases apart: `2` missing
+`CORRIDOR_SIGNER_SECRET`, `3` refused (mainnet manifest, or a bridge asset the
+anchor does not quote), `4` the stack is not fit (`doctor` failed), `5` the
+corridor ran and did not complete.
+
+**The signer** must be a testnet account holding the corridor's bridge asset with
+a trustline for it — `op_src_no_trust` above is exactly what a missing trustline
+looks like. `pnpm verify:settle` needs no such setup because it settles in native
+XLM; this one settles the asset the anchor actually quotes.
+
+**Known sharp edge in the reference server:** a small `AMOUNT` makes its
+`GET /rate` throw `Buy amount must be greater than zero`, which surfaces as
+`QUOTE_UNAVAILABLE: quote HTTP 502`. `AMOUNT=1.00` reproduces it; the default of
+`10.00` does not.
+
 ## 2. Recovering a stuck payment
 
 The engine drives recovery automatically per the manifest's `recovery.rollback`
