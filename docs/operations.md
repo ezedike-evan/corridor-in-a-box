@@ -44,6 +44,51 @@ live SEP-31 server, captured in the README.
 
 When that trail is in the README, check off the last Phase-1 box in the ROADMAP.
 
+### The self-hosted reference anchor
+
+[`scripts/reference-anchor.sh`](../scripts/reference-anchor.sh) stands the SDF
+Anchor Platform reference server up locally, so option 2 above needs no
+agreement with anybody. It needs `podman`; everything is testnet.
+
+```bash
+scripts/reference-anchor.sh up      # start, wait for SEP-1 to serve
+scripts/reference-anchor.sh status  # what is running
+scripts/reference-anchor.sh logs    # tail ap-sep (pass a name for another)
+scripts/reference-anchor.sh down    # tear it all down
+```
+
+#### The observer cursor
+
+The one failure that will waste an afternoon: the platform's Stellar observer
+resumes from a **stale cursor**, never matches the payment your settle leg just
+made, and leaves the transaction at `pending_sender` until the engine reports
+`SETTLEMENT_TIMEOUT`. That looks like an engine bug and is not one.
+
+The cursor is not a config value — Anchor Platform keeps it in the platform DB
+(`stellar_payment_observer_page_token`, one row keyed `SINGLETON_ID`) and only
+falls back to Horizon's latest cursor when that row is absent. `up` therefore
+clears the row and reseeds it from Horizon's current ledger on every start,
+minus a small margin so a payment submitted immediately afterwards is still in
+range, and prints the ledger it chose:
+
+```
+• Horizon is at ledger 4422632; starting the observer at 4422622 (margin 10)
+• observer cursor seeded at ledger 4422622 (cursor 18995016852570112)
+```
+
+Override it when you need a specific starting point — replaying an older ledger
+while debugging, or starting without network access to Horizon:
+
+| Variable                | Default                               | Effect                                                                 |
+| ----------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
+| `START_LEDGER`          | _(unset)_                             | Start the observer at exactly this ledger, skipping the Horizon lookup |
+| `CURSOR_MARGIN_LEDGERS` | `10`                                  | Ledgers of slack below Horizon's tip                                   |
+| `HORIZON_URL`           | `https://horizon-testnet.stellar.org` | Horizon to read the current ledger from                                |
+
+```bash
+START_LEDGER=4030900 scripts/reference-anchor.sh up
+```
+
 ## 2. Recovering a stuck payment
 
 The engine drives recovery automatically per the manifest's `recovery.rollback`

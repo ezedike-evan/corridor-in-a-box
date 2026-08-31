@@ -7,6 +7,46 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Fixed — reference anchor started its observer on a stale cursor (2026-08-31)
+
+`scripts/reference-anchor.sh up` started the Stellar observer with whatever
+cursor was already in the platform DB. When that cursor was behind the ledger
+the settle leg landed in, the observer never matched the incoming payment and
+the transaction sat at `pending_sender` until the engine gave up with
+`SETTLEMENT_TIMEOUT` — the one full-stack attempt so far failed exactly this
+way, and it read as an engine bug rather than the harness bug it was.
+
+The cursor is not a config value: Anchor Platform 2.x keeps it in the platform
+DB (`stellar_payment_observer_page_token`, one row keyed `SINGLETON_ID`) and
+only falls back to Horizon's latest cursor when that row is absent, so a row
+left over from an earlier run is precisely how a stale value leaks into a fresh
+start. `up` now clears that row and reseeds it from Horizon's current ledger
+minus a safety margin, and prints the ledger it chose. Three ordering details
+that all turned out to matter:
+
+- The observer is started **after** the platform server rather than alongside
+  it, because the table being seeded is created by that server's Flyway
+  migration.
+- Any running observer is **stopped before** the seed. A live observer writes
+  its own paging token back to that row as it streams, so seeding underneath
+  one is overwritten within milliseconds and the new cursor never takes effect.
+- The observer container is recreated on every `up`, so it cannot resume from
+  the position a previous run left behind.
+
+`START_LEDGER`, `CURSOR_MARGIN_LEDGERS` and `HORIZON_URL` override the
+behaviour; see the script header and `docs/operations.md` §1.
+
+Two further fixes in the same path, both of which made the above unverifiable
+until they were dealt with:
+
+- Config extraction aborted `up` outright when its first `podman exec` raced
+  the container's start, because `set -e` plus `pipefail` treats the failed
+  command substitution as fatal. The probe is now guarded, which is what the
+  surrounding retry loop always intended.
+- The readiness-failure path dumped logs from a container named `ap`, which
+  this script has never created, so a failed `up` printed nothing useful. It
+  reads `ap-sep` now.
+
 ### Fixed — refunded runbook implied a reversal that never happens (2026-08-29)
 
 `docs/operations.md`'s `refunded` section said the engine "reversed (or had

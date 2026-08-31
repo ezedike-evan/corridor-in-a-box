@@ -23,6 +23,20 @@
 #   ap-ref                    --kotlin-reference-server        (business logic)
 #   ap-obs                    --stellar-observer --event-processor
 #
+# The Stellar observer's starting cursor is NOT a config value. Anchor Platform
+# 2.x keeps it in the platform DB (table `stellar_payment_observer_page_token`,
+# a single row keyed `SINGLETON_ID`) and only falls back to Horizon's latest
+# cursor when that row is absent. A row left behind by an earlier run is
+# therefore how a stale cursor leaks into a fresh `up`: the observer resumes
+# from a ledger the settle leg has already passed, never matches the incoming
+# payment, and the transaction sits at `pending_sender` until the engine gives
+# up. So `up` clears that row and reseeds it from Horizon's current ledger,
+# minus a small safety margin, on every start.
+#
+#   START_LEDGER=<n>            start the observer at exactly ledger <n>
+#   CURSOR_MARGIN_LEDGERS=<n>   ledgers of slack below Horizon's tip (default 10)
+#   HORIZON_URL=<url>           Horizon to read the current ledger from
+#
 # Config is extracted from the image itself rather than vendored, so it stays in
 # step with whatever AP_IMAGE points at. Credentials come from the platform's own
 # bundled docker-compose (POSTGRES_PASSWORD=password) — nothing invented here,
@@ -37,12 +51,49 @@ NET="${NET:-apnet}"
 SEP_URL="http://localhost:8080"
 READY_TIMEOUT_SECS="${READY_TIMEOUT_SECS:-300}"
 CONFIG_DIR="${CONFIG_DIR:-${TMPDIR:-/tmp}/corridor-anchor-config}"
+HORIZON_URL="${HORIZON_URL:-https://horizon-testnet.stellar.org}"
+CURSOR_MARGIN_LEDGERS="${CURSOR_MARGIN_LEDGERS:-10}"
+START_LEDGER="${START_LEDGER:-}"
 
 log() { printf '• %s\n' "$*"; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
 require_podman() {
   command -v podman >/dev/null 2>&1 || die "podman is not installed"
+}
+
+psql_platform() { podman exec db psql -qtAX -U postgres -d postgres "$@"; }
+
+# Horizon's paging token for a ledger is a TOID: the ledger sequence in the high
+# 32 bits, transaction and operation order zero. Starting the observer at the
+# first operation of ledger N is therefore N * 2^32.
+ledger_to_cursor() { printf '%s' "$(( $1 * 4294967296 ))"; }
+
+horizon_latest_ledger() {
+  curl -fsS --max-time 10 "$HORIZON_URL/ledgers?order=desc&limit=1" 2>/dev/null \
+    | tr ',' '\n' \
+    | sed -n 's/.*"sequence":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' \
+    | head -1
+}
+
+# Clear any cursor left over from a previous run and pin a fresh one, so the
+# observer cannot resume from a ledger the settle leg has already passed. See
+# the header for why this is a DB row and not a config value.
+seed_observer_cursor() {
+  local cursor tip
+  if [ -n "$START_LEDGER" ]; then
+    SEEDED_LEDGER="$START_LEDGER"
+    log "START_LEDGER=$SEEDED_LEDGER (override)"
+  else
+    tip="$(horizon_latest_ledger)"
+    [ -n "$tip" ] || die "could not read the current ledger from $HORIZON_URL (set START_LEDGER to bypass)"
+    SEEDED_LEDGER=$(( tip > CURSOR_MARGIN_LEDGERS ? tip - CURSOR_MARGIN_LEDGERS : 1 ))
+    log "Horizon is at ledger $tip; starting the observer at $SEEDED_LEDGER (margin ${CURSOR_MARGIN_LEDGERS})"
+  fi
+  cursor="$(ledger_to_cursor "$SEEDED_LEDGER")"
+  psql_platform -c "DELETE FROM stellar_payment_observer_page_token;" >/dev/null
+  psql_platform -c "INSERT INTO stellar_payment_observer_page_token (id, cursor) VALUES ('SINGLETON_ID', '$cursor');" >/dev/null
+  log "observer cursor seeded at ledger $SEEDED_LEDGER (cursor $cursor)"
 }
 
 up() {
@@ -96,7 +147,9 @@ up() {
     podman run -d --name ap-extract --network "$NET" "$AP_IMAGE" --test-profile-runner >/dev/null
     local res=""
     for _ in $(seq 1 30); do
-      res="$(podman exec ap-extract sh -c 'ls -d /tmp/resource-temp-dir* 2>/dev/null' | tr -d '\r' | head -1)"
+      # `set -e` + `pipefail`: this exec fails for the first second or two while
+      # the container boots, and an unguarded assignment would abort `up` there.
+      res="$(podman exec ap-extract sh -c 'ls -d /tmp/resource-temp-dir* 2>/dev/null' 2>/dev/null | tr -d '\r' | head -1)" || true
       [ -n "$res" ] && break
       sleep 2
     done
@@ -124,25 +177,38 @@ up() {
       "$AP_IMAGE" --kotlin-reference-server >/dev/null
   fi
 
-  # Watches Stellar for the incoming settlement and drives the transaction to
-  # completed. Without it a payment settles on-chain but never reconciles.
-  if ! podman container exists ap-obs 2>/dev/null; then
-    podman run -d --name ap-obs --network "$NET" \
-      -v "$CONFIG_DIR:/config:ro,z" --env-file "$CONFIG_DIR/config.env" \
-      "$AP_IMAGE" --stellar-observer --event-processor >/dev/null
-  fi
-
   log "waiting for the SEP server (this takes a minute on first boot)…"
   local waited=0
   until curl -fsS --max-time 3 "$SEP_URL/.well-known/stellar.toml" >/dev/null 2>&1; do
     waited=$((waited + 5))
     if [ "$waited" -ge "$READY_TIMEOUT_SECS" ]; then
       printf '\n'
-      podman logs --tail 40 ap 2>&1 || true
+      podman logs --tail 40 ap-sep 2>&1 || true
       die "SEP server did not come up within ${READY_TIMEOUT_SECS}s"
     fi
     sleep 5
   done
+
+  # The observer's tables are created by the platform server's Flyway migration,
+  # so the cursor can only be seeded once that server has booted — which serving
+  # SEP-1 above establishes.
+  wait_for 'psql_platform -c "SELECT 1 FROM stellar_payment_observer_page_token LIMIT 1"' \
+    "observer cursor table"
+
+  # Stop the observer BEFORE seeding. A running observer writes its own paging
+  # token back to this row as it streams, so seeding underneath a live one is
+  # overwritten within milliseconds and the new cursor never takes effect.
+  podman rm -f ap-obs >/dev/null 2>&1 || true
+  seed_observer_cursor
+
+  # Watches Stellar for the incoming settlement and drives the transaction to
+  # completed. Without it a payment settles on-chain but never reconciles.
+  # Recreated on every `up` so it reads the cursor just seeded rather than
+  # resuming from wherever the previous run left off.
+  podman run -d --name ap-obs --network "$NET" \
+    -v "$CONFIG_DIR:/config:ro,z" --env-file "$CONFIG_DIR/config.env" \
+    "$AP_IMAGE" --stellar-observer --event-processor >/dev/null
+  log "observer started"
 
   printf '\n✓ reference anchor is serving\n\n'
   printf '  SEP-1  %s/.well-known/stellar.toml\n' "$SEP_URL"
@@ -150,6 +216,7 @@ up() {
   printf '  SEP-12 %s/sep12\n' "$SEP_URL"
   printf '  SEP-31 %s/sep31\n' "$SEP_URL"
   printf '  SEP-38 %s/sep38\n' "$SEP_URL"
+  printf '\n  observer starting at ledger %s\n' "$SEEDED_LEDGER"
   printf '\nNext: pnpm testnet   (see docs/operations.md §1)\n'
 }
 
