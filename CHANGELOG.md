@@ -7,6 +7,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Security — soroban-sdk 25 → 27 clears GHSA-x57h-xx53-v53w (2026-08-31)
+
+`contracts/Cargo.lock` pinned `stellar-xdr@25.0.0`, which carries a moderate
+advisory ([GHSA-x57h-xx53-v53w](https://github.com/advisories/GHSA-x57h-xx53-v53w):
+`StringM::from_str` accepts strings past the declared max length instead of
+rejecting them). It was failing `dependency-review` on every PR.
+
+It could not be patched in place. `soroban-sdk-macros` pins
+`stellar-xdr = "=25.0.0"` exactly, and every 25.x release of the SDK locks to
+that same vulnerable version, so neither `cargo update -p soroban-sdk` nor
+`cargo update -p stellar-xdr --precise 25.0.1` could move it. The fix exists only
+from soroban-sdk 26 onwards.
+
+`soroban-sdk` moves to `"27"` (resolving 27.0.6), which brings `stellar-xdr`
+27.0.0. **No contract source changed** — the 25 → 27 API surface used by these
+contracts is unchanged, and all 21 tests, `cargo fmt --check`, `cargo clippy
+--all-targets -D warnings` and the `wasm32v1-none` release build pass untouched.
+
+`contracts/deployments.json` is deliberately left alone. The SDK bump changes
+the compiled WASM, so the testnet contracts no longer match a `main` build
+byte-for-byte, but nothing in the contracts calls the affected code: they handle
+only `soroban_sdk::String` host handles, never `stellar-xdr` directly, and never
+`StringM::from_str`. Redeploying testnet is worth doing to keep the recorded
+addresses matching a `main` build, but it needs the deployer key and is a
+maintainer decision rather than part of clearing the advisory.
+
 ### Fixed — refunded runbook implied a reversal that never happens (2026-08-29)
 
 `docs/operations.md`'s `refunded` section said the engine "reversed (or had
