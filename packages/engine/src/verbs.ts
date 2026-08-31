@@ -111,9 +111,17 @@ export async function reconcileUntil(
   transactionId: string,
   opts: PollOptions,
 ): Promise<Outcome<TransactionStatus>> {
+  let firstStatus: string | undefined;
   let lastStatus = "unknown";
+  let poll = 0;
+  const startedAt = opts.now();
   for (;;) {
+    poll += 1;
     const s = await adapter.getTransaction(transactionId);
+    if (s.ok) {
+      if (firstStatus === undefined) firstStatus = s.value.status;
+      lastStatus = s.value.status;
+    }
     if (s.ok && s.value.settled) return s;
     // A terminal non-success at the anchor (error/expired/refunded): stop polling
     // now and let the engine recover, rather than waiting out the timeout. Non-
@@ -125,13 +133,13 @@ export async function reconcileUntil(
         { retryable: false },
       );
     }
-    if (s.ok) lastStatus = s.value.status;
     if (opts.now() >= opts.deadlineMs) {
       // On a transient anchor error, surface it; otherwise it's a settle timeout.
       if (!s.ok) return s;
+      const elapsedMs = opts.now() - startedAt;
       return fail(
         "SETTLEMENT_TIMEOUT",
-        `tx ${transactionId} did not settle before timeout (last status=${lastStatus})`,
+        `tx ${transactionId} did not settle before timeout (polls=${poll}, elapsed=${elapsedMs}ms, first status=${firstStatus ?? "unknown"}, last status=${lastStatus})`,
         { retryable: false },
       );
     }

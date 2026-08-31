@@ -7,6 +7,7 @@ import {
   canTransition,
   createMockSubmitter,
   execute,
+  reconcileUntil,
   type EngineDeps,
   type SettlementSubmitter,
 } from "@corridor/engine";
@@ -210,9 +211,79 @@ describe("engine recovery", () => {
       d,
     );
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.message).toContain("polls=3");
+      expect(r.error.message).toContain("elapsed=1000ms");
+      expect(r.error.message).toContain("first status=pending_receiver");
+      expect(r.error.message).toContain("last status=pending_receiver");
+    }
     // a settlement went out, so the engine must have reversed it on-chain
     expect(refunded).toHaveLength(1);
+  });
+
+  it("SETTLEMENT_TIMEOUT carries poll count, elapsed ms, and first/last status in error message", async () => {
+    let clock = 1000;
+    let pollCount = 0;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        pollCount++;
+        const status = pollCount === 1 ? "pending_sender" : "pending_receiver";
+        return {
+          ok: true as const,
+          value: {
+            status,
+            settled: false,
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-stall", {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      deadlineMs: 3000,
+      pollMs: 1000,
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.message).toContain("tx tx-stall did not settle before timeout");
+      expect(r.error.message).toContain("polls=3");
+      expect(r.error.message).toContain("elapsed=2000ms");
+      expect(r.error.message).toContain("first status=pending_sender");
+      expect(r.error.message).toContain("last status=pending_receiver");
+    }
+  });
+
+  it("SETTLEMENT_TIMEOUT records identical first and last status for a stalled observer", async () => {
+    let clock = 0;
+    const adapter = createMockAdapter({ settled: false }); // returns pending_receiver
+
+    const r = await reconcileUntil(adapter, "tx-never-moves", {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      deadlineMs: 2000,
+      pollMs: 500,
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.message).toContain("polls=5");
+      expect(r.error.message).toContain("first status=pending_receiver");
+      expect(r.error.message).toContain("last status=pending_receiver");
+    }
   });
 
   it("bails out of reconcile immediately on a terminal anchor failure", async () => {
