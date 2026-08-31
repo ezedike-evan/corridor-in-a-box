@@ -101,17 +101,37 @@ export interface PollOptions {
   deadlineMs: number;
   /** Delay between polls. */
   pollMs: number;
+  /**
+   * Number of consecutive polls returning the same status before we conclude
+   * the anchor is stuck rather than legitimately slow. Once crossed,
+   * `reconcileUntil` returns a non-retryable `RECONCILE_STALLED` carrying the
+   * stuck status and the consecutive count.
+   *
+   * Set to `0` or `undefined` to disable stall detection (legacy behaviour).
+   *
+   * **Default:** `10`. With a typical `pollMs` of 2 s that is ≈ 20 s — well
+   * below the corridor timeout but long enough that a legitimately slow anchor
+   * transitioning through intermediate states won't be misdiagnosed.
+   */
+  stallThreshold?: number;
 }
 
 // 4'. RECONCILE (production) — poll the anchor until the payout settles or the
 //     corridor's timeout elapses. Returns a NON-retryable error on timeout so the
 //     engine routes straight to refund/hold instead of re-sending the payment.
+//
+//     Stall detection: when `stallThreshold` is set and the anchor returns the
+//     same status for that many consecutive polls, we bail early with
+//     `RECONCILE_STALLED` — the anchor is stuck, not slow. This lets the engine
+//     recover (refund/hold) long before the corridor deadline expires.
 export async function reconcileUntil(
   adapter: AnchorAdapter,
   transactionId: string,
   opts: PollOptions,
 ): Promise<Outcome<TransactionStatus>> {
   let lastStatus = "unknown";
+  let sameCount = 0;
+  const threshold = opts.stallThreshold ?? 0;
   for (;;) {
     const s = await adapter.getTransaction(transactionId);
     if (s.ok && s.value.settled) return s;
@@ -125,7 +145,21 @@ export async function reconcileUntil(
         { retryable: false },
       );
     }
-    if (s.ok) lastStatus = s.value.status;
+    if (s.ok) {
+      if (s.value.status === lastStatus) {
+        sameCount++;
+      } else {
+        lastStatus = s.value.status;
+        sameCount = 0;
+      }
+    }
+    if (threshold > 0 && sameCount >= threshold) {
+      return fail(
+        "RECONCILE_STALLED",
+        `tx ${transactionId} stuck at status=${lastStatus} for ${sameCount} consecutive polls`,
+        { retryable: false },
+      );
+    }
     if (opts.now() >= opts.deadlineMs) {
       // On a transient anchor error, surface it; otherwise it's a settle timeout.
       if (!s.ok) return s;

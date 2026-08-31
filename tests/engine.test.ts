@@ -7,10 +7,12 @@ import {
   canTransition,
   createMockSubmitter,
   execute,
+  reconcileUntil,
   type EngineDeps,
   type SettlementSubmitter,
 } from "@corridor/engine";
-import { fail, type PaymentIntent } from "@corridor/types";
+import type { TransactionStatus } from "@corridor/adapter-kit";
+import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
 
 function corridor(): Corridor {
   const r = parseCorridor({
@@ -308,6 +310,90 @@ describe("engine recovery", () => {
     expect(r.ok).toBe(false);
     const stored = await store.get("hold-1");
     expect(stored?.state).toBe("held");
+  });
+});
+
+describe("reconcile stall detection", () => {
+  // Build a tiny AnchorAdapter whose getTransaction always (or consecutively)
+  // returns the supplied status, while delegating everything else to the mock.
+  const stalledAdapter = (status: string) => {
+    let polls = 0;
+    const adapter = {
+      ...createMockAdapter({ settled: false }),
+      getTransaction: async (): Promise<Outcome<TransactionStatus>> => {
+        polls++;
+        return ok<TransactionStatus>({
+          status,
+          settled: false,
+          terminalFailure: false,
+        });
+      },
+    };
+    return { adapter, polls: () => polls };
+  };
+
+  it("returns RECONCILE_STALLED when status stays the same for stallThreshold polls", async () => {
+    const { adapter, polls } = stalledAdapter("pending_receiver");
+    let t = 0;
+    const result = await reconcileUntil(adapter, "tx_stall", {
+      now: () => t,
+      sleep: async (ms) => { t += ms; },
+      deadlineMs: t + 600_000,
+      pollMs: 100,
+      stallThreshold: 3,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("RECONCILE_STALLED");
+      expect(result.error.retryable).toBe(false);
+      expect(result.error.message).toContain("pending_receiver");
+      expect(result.error.message).toContain("3");
+    }
+    expect(polls()).toBe(4); // threshold + 1 (the poll that triggers the bail)
+  });
+
+  it("does NOT stall when the status advances between polls", async () => {
+    let callIdx = 0;
+    const adapter = {
+      ...createMockAdapter({ settled: false }),
+      getTransaction: async (): Promise<Outcome<TransactionStatus>> => {
+        callIdx++;
+        // Every poll returns a different status — sameCount never accumulates.
+        return ok<TransactionStatus>({ status: `status_${callIdx}`, settled: false });
+      },
+    };
+    let t = 0;
+    const result = await reconcileUntil(adapter, "tx_no_stall", {
+      now: () => t,
+      sleep: async (ms) => { t += ms; },
+      deadlineMs: t + 100,
+      pollMs: 10,
+      stallThreshold: 3,
+    });
+    // Should time out, NOT stall — because the status keeps advancing,
+    // resetting the consecutive counter on every poll.
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("SETTLEMENT_TIMEOUT");
+    }
+    expect(callIdx).toBeGreaterThan(3);
+  });
+
+  it("stalls exactly at threshold, not before", async () => {
+    const { adapter, polls } = stalledAdapter("stuck");
+    let t = 0;
+    // First poll sets lastStatus="stuck" with sameCount=0; each subsequent poll
+    // increments sameCount. So threshold=N means the stall fires on poll N+1.
+    const result = await reconcileUntil(adapter, "tx_exact", {
+      now: () => t,
+      sleep: async (ms) => { t += ms; },
+      deadlineMs: t + 600_000,
+      pollMs: 100,
+      stallThreshold: 5,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("RECONCILE_STALLED");
+    expect(polls()).toBe(6);
   });
 });
 

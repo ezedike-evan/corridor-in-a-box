@@ -41,6 +41,11 @@ export interface EngineDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Delay between reconcile polls (ms). Defaults to 2s. */
   reconcilePollMs?: number;
+  /**
+   * Consecutive polls with the same status before bailing with
+   * `RECONCILE_STALLED`. Defaults to 10. Set to `0` to disable.
+   */
+  stallThreshold?: number;
   /** Structured logger. Defaults to a silent logger. */
   logger?: Logger;
   /** Append-only audit sink; receives one entry per state transition. */
@@ -78,6 +83,7 @@ export async function execute(
   const now = deps.now ?? (() => Date.now());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const pollMs = deps.reconcilePollMs ?? 2_000;
+  const stallThreshold = deps.stallThreshold ?? 10;
   const metrics = deps.metrics ?? noopMetrics;
   const startedAt = now();
 
@@ -123,7 +129,7 @@ export async function execute(
       return ok(toResult(existing, [existing.state]));
     }
     if (existing.state === "settled" || existing.state === "reconciled") {
-      return resumeRun(existing, intent, corridor, deps, store, now, sleep, pollMs);
+      return resumeRun(existing, intent, corridor, deps, store, now, sleep, pollMs, stallThreshold);
     }
     // settling / created / quoted / … : ambiguous (did the payment go out?) or
     // stale (quote may have expired). Surface for a fresh attempt or ops, rather
@@ -320,7 +326,13 @@ export async function execute(
     // Poll until the anchor confirms payout or we hit the corridor timeout.
     // reconcileUntil returns a non-retryable error, so we never re-settle here.
     const r = await timed("reconcile", () =>
-      reconcileUntil(adapter, opened.value.transactionId, { now, sleep, deadlineMs, pollMs }),
+      reconcileUntil(adapter, opened.value.transactionId, {
+        now,
+        sleep,
+        deadlineMs,
+        pollMs,
+        stallThreshold,
+      }),
     );
     if (!r.ok) return finishFailure(r.error);
     {
@@ -392,6 +404,7 @@ async function resumeRun(
   now: () => number,
   sleep: (ms: number) => Promise<void>,
   pollMs: number,
+  stallThreshold: number,
 ): Promise<Outcome<RunResult>> {
   const run: StoredRun = { ...existing };
   const trail: CorridorState[] = [run.state];
@@ -422,6 +435,7 @@ async function resumeRun(
       sleep,
       deadlineMs: now() + corridor.recovery.timeout_seconds * 1000,
       pollMs,
+      stallThreshold,
     });
     if (!r.ok) {
       const from = run.state;

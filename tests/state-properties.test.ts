@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import { canTransition, isTerminal, TERMINAL, type CorridorState } from "@corridor/engine";
+import { fail } from "@corridor/types";
 
 const ALL: CorridorState[] = [
   "created",
@@ -236,5 +237,23 @@ describe("state machine structure", () => {
         `path visits settled twice: ${path.join(" -> ")}`,
       ).toBeLessThanOrEqual(1);
     }
+  });
+
+  it("RECONCILE_STALLED is non-retryable — same safety as SETTLEMENT_TIMEOUT", () => {
+    // Both SETTLEMENT_TIMEOUT and RECONCILE_STALLED fire after money has moved
+    // (the payment is in `settled` state during reconcile). Retrying either
+    // would re-submit a payment that already went out — a double-spend.
+    const stall = fail("RECONCILE_STALLED", "stuck at pending_receiver for 10 polls", {
+      retryable: false,
+    });
+    expect(stall.error.retryable).toBe(false);
+
+    // The non-retryable flag is what keeps recover() from routing back to
+    // settling. Without it, the recovery step would advance to `retrying` ->
+    // `settling`, re-submitting the payment.
+    const timeout = fail("SETTLEMENT_TIMEOUT", "deadline exceeded", {
+      retryable: false,
+    });
+    expect(timeout.error.retryable).toBe(false);
   });
 });
