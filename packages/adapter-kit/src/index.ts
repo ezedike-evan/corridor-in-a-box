@@ -53,6 +53,49 @@ export interface TransactionStatus {
    * the corridor timeout. Absent/false means "not settled yet, keep polling".
    */
   readonly terminalFailure?: boolean;
+  /**
+   * Anchor-reported refund details (e.g. from SEP-31 `refunds` object).
+   *
+   * Reaching the engine via `TransactionStatus`:
+   * Refund status is carried directly on `TransactionStatus` rather than a separate
+   * poll endpoint because standard protocols (SEP-31 GET /transactions/:id) embed
+   * refund records directly in the transaction payload once the anchor executes
+   * a refund. Polling a single status endpoint avoids dual-polling race conditions
+   * and preserves a single source of truth for transaction reconciliation.
+   */
+  readonly refund?: RefundStatus;
+}
+
+/**
+ * One refund payment executed by an anchor (e.g. a SEP-31 refund payment).
+ */
+export interface RefundPayment {
+  readonly id: string;
+  readonly idType?: "stellar" | "external";
+  readonly amount: Money;
+  readonly fee?: Money;
+}
+
+/**
+ * Refund details reported by an anchor for a transaction.
+ *
+ * In SEP-31 and real-world payments, a refund cannot be executed unilaterally
+ * by reversing an on-chain transaction once funds have been credited to an anchor.
+ * Instead, refunds are anchor-driven operations where the anchor returns the
+ * funds (minus fees) and reports the outcome on the transaction.
+ */
+export interface RefundStatus {
+  readonly amountRefunded: Money;
+  readonly amountFee?: Money;
+  readonly payments: readonly RefundPayment[];
+}
+
+/** Reference returned when a refund request is accepted for processing. */
+export interface RefundRef {
+  readonly transactionId: string;
+  readonly status: "pending" | "refunded" | "rejected";
+  readonly refundId?: string;
+  readonly message?: string;
 }
 
 export interface AnchorAdapter {
@@ -69,6 +112,20 @@ export interface AnchorAdapter {
   ): Promise<Outcome<OpenTransaction>>;
   /** Poll transaction status for reconciliation. */
   getTransaction(transactionId: string): Promise<Outcome<TransactionStatus>>;
+  /**
+   * Request a refund from the receiving anchor.
+   *
+   * Refunds are anchor-driven operations, NOT unilateral on-chain reversals.
+   * Standard SEP-31 anchors do not expose a sender-initiated refund endpoint
+   * (the adapter returns REFUND_UNSUPPORTED), but bespoke anchor integrations
+   * or proprietary OTC desks may implement this method to request an anchor-side
+   * refund.
+   */
+  requestRefund(
+    transactionId: string,
+    amount: Money,
+    reason: string,
+  ): Promise<Outcome<RefundRef>>;
 }
 
 // --- Conformance ---------------------------------------------------------
@@ -117,6 +174,9 @@ export interface MockAdapterOptions {
   settled?: boolean;
   /** Make getTransaction report a terminal anchor failure (error/expired/refunded). */
   terminalFailure?: boolean;
+  /** Custom refund handler or result for mock testing. */
+  refundResult?: Outcome<RefundRef>;
+  refundStatus?: RefundStatus;
 }
 
 export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter {
@@ -152,11 +212,21 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
           status: "error",
           settled: false,
           terminalFailure: true,
+          refund: opts.refundStatus,
         });
       }
       return ok<TransactionStatus>({
         status: opts.settled === false ? "pending_receiver" : "completed",
         settled: opts.settled !== false,
+        refund: opts.refundStatus,
+      });
+    },
+    async requestRefund(transactionId, amount, reason) {
+      if (opts.refundResult) return opts.refundResult;
+      return ok<RefundRef>({
+        transactionId,
+        status: "pending",
+        message: `Refund requested for ${amount.amount} ${amount.asset}: ${reason}`,
       });
     },
   };

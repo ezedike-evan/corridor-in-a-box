@@ -20,6 +20,7 @@ import {
   isValidAmount,
   ok,
   subAmounts,
+  type Money,
   type Outcome,
   type PaymentIntent,
 } from "@corridor/types";
@@ -28,6 +29,7 @@ import type {
   KycResult,
   OpenTransaction,
   Quote,
+  RefundRef,
   TransactionStatus,
 } from "@corridor/adapter-kit";
 
@@ -553,7 +555,11 @@ export class Sep31Adapter implements AnchorAdapter {
   // to occupy the name with the refusal — the engine already parks any refused
   // refund in `held` for a human (the out-of-band path in docs/operations.md),
   // and that is asserted at the engine seam in tests/engine.test.ts.
-  async requestRefund(transactionId: string): Promise<Outcome<never>> {
+  async requestRefund(
+    transactionId: string,
+    _amount?: Money,
+    _reason?: string,
+  ): Promise<Outcome<RefundRef>> {
     return fail(
       "REFUND_UNSUPPORTED",
       `${this.name}: SEP-31 has no sender-initiated refund endpoint — a refund is ` +
