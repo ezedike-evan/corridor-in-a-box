@@ -130,6 +130,31 @@ describe("state machine structure", () => {
     ).toBe(false);
   });
 
+  it("no refund state, direct or transitive, reaches settling", () => {
+    // The generalisation of the two properties above, stated once over the
+    // whole refund path rather than state by state: everything the engine can
+    // be in *after* it has decided to unwind a payment is on the far side of
+    // the chain, so none of it may lead back to submitting one. A new refund
+    // state added to the machine is covered here without anyone remembering
+    // to write a matching case.
+    const REFUND_PATH: CorridorState[] = ["recovering", "refund_pending", "refunded", "held"];
+
+    for (const state of REFUND_PATH) {
+      expect(canTransition(state, "settling"), `${state} -> settling is a direct edge`).toBe(
+        false,
+      );
+      expect(
+        reachableFrom(state).has("settling"),
+        `${state} can re-enter settling via some path`,
+      ).toBe(false);
+      // ...and nothing on the refund path can reach `settled` either, which is
+      // the state that would make a second payment look legitimate.
+      expect(reachableFrom(state).has("settled"), `${state} can reach settled again`).toBe(
+        false,
+      );
+    }
+  });
+
   it("no path from reconciled or completed leads back into settling", () => {
     for (const s of ["reconciled", "completed"] as CorridorState[]) {
       expect(reachableFrom(s).has("settling"), `${s} can re-enter settling`).toBe(false);
