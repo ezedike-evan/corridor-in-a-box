@@ -108,4 +108,60 @@ describe("createMockAdapter", () => {
     const r = await createMockAdapter({ settled: false }).getTransaction("tx_1");
     expect(r.ok && r.value).toEqual({ status: "pending_receiver", settled: false });
   });
+
+  it("getTransaction: includes refund details when configured", async () => {
+    const refundStatus = {
+      amountRefunded: { asset: "USDC", amount: "100.00" },
+      amountFee: { asset: "USDC", amount: "2.00" },
+      payments: [
+        {
+          id: "ref-pay-1",
+          idType: "stellar",
+          amount: { asset: "USDC", amount: "98.00" },
+          fee: { asset: "USDC", amount: "2.00" },
+        },
+      ],
+      completeness: "full" as const,
+    };
+    const r = await createMockAdapter({ refundStatus }).getTransaction("tx_1");
+    expect(r.ok && r.value.refunds).toEqual(refundStatus);
+  });
+
+  it("requestRefund: defaults to pending refund response", async () => {
+    const adapter = createMockAdapter();
+    const r = await adapter.requestRefund(
+      "tx_1",
+      { asset: "USDC", amount: "100.00" },
+      "payout timed out",
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.transactionId).toBe("tx_1");
+      expect(r.value.status).toBe("pending");
+      expect(r.value.message).toContain("100.00 USDC");
+    }
+  });
+
+  it("requestRefund: honors overridden refundResult", async () => {
+    const adapter = createMockAdapter({
+      refundResult: {
+        ok: true,
+        value: {
+          transactionId: "tx_custom",
+          status: "refunded",
+          refundId: "ref_123",
+        },
+      },
+    });
+    const r = await adapter.requestRefund(
+      "tx_custom",
+      { asset: "USDC", amount: "50" },
+      "reason",
+    );
+    expect(r.ok && r.value).toEqual({
+      transactionId: "tx_custom",
+      status: "refunded",
+      refundId: "ref_123",
+    });
+  });
 });

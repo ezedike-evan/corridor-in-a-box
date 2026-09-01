@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
-import { Sep31Adapter, mapSep31Status, type Sep10Signer } from "@corridor/sep31";
+import { Sep31Adapter, mapSep31Status, parseRefunds, type Sep10Signer } from "@corridor/sep31";
 import type { PaymentIntent } from "@corridor/types";
 
 const PASSPHRASE = "Test SDF Network ; September 2015";
@@ -191,36 +191,75 @@ describe("SEP-38 quote request shape", () => {
 });
 
 describe("SEP-31 status mapping", () => {
-  it("classifies the SEP-31 lifecycle into settled / terminalFailure / in-flight", () => {
+  it("classifies `completed` as settled and nothing else", () => {
     expect(mapSep31Status("completed")).toEqual({
       status: "completed",
       settled: true,
       terminalFailure: false,
+      awaitingInput: false,
     });
+  });
+
+  it("classifies the terminal non-success statuses as terminalFailure", () => {
     for (const terminal of ["error", "expired", "refunded"]) {
-      expect(mapSep31Status(terminal)).toMatchObject({
+      expect(mapSep31Status(terminal)).toEqual({
+        status: terminal,
         settled: false,
         terminalFailure: true,
+        awaitingInput: false,
       });
     }
+  });
+
+  it("classifies the Anchor Platform's in-flight statuses as in-flight", () => {
     for (const pending of [
-      "incomplete",
       "pending_sender",
-      "pending_stellar",
       "pending_receiver",
       "pending_external",
-      "something_new_we_dont_know",
+      "pending_anchor",
+      "pending_stellar",
     ]) {
-      expect(mapSep31Status(pending)).toMatchObject({
+      expect(mapSep31Status(pending)).toEqual({
+        status: pending,
         settled: false,
         terminalFailure: false,
+        awaitingInput: false,
       });
     }
+  });
+
+  it("flags the statuses that are blocked on someone else's input", () => {
+    // Still in flight — the engine keeps polling — but the hold-up is a party
+    // owing the anchor information, not the anchor doing its work.
+    for (const blocked of [
+      "incomplete",
+      "pending_customer_info_update",
+      "pending_transaction_info_update",
+    ]) {
+      expect(mapSep31Status(blocked)).toEqual({
+        status: blocked,
+        settled: false,
+        terminalFailure: false,
+        awaitingInput: true,
+      });
+    }
+  });
+
+  it("treats an unrecognised status as in-flight, never as settled", () => {
+    expect(mapSep31Status("something_new_we_dont_know")).toEqual({
+      status: "something_new_we_dont_know",
+      settled: false,
+      terminalFailure: false,
+      awaitingInput: false,
+    });
+    expect(mapSep31Status("").settled).toBe(false);
   });
 
   it("is case-insensitive on the raw anchor status", () => {
     expect(mapSep31Status("COMPLETED").settled).toBe(true);
     expect(mapSep31Status("Error").terminalFailure).toBe(true);
+    expect(mapSep31Status("Pending_Customer_Info_Update").awaitingInput).toBe(true);
+    expect(mapSep31Status("PENDING_ANCHOR").awaitingInput).toBe(false);
   });
 
   it("getTransaction reflects the mapping for the anchor's reported status", async () => {
@@ -242,6 +281,208 @@ describe("SEP-31 status mapping", () => {
         expect(r.value.terminalFailure ?? false).toBe(terminal);
       }
     }
+  });
+
+  // --- SEP-31 `refunds` (#56) --------------------------------------------
+  //
+  // A refund flips the status to `refunded`, which the mapping above already
+  // classifies as a terminal failure. What was missing is everything else: how
+  // much came back, what the anchor kept, and whether the refund was partial.
+
+  const REFUND_ASSET = "stellar:USDC:GISSUER";
+
+  async function getTx(transaction: Record<string, unknown>) {
+    const c = corridor(
+      { transfer_server_sep31: "https://d.example/sep31" },
+      {
+        bridge_asset: "USDC",
+      },
+    );
+    const { fn } = fakeFetch({
+      "GET /sep31/transactions/": res({ transaction }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    return adapter.getTransaction("tx-1");
+  }
+
+  it("leaves refunds absent when the anchor does not report any", async () => {
+    const r = await getTx({
+      status: "completed",
+      amount_in: "100",
+      amount_in_asset: REFUND_ASSET,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.refunds).toBeUndefined();
+    // Absent, not a zero-filled placeholder: "refunded nothing" and "said
+    // nothing" must stay distinguishable.
+    expect(r.value.settled).toBe(true);
+  });
+
+  it("parses a full refund and classifies it as full", async () => {
+    const r = await getTx({
+      status: "refunded",
+      amount_in: "100.0000000",
+      amount_in_asset: REFUND_ASSET,
+      refunds: {
+        amount_refunded: "100",
+        amount_fee: "0",
+        payments: [{ id: "abc123", id_type: "stellar", amount: "100", fee: "0" }],
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Terminal-failure classification is unchanged by refund parsing.
+    expect(r.value.terminalFailure).toBe(true);
+    expect(r.value.refunds?.completeness).toBe("full");
+    // "100" vs "100.0000000" — equal as money, unequal as strings.
+    expect(r.value.refunds?.amountRefunded).toEqual({ asset: REFUND_ASSET, amount: "100" });
+    expect(r.value.refunds?.amountFee).toEqual({ asset: REFUND_ASSET, amount: "0" });
+    expect(r.value.refunds?.payments).toEqual([
+      {
+        id: "abc123",
+        idType: "stellar",
+        amount: { asset: REFUND_ASSET, amount: "100" },
+        fee: { asset: REFUND_ASSET, amount: "0" },
+      },
+    ]);
+  });
+
+  it("distinguishes a partial refund from a full one", async () => {
+    const r = await getTx({
+      status: "refunded",
+      amount_in: "100",
+      amount_in_asset: REFUND_ASSET,
+      refunds: { amount_refunded: "40.5", amount_fee: "1.25", payments: [] },
+    });
+    expect(r.ok && r.value.refunds?.completeness).toBe("partial");
+    expect(r.ok && r.value.refunds?.amountRefunded.amount).toBe("40.5");
+    expect(r.ok && r.value.refunds?.amountFee.amount).toBe("1.25");
+  });
+
+  it("carries multiple payments entries", async () => {
+    const r = await getTx({
+      status: "refunded",
+      amount_in: "100",
+      amount_in_asset: REFUND_ASSET,
+      refunds: {
+        amount_refunded: "100",
+        amount_fee: "2",
+        payments: [
+          { id: "p1", id_type: "stellar", amount: "60", fee: "1" },
+          { id: "p2", id_type: "external", amount: "40", fee: "1" },
+        ],
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.refunds?.payments).toHaveLength(2);
+    expect(r.value.refunds?.payments.map((p) => p.id)).toEqual(["p1", "p2"]);
+    expect(r.value.refunds?.payments[1]?.idType).toBe("external");
+  });
+
+  it("falls back to the corridor's bridge asset when the anchor names none", async () => {
+    const r = await getTx({
+      status: "refunded",
+      amount_in: "100",
+      refunds: { amount_refunded: "100" },
+    });
+    expect(r.ok && r.value.refunds?.amountRefunded.asset).toBe("USDC");
+  });
+
+  it("reports completeness as unknown when there is nothing to compare against", async () => {
+    const r = await getTx({
+      status: "refunded",
+      amount_in_asset: REFUND_ASSET,
+      refunds: { amount_refunded: "40" },
+    });
+    // No amount_in: the caller is told we do not know, not handed a guess.
+    expect(r.ok && r.value.refunds?.completeness).toBe("unknown");
+  });
+
+  it("treats an over-refund as full rather than partial", async () => {
+    const r = await getTx({
+      status: "refunded",
+      amount_in: "100",
+      amount_in_asset: REFUND_ASSET,
+      refunds: { amount_refunded: "101" },
+    });
+    expect(r.ok && r.value.refunds?.completeness).toBe("full");
+  });
+
+  it("never throws and never changes the classification on garbage refunds", async () => {
+    const garbage: unknown[] = [
+      null,
+      "refunded",
+      [],
+      42,
+      {},
+      { amount_refunded: null },
+      // A number has already been through a float64 — refuse it rather than
+      // laundering the lost precision into a Money.
+      { amount_refunded: 100 },
+      { amount_refunded: "not-a-number" },
+      { amount_refunded: "1e5" },
+    ];
+
+    for (const refunds of garbage) {
+      const r = await getTx({
+        status: "refunded",
+        amount_in: "100",
+        amount_in_asset: REFUND_ASSET,
+        refunds,
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      expect(r.value.refunds).toBeUndefined();
+      // The status classification is decided independently and is untouched.
+      expect(r.value.status).toBe("refunded");
+      expect(r.value.terminalFailure).toBe(true);
+    }
+  });
+
+  it("drops an unreadable payments entry without dropping the refund", async () => {
+    const r = await getTx({
+      status: "refunded",
+      amount_in: "100",
+      amount_in_asset: REFUND_ASSET,
+      refunds: {
+        amount_refunded: "100",
+        payments: [
+          { id: "good", amount: "100", fee: "0" },
+          { id: "no-amount" },
+          { amount: "10" },
+          null,
+          "nonsense",
+          { id: "bad-amount", amount: 10 },
+        ],
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.refunds?.payments.map((p) => p.id)).toEqual(["good"]);
+    // Totals still describe the refund even though entries were dropped.
+    expect(r.value.refunds?.amountRefunded.amount).toBe("100");
+  });
+
+  it("defaults a missing or unreadable fee to zero, not to undefined", async () => {
+    const r = await getTx({
+      status: "refunded",
+      amount_in: "100",
+      amount_in_asset: REFUND_ASSET,
+      refunds: { amount_refunded: "100", amount_fee: {} },
+    });
+    expect(r.ok && r.value.refunds?.amountFee.amount).toBe("0");
+  });
+
+  it("parseRefunds is directly callable and pure", () => {
+    expect(parseRefunds(undefined, "USDC", "100")).toBeUndefined();
+    expect(parseRefunds({ amount_refunded: "  50  " }, "USDC", "100")).toEqual({
+      amountRefunded: { asset: "USDC", amount: "50" },
+      amountFee: { asset: "USDC", amount: "0" },
+      payments: [],
+      completeness: "partial",
+    });
   });
 });
 

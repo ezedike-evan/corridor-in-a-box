@@ -44,6 +44,120 @@ live SEP-31 server, captured in the README.
 
 When that trail is in the README, check off the last Phase-1 box in the ROADMAP.
 
+### The self-hosted reference anchor
+
+[`scripts/reference-anchor.sh`](../scripts/reference-anchor.sh) stands the SDF
+Anchor Platform reference server up locally, so option 2 above needs no
+agreement with anybody. It needs `podman`; everything is testnet.
+
+```bash
+scripts/reference-anchor.sh up      # start, wait for SEP-1 to serve
+scripts/reference-anchor.sh doctor  # is the stack fit to run a corridor?
+scripts/reference-anchor.sh status  # what is running
+scripts/reference-anchor.sh logs    # tail ap-sep (pass a name for another)
+scripts/reference-anchor.sh down    # tear it all down
+```
+
+#### `doctor` - check before you run, not after
+
+A corridor run against a sick stack does not fail fast. It reaches `settled`,
+polls for the whole of `recovery.timeout_seconds` (900s by default) and then
+fails with `SETTLEMENT_TIMEOUT`. Every one of those minutes was spent learning
+something that was knowable beforehand. Run `doctor` first:
+
+```
+reference anchor doctor
+
+  ✓ containers       db reference-db kafka ap-sep ap-ref ap-obs
+  ✓ sep1             http://localhost:8080/.well-known/stellar.toml
+  ✓ sep31-info       receive: JPYC USDC
+  ✓ cursor-lag       11 ledgers behind Horizon (limit 180)
+
+✓ stack is fit to run a corridor
+```
+
+It exits non-zero and names the failing check otherwise, so it can gate a CI job
+or a `verify:corridor` run:
+
+```
+  ✗ cursor-lag       5002 ledgers behind Horizon (limit 180) - a fresh payment will not be seen in time
+
+✗ 1 check(s) failed
+```
+
+The lag is reported as a **number of ledgers**, not a yes/no, because the
+interesting cases are the borderline ones. The default limit of 180 ledgers is
+the default `recovery.timeout_seconds` (900s) at testnet's ~5s close time: an
+observer further back than that cannot catch up to a fresh payment before the
+engine stops waiting for it. Set `CURSOR_LAG_FAIL_LEDGERS` if your corridor's
+timeout differs.
+
+#### The observer cursor
+
+The one failure that will waste an afternoon: the platform's Stellar observer
+resumes from a **stale cursor**, never matches the payment your settle leg just
+made, and leaves the transaction at `pending_sender` until the engine reports
+`SETTLEMENT_TIMEOUT`. That looks like an engine bug and is not one.
+
+The cursor is not a config value — Anchor Platform keeps it in the platform DB
+(`stellar_payment_observer_page_token`, one row keyed `SINGLETON_ID`) and only
+falls back to Horizon's latest cursor when that row is absent. `up` therefore
+clears the row and reseeds it from Horizon's current ledger on every start,
+minus a small margin so a payment submitted immediately afterwards is still in
+range, and prints the ledger it chose:
+
+```
+• Horizon is at ledger 4422632; starting the observer at 4422622 (margin 10)
+• observer cursor seeded at ledger 4422622 (cursor 18995016852570112)
+```
+
+Override it when you need a specific starting point — replaying an older ledger
+while debugging, or starting without network access to Horizon:
+
+| Variable                  | Default                               | Effect                                                                 |
+| ------------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
+| `START_LEDGER`            | _(unset)_                             | Start the observer at exactly this ledger, skipping the Horizon lookup |
+| `CURSOR_MARGIN_LEDGERS`   | `10`                                  | Ledgers of slack below Horizon's tip                                   |
+| `HORIZON_URL`             | `https://horizon-testnet.stellar.org` | Horizon to read the current ledger from                                |
+| `CURSOR_LAG_FAIL_LEDGERS` | `180`                                 | Lag at which `doctor`'s cursor check fails                             |
+
+```bash
+START_LEDGER=4030900 scripts/reference-anchor.sh up
+```
+
+### `pnpm verify:corridor` — the whole run, as a gate
+
+```bash
+scripts/reference-anchor.sh up
+CORRIDOR_SIGNER_SECRET=S… pnpm verify:corridor
+```
+
+Drives one payment through every leg against the local reference server and
+exits non-zero unless the terminal state is `completed`. It prints the trail on
+both paths — the failing run is the one worth reading:
+
+```
+trail: created -> quoted -> compliant -> opened -> settling -> retrying -> settling -> recovering -> refunded
+
+✗ SETTLEMENT_FAILED — settlement submit failed: tx_failed operations=[op_src_no_trust]
+  terminal state: refunded
+```
+
+Exit codes are distinct so CI can tell the cases apart: `2` missing
+`CORRIDOR_SIGNER_SECRET`, `3` refused (mainnet manifest, or a bridge asset the
+anchor does not quote), `4` the stack is not fit (`doctor` failed), `5` the
+corridor ran and did not complete.
+
+**The signer** must be a testnet account holding the corridor's bridge asset with
+a trustline for it — `op_src_no_trust` above is exactly what a missing trustline
+looks like. `pnpm verify:settle` needs no such setup because it settles in native
+XLM; this one settles the asset the anchor actually quotes.
+
+**Known sharp edge in the reference server:** a small `AMOUNT` makes its
+`GET /rate` throw `Buy amount must be greater than zero`, which surfaces as
+`QUOTE_UNAVAILABLE: quote HTTP 502`. `AMOUNT=1.00` reproduces it; the default of
+`10.00` does not.
+
 ## 2. Recovering a stuck payment
 
 The engine drives recovery automatically per the manifest's `recovery.rollback`
@@ -83,14 +197,24 @@ may have left the distribution account.
    run came through: under a `hold` policy it carries the **original failure**
    (`SETTLEMENT_TIMEOUT`, `RECONCILE_MISMATCH`, …) — the refund port was never
    consulted; under `refund_sender` it carries the **refund port's refusal**,
-   which with the real `StellarSettlementSubmitter` today reads
-   `SETTLEMENT_FAILED: payment … cannot be reversed on-chain` (`@corridor/stellar`
-   is slated to adopt a dedicated `REFUND_UNSUPPORTED` code for this; the
-   "cannot be reversed" message is the stable part).
+   which with the real `StellarSettlementSubmitter` reads
+   `REFUND_UNSUPPORTED: payment … cannot be reversed on-chain`. The code is
+   distinct from `SETTLEMENT_FAILED` on purpose: this is a design invariant,
+   not a settlement outage, so it should not page the settlement alert.
 2. **Contact the receiving anchor** — exactly that; there is no API for this
    step. Ask it to refund on its side or to complete the payout manually.
 3. Once settled out-of-band, the run stays `held` as an audit record. Do not
    re-submit the same `idempotencyKey` — the idempotency gate will reject it.
+
+**Timed out waiting on whom?** A `SETTLEMENT_TIMEOUT` message ends with the last
+status the anchor reported. When that status is one the engine classifies as
+_awaiting input_ — `incomplete`, `pending_customer_info_update`,
+`pending_transaction_info_update` — the message also says
+`awaiting input from another party`. That is the anchor telling you it was
+blocked on information (usually a SEP-12 customer record or a
+`PATCH /transactions/:id` correction), not that it was slow. Chase the party that
+owes the information, not the anchor's throughput. Any other status — including
+one the engine has never seen — means the anchor was working on it.
 
 ### `refunded`
 
@@ -118,7 +242,25 @@ the chain. Verify the belief before closing the run:
 If an anchor-driven refund path ever lands (a refund-wait state between
 `recovering` and `refunded`), a second, legitimate way into this state appears —
 one where a payment **did** go out and the anchor returned it, hash set. The
-run's trail tells the two apart.
+run's trail tells the two apart — and `refund_id`, described below, records
+which refund it was.
+
+### `refund_id` on the run
+
+The run carries `refund_id` alongside `stellar_tx_hash`: the reference of a
+refund that has already been requested, empty until one is.
+
+It exists so a resumed run can tell "a refund was requested" from "a refund was
+never requested". Without it a process that crashed after requesting a refund
+comes back with no record of having done so and asks for a second one — not
+settling twice, but money moving twice all the same. The refund request path
+reads it and refuses to issue another.
+
+Consequently it is **write-once**: `migrate()` adds the column additively, and
+`put()` coalesces rather than overwrites, so a writer holding a stale copy of
+the run cannot erase the evidence. If you see a run whose `refund_id` is set,
+a refund reference exists at the submitter — check there before initiating
+anything by hand.
 
 ### `failed` before `settled`
 

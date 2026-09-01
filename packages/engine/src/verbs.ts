@@ -13,6 +13,7 @@ import type {
   TransactionStatus,
 } from "@corridor/adapter-kit";
 import type { SettlementRef, SettlementRequest, SettlementSubmitter } from "./ports";
+import type { Logger, Metrics } from "./observability";
 
 // 1. QUOTE — SEP-38. Get a price and verify the firm-quote window hasn't already
 //    closed. who_holds_risk in the manifest records who eats slippage if it does.
@@ -101,19 +102,76 @@ export interface PollOptions {
   deadlineMs: number;
   /** Delay between polls. */
   pollMs: number;
+  /**
+   * Number of consecutive polls returning the same status before we conclude
+   * the anchor is stuck rather than legitimately slow. Once crossed,
+   * `reconcileUntil` returns a non-retryable `RECONCILE_STALLED` carrying the
+   * stuck status and the consecutive count.
+   *
+   * Set to `0` or `undefined` to disable stall detection (legacy behaviour).
+   *
+   * **Default:** `10`. With a typical `pollMs` of 2 s that is ≈ 20 s — well
+   * below the corridor timeout but long enough that a legitimately slow anchor
+   * transitioning through intermediate states won't be misdiagnosed.
+   */
+  stallThreshold?: number;
+  /** Corridor ID for metric tagging. Optional. */
+  corridorId?: string;
+  /** Logger for per-poll debug logs. Optional. */
+  logger?: Logger;
+  /** Metrics sink for per-poll counter. Optional. */
+  metrics?: Metrics;
 }
 
 // 4'. RECONCILE (production) — poll the anchor until the payout settles or the
 //     corridor's timeout elapses. Returns a NON-retryable error on timeout so the
 //     engine routes straight to refund/hold instead of re-sending the payment.
+//
+//     Stall detection: when `stallThreshold` is set and the anchor returns the
+//     same status for that many consecutive polls, we bail early with
+//     `RECONCILE_STALLED` — the anchor is stuck, not slow. This lets the engine
+//     recover (refund/hold) long before the corridor deadline expires.
 export async function reconcileUntil(
   adapter: AnchorAdapter,
   transactionId: string,
   opts: PollOptions,
 ): Promise<Outcome<TransactionStatus>> {
+  let firstStatus: string | undefined;
   let lastStatus = "unknown";
+  let sameCount = 0;
+  const threshold = opts.stallThreshold ?? 0;
+  let poll = 0;
+  const startedAt = opts.now();
+  let lastAwaitingInput = false;
   for (;;) {
+    poll += 1;
     const s = await adapter.getTransaction(transactionId);
+    const rawStatus = s.ok ? s.value.status : "error";
+    const elapsedMs = opts.now() - startedAt;
+
+    opts.logger?.log("debug", "corridor.reconcile.poll", {
+      transactionId,
+      status: rawStatus,
+      poll,
+      elapsedMs,
+    });
+
+    opts.metrics?.increment("corridor.reconcile.poll", {
+      ...(opts.corridorId ? { corridor: opts.corridorId } : {}),
+      status: rawStatus,
+    });
+
+    // Recorded before the settled/terminal returns so `firstStatus` sees the
+    // very first thing the anchor said, which is what makes an identical
+    // first/last pair readable as a stalled observer.
+    if (s.ok) {
+      if (firstStatus === undefined) firstStatus = s.value.status;
+      // A status identical to the previous poll's is what a stuck observer
+      // looks like; any change resets the run of sameness.
+      sameCount = s.value.status === lastStatus ? sameCount + 1 : 0;
+      lastStatus = s.value.status;
+      lastAwaitingInput = s.value.awaitingInput === true;
+    }
     if (s.ok && s.value.settled) return s;
     // A terminal non-success at the anchor (error/expired/refunded): stop polling
     // now and let the engine recover, rather than waiting out the timeout. Non-
@@ -125,13 +183,23 @@ export async function reconcileUntil(
         { retryable: false },
       );
     }
-    if (s.ok) lastStatus = s.value.status;
+    if (threshold > 0 && sameCount >= threshold) {
+      return fail(
+        "RECONCILE_STALLED",
+        `tx ${transactionId} stuck at status=${lastStatus} for ${sameCount} consecutive polls`,
+        { retryable: false },
+      );
+    }
     if (opts.now() >= opts.deadlineMs) {
       // On a transient anchor error, surface it; otherwise it's a settle timeout.
       if (!s.ok) return s;
+      // Whether the last status was blocked on someone's input decides who the
+      // operator chases: a slow anchor, or the party that still owes the anchor
+      // information. Both time out identically; only the message differs.
+      const blocked = lastAwaitingInput ? ", awaiting input from another party" : "";
       return fail(
         "SETTLEMENT_TIMEOUT",
-        `tx ${transactionId} did not settle before timeout (last status=${lastStatus})`,
+        `tx ${transactionId} did not settle before timeout (polls=${poll}, elapsed=${elapsedMs}ms, first status=${firstStatus ?? "unknown"}, last status=${lastStatus}${blocked})`,
         { retryable: false },
       );
     }
