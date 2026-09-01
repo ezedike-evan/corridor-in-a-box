@@ -19,6 +19,7 @@ import type { RouteResolver } from "@corridor/router";
 import { canTransition, isTerminal, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
+  hasRequestedRefund,
   type IdempotencyStore,
   type StoredRun,
 } from "./idempotency";
@@ -231,7 +232,11 @@ export async function execute(
     // Only reverse the chain if a payment actually went out. If settlement never
     // succeeded, there is nothing on-chain to undo — the sending anchor returns
     // the sender's funds off-chain — so we just record the refunded state.
-    if (run.stellarTxHash) {
+    // A refund already requested for this run is not requested again. The
+    // stored id is the only evidence a resumed process has that it already
+    // asked: without this check a crash between the refund and the next write
+    // would send the money back twice.
+    if (run.stellarTxHash && !hasRequestedRefund(run)) {
       const req: RefundRequest = {
         original: { stellarTxHash: run.stellarTxHash },
         amount: {
@@ -246,6 +251,10 @@ export async function execute(
         // Couldn't reverse the chain payment — escalate to a manual hold.
         return holdAndStop(rf.error);
       }
+      // Recorded before the state advance that persists it, so the very next
+      // write carries the id. Set once and never rewritten — see the coalesce
+      // in PostgresIdempotencyStore.put.
+      run.refundId = rf.value.stellarTxHash;
     }
     run.lastError = `${e.code}: ${e.message}`;
     const done = await advance("refunded");

@@ -121,6 +121,7 @@ export async function reconcileUntil(
   let lastStatus = "unknown";
   let poll = 0;
   const startedAt = opts.now();
+  let lastAwaitingInput = false;
   for (;;) {
     poll += 1;
     const s = await adapter.getTransaction(transactionId);
@@ -150,13 +151,20 @@ export async function reconcileUntil(
         { retryable: false },
       );
     }
-    if (s.ok) lastStatus = s.value.status;
+    if (s.ok) {
+      lastStatus = s.value.status;
+      lastAwaitingInput = s.value.awaitingInput === true;
+    }
     if (opts.now() >= opts.deadlineMs) {
       // On a transient anchor error, surface it; otherwise it's a settle timeout.
       if (!s.ok) return s;
+      // Whether the last status was blocked on someone's input decides who the
+      // operator chases: a slow anchor, or the party that still owes the anchor
+      // information. Both time out identically; only the message differs.
+      const blocked = lastAwaitingInput ? ", awaiting input from another party" : "";
       return fail(
         "SETTLEMENT_TIMEOUT",
-        `tx ${transactionId} did not settle before timeout (last status=${lastStatus})`,
+        `tx ${transactionId} did not settle before timeout (last status=${lastStatus}${blocked})`,
         { retryable: false },
       );
     }
