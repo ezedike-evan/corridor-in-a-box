@@ -4,6 +4,7 @@ export { execute, type EngineDeps, type RunResult } from "./run";
 export { canTransition, isTerminal, TERMINAL, type CorridorState } from "./state";
 export {
   InMemoryIdempotencyStore,
+  hasRequestedRefund,
   type IdempotencyStore,
   type StoredRun,
 } from "./idempotency";

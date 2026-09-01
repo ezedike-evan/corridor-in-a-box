@@ -64,7 +64,10 @@ export class UnimplementedSubmitter implements SettlementSubmitter {
   }
 
   async refund(): Promise<Outcome<SettlementRef>> {
-    return fail("SETTLEMENT_FAILED", "refund not wired: implement SettlementSubmitter.refund");
+    return fail(
+      "REFUND_UNSUPPORTED",
+      "refund not wired: implement SettlementSubmitter.refund",
+    );
   }
 }
 
