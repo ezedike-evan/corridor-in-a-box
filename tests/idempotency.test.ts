@@ -7,6 +7,8 @@ import {
   PostgresIdempotencyStore,
   createMockSubmitter,
   execute,
+  hasRequestedRefund,
+  migrate,
   type EngineDeps,
   type Queryable,
   type QueryResult,
@@ -165,7 +167,9 @@ function fakeDb(): Queryable & { table: Map<string, Record<string, unknown>> } {
         transaction_id: params[4],
         quote_id: params[5],
         stellar_tx_hash: params[6],
-        last_error: params[7],
+        refund_id: params[7],
+        last_error: params[8],
+        owner: params[9],
       };
       // create(): INSERT … ON CONFLICT DO NOTHING RETURNING — only the first
       // writer for a key lands a row and gets it back; a conflict returns [].
@@ -174,10 +178,15 @@ function fakeDb(): Queryable & { table: Map<string, Record<string, unknown>> } {
         table.set(key, incoming);
         return { rows: [{ idempotency_key: key }] as R[] };
       }
-      // put(): upsert with version guard.
+      // put(): upsert with version guard. `refund_id` is coalesced, not
+      // overwritten, mirroring the real SQL: once a refund has been requested
+      // the stored id must survive a writer that lost it.
       const current = table.get(key);
       if (!current || (current.version as number) < incoming.version) {
-        table.set(key, incoming);
+        table.set(key, {
+          ...incoming,
+          refund_id: current?.refund_id ?? incoming.refund_id,
+        });
       }
       return { rows: [] as R[] };
     },
@@ -215,6 +224,90 @@ describe("state round-trips", () => {
     const got = await store.get("k-rp");
     expect(got?.state).toBe("refund_pending");
     expect(got?.stellarTxHash).toBe("hash_rp");
+  });
+});
+
+describe("hasRequestedRefund", () => {
+  it("is the gate the refund request path asks before issuing another", () => {
+    expect(hasRequestedRefund({ refundId: "hash_back" })).toBe(true);
+    expect(hasRequestedRefund({})).toBe(false);
+    expect(hasRequestedRefund({ refundId: undefined })).toBe(false);
+    // An empty id is not evidence of anything.
+    expect(hasRequestedRefund({ refundId: "" })).toBe(false);
+  });
+});
+
+describe("refund state round-trips", () => {
+  // A run that records the payment but not the refund can request a second
+  // refund after a crash — the same class of bug the idempotency gate exists
+  // to prevent, one leg further on.
+  it("InMemoryIdempotencyStore round-trips refundId", async () => {
+    const store = new InMemoryIdempotencyStore();
+    await store.put({
+      idempotencyKey: "k-rf",
+      corridorId: "c",
+      state: "refunded",
+      version: 4,
+      stellarTxHash: "hash_out",
+      refundId: "hash_back",
+    });
+    expect((await store.get("k-rf"))?.refundId).toBe("hash_back");
+
+    await store.create({
+      idempotencyKey: "k-none",
+      corridorId: "c",
+      state: "created",
+      version: 0,
+    });
+    expect((await store.get("k-none"))?.refundId).toBeUndefined();
+  });
+
+  it("PostgresIdempotencyStore round-trips refundId", async () => {
+    const store = new PostgresIdempotencyStore(fakeDb());
+    await store.put({
+      idempotencyKey: "k-rf",
+      corridorId: "c",
+      state: "refunded",
+      version: 4,
+      stellarTxHash: "hash_out",
+      refundId: "hash_back",
+    });
+    const got = await store.get("k-rf");
+    expect(got?.refundId).toBe("hash_back");
+    expect(got?.stellarTxHash).toBe("hash_out");
+  });
+
+  it("PostgresIdempotencyStore never lets a later write erase refundId", async () => {
+    const store = new PostgresIdempotencyStore(fakeDb());
+    await store.put({
+      idempotencyKey: "k-rf",
+      corridorId: "c",
+      state: "refunded",
+      version: 4,
+      refundId: "hash_back",
+    });
+    await store.put({
+      idempotencyKey: "k-rf",
+      corridorId: "c",
+      state: "refunded",
+      version: 5,
+    });
+    expect((await store.get("k-rf"))?.refundId).toBe("hash_back");
+  });
+
+  it("ships the refund_id column in BOTH the create DDL and the additive migration", async () => {
+    // Putting it only in CREATE_TABLE_SQL would leave every deployment that
+    // predates this change without the column, silently — the `owner` column
+    // is the precedent and the comment above ALTER_TABLE_SQL explains why.
+    const seen: string[] = [];
+    await migrate({
+      async query(text: string) {
+        seen.push(text);
+        return { rows: [] };
+      },
+    });
+    expect(seen[0]).toContain("refund_id");
+    expect(seen.slice(1).join("\n")).toContain("add column if not exists refund_id");
   });
 });
 
