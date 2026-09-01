@@ -32,6 +32,7 @@ only `soroban_sdk::String` host handles, never `stellar-xdr` directly, and never
 `StringM::from_str`. Redeploying testnet is worth doing to keep the recorded
 addresses matching a `main` build, but it needs the deployer key and is a
 maintainer decision rather than part of clearing the advisory.
+
 ### Added — `pnpm verify:corridor` (2026-08-31)
 
 `pnpm verify:settle` proves the settle leg on live testnet. There was no
