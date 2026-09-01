@@ -13,6 +13,7 @@ import type {
   TransactionStatus,
 } from "@corridor/adapter-kit";
 import type { SettlementRef, SettlementRequest, SettlementSubmitter } from "./ports";
+import type { Logger, Metrics } from "./observability";
 
 // 1. QUOTE — SEP-38. Get a price and verify the firm-quote window hasn't already
 //    closed. who_holds_risk in the manifest records who eats slippage if it does.
@@ -101,6 +102,12 @@ export interface PollOptions {
   deadlineMs: number;
   /** Delay between polls. */
   pollMs: number;
+  /** Corridor ID for metric tagging. Optional. */
+  corridorId?: string;
+  /** Logger for per-poll debug logs. Optional. */
+  logger?: Logger;
+  /** Metrics sink for per-poll counter. Optional. */
+  metrics?: Metrics;
 }
 
 // 4'. RECONCILE (production) — poll the anchor until the payout settles or the
@@ -115,12 +122,32 @@ export async function reconcileUntil(
   let lastStatus = "unknown";
   let poll = 0;
   const startedAt = opts.now();
+  let lastAwaitingInput = false;
   for (;;) {
     poll += 1;
     const s = await adapter.getTransaction(transactionId);
+    const rawStatus = s.ok ? s.value.status : "error";
+    const elapsedMs = opts.now() - startedAt;
+
+    opts.logger?.log("debug", "corridor.reconcile.poll", {
+      transactionId,
+      status: rawStatus,
+      poll,
+      elapsedMs,
+    });
+
+    opts.metrics?.increment("corridor.reconcile.poll", {
+      ...(opts.corridorId ? { corridor: opts.corridorId } : {}),
+      status: rawStatus,
+    });
+
+    // Recorded before the settled/terminal returns so `firstStatus` sees the
+    // very first thing the anchor said, which is what makes an identical
+    // first/last pair readable as a stalled observer.
     if (s.ok) {
       if (firstStatus === undefined) firstStatus = s.value.status;
       lastStatus = s.value.status;
+      lastAwaitingInput = s.value.awaitingInput === true;
     }
     if (s.ok && s.value.settled) return s;
     // A terminal non-success at the anchor (error/expired/refunded): stop polling
@@ -136,10 +163,13 @@ export async function reconcileUntil(
     if (opts.now() >= opts.deadlineMs) {
       // On a transient anchor error, surface it; otherwise it's a settle timeout.
       if (!s.ok) return s;
-      const elapsedMs = opts.now() - startedAt;
+      // Whether the last status was blocked on someone's input decides who the
+      // operator chases: a slow anchor, or the party that still owes the anchor
+      // information. Both time out identically; only the message differs.
+      const blocked = lastAwaitingInput ? ", awaiting input from another party" : "";
       return fail(
         "SETTLEMENT_TIMEOUT",
-        `tx ${transactionId} did not settle before timeout (polls=${poll}, elapsed=${elapsedMs}ms, first status=${firstStatus ?? "unknown"}, last status=${lastStatus})`,
+        `tx ${transactionId} did not settle before timeout (polls=${poll}, elapsed=${elapsedMs}ms, first status=${firstStatus ?? "unknown"}, last status=${lastStatus}${blocked})`,
         { retryable: false },
       );
     }

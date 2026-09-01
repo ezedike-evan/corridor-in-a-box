@@ -4,6 +4,7 @@ import { createMockAdapter } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
 import {
   InMemoryIdempotencyStore,
+  hasRequestedRefund,
   canTransition,
   createMockSubmitter,
   execute,
@@ -11,7 +12,7 @@ import {
   type EngineDeps,
   type SettlementSubmitter,
 } from "@corridor/engine";
-import { fail, type PaymentIntent } from "@corridor/types";
+import { fail, ok, type PaymentIntent } from "@corridor/types";
 
 function corridor(): Corridor {
   const r = parseCorridor({
@@ -284,6 +285,109 @@ describe("engine recovery", () => {
       expect(r.error.message).toContain("first status=pending_receiver");
       expect(r.error.message).toContain("last status=pending_receiver");
     }
+  });
+
+  it("says so in the timeout when the anchor was blocked on someone's input", async () => {
+    // An operator reading a SETTLEMENT_TIMEOUT needs to know who to chase. A run
+    // that timed out on `pending_customer_info_update` was waiting on a party to
+    // supply information, not on a slow anchor — the message must say which.
+    let t = 0;
+    const base = createMockAdapter({ settled: false });
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => ({
+        ...base,
+        getTransaction: async () =>
+          ok({
+            status: "pending_customer_info_update",
+            settled: false,
+            terminalFailure: false,
+            awaitingInput: true,
+          }),
+      })),
+      submitter: createMockSubmitter(),
+      idempotency: new InMemoryIdempotencyStore(),
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+    };
+    const r = await execute(
+      intent("awaiting-input"),
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "hold" }),
+      d,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+      expect(r.error.message).toContain("pending_customer_info_update");
+      expect(r.error.message).toContain("awaiting input from another party");
+    }
+  });
+
+  it("persists the refund id so a resumed run has evidence it already refunded", async () => {
+    // Without this, a run records that the payment went out but not that the
+    // refund did — and a resumed process asks for a second one. Not settling
+    // twice, but money moving twice.
+    let t = 0;
+    const store = new InMemoryIdempotencyStore();
+    const base = createMockSubmitter();
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      submitter: base,
+      idempotency: store,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+    };
+    const i = intent();
+    await execute(
+      i,
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" }),
+      d,
+    );
+
+    const stored = await store.get(i.idempotencyKey);
+    expect(stored?.state).toBe("refunded");
+    expect(stored?.stellarTxHash).toBeTruthy();
+    expect(stored?.refundId).toBeTruthy();
+    expect(stored?.refundId).not.toBe(stored?.stellarTxHash);
+    expect(hasRequestedRefund(stored!)).toBe(true);
+  });
+
+  it("does not issue a second refund for a key that already refunded", async () => {
+    let t = 0;
+    const refunded: string[] = [];
+    const store = new InMemoryIdempotencyStore();
+    const base = createMockSubmitter();
+    const deps = (): EngineDeps => ({
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      submitter: {
+        submit: base.submit,
+        refund: async (req) => {
+          refunded.push(req.original.stellarTxHash);
+          return base.refund(req);
+        },
+      },
+      idempotency: store,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+    });
+    const c = corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" });
+    const i = intent();
+
+    await execute(i, c, deps());
+    expect(refunded).toHaveLength(1);
+
+    // Re-running the same key must not send the money back again.
+    const again = await execute(i, c, deps());
+    expect(again.ok).toBe(false);
+    expect(refunded).toHaveLength(1);
   });
 
   it("bails out of reconcile immediately on a terminal anchor failure", async () => {

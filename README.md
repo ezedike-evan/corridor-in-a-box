@@ -240,6 +240,31 @@ SEP-31 open/reconcile. Those legs need a conformant receiving anchor and are
 still outstanding — see [ROADMAP](./ROADMAP.md) Phase 1 and
 [docs/operations.md](./docs/operations.md) §1.
 
+## Verifying a whole corridor run
+
+`verify:settle` proves one leg. `verify:corridor` is the pass/fail gate for
+**all** of them — quote → comply → open → settle → reconcile → completed —
+against the local Anchor Platform reference server, which
+[`scripts/reference-anchor.sh`](./scripts/reference-anchor.sh) stands up with no
+commercial agreement required:
+
+```bash
+scripts/reference-anchor.sh up
+CORRIDOR_SIGNER_SECRET=S… pnpm verify:corridor
+```
+
+It exits non-zero unless the run's terminal state is `completed`, printing the
+full trail and the last error either way, so it can gate CI or a release. Before
+opening a payment it runs `reference-anchor.sh doctor` — a run against a sick
+stack does not fail fast, it polls for the whole of `recovery.timeout_seconds`
+and then reports `SETTLEMENT_TIMEOUT`.
+
+The signer must be a **testnet** account holding the corridor's bridge asset
+(`USDC` from the issuer the anchor quotes) with a trustline for it. The runner
+refuses a `network: public` manifest outright — it drives payments at localhost,
+so a mainnet corridor here is always a mistake rather than a decision. See
+[docs/operations.md](./docs/operations.md) §1.
+
 ## Going live
 
 Swap the mocks for the real implementations (both ship in this repo):
