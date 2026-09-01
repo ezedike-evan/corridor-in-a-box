@@ -41,6 +41,52 @@ export interface OpenTransaction {
   readonly memoType?: "text" | "hash" | "id";
 }
 
+/**
+ * One entry of SEP-31's `refunds.payments[]` — a single movement of money back,
+ * which may be one of several making up a refund.
+ */
+export interface RefundPayment {
+  /** Stellar transaction hash, or the anchor's own external payment id. */
+  readonly id: string;
+  /** `stellar` for an on-chain refund, `external` for an off-chain one. */
+  readonly idType?: string;
+  readonly amount: Money;
+  /** What the anchor kept out of this payment. */
+  readonly fee: Money;
+}
+
+/**
+ * What a receiving anchor reports about a refund, from the `refunds` object on
+ * the SEP-31 transaction record.
+ *
+ * This is *news*, not a request: over SEP-31 the sending side cannot ask for a
+ * refund, it can only learn one happened (see `Sep31Adapter.requestRefund`).
+ * Without this, a refund was visible only as the status flipping to `refunded`
+ * — correct, but it left "how much came back" unanswerable, and a partial
+ * refund indistinguishable from a full one.
+ *
+ * Amounts are `Money`, never numbers: the amount that came back is compared
+ * against the amount that went out, and doing that in float64 is exactly the
+ * bug the string-based money rule exists to prevent.
+ */
+export interface RefundInfo {
+  /** Total returned to the sender, before the anchor's refund fee. */
+  readonly amountRefunded: Money;
+  /** Total the anchor kept for processing the refund. */
+  readonly amountFee: Money;
+  /** The individual payments making up the refund; may be empty. */
+  readonly payments: readonly RefundPayment[];
+  /**
+   * Whether the whole payment came back.
+   *
+   * `unknown` when the anchor did not report an amount to compare against, or
+   * reported one that could not be parsed — the caller is told it does not
+   * know, rather than being handed a guess. Decided with `compareAmounts`, not
+   * string equality: "100" and "100.00" are the same amount of money.
+   */
+  readonly completeness: "full" | "partial" | "unknown";
+}
+
 export interface TransactionStatus {
   /** The raw status string reported by the anchor (e.g. a SEP-31 status). */
   readonly status: string;
@@ -54,43 +100,36 @@ export interface TransactionStatus {
    */
   readonly terminalFailure?: boolean;
   /**
-   * Anchor-reported refund details (e.g. from SEP-31 `refunds` object).
-   *
-   * Reaching the engine via `TransactionStatus`:
-   * Refund status is carried directly on `TransactionStatus` rather than a separate
-   * poll endpoint because standard protocols (SEP-31 GET /transactions/:id) embed
-   * refund records directly in the transaction payload once the anchor executes
-   * a refund. Polling a single status endpoint avoids dual-polling race conditions
-   * and preserves a single source of truth for transaction reconciliation.
+   * In flight, but blocked on input from outside the engine rather than on the
+   * anchor doing its work (SEP-31 `incomplete`, `pending_customer_info_update`,
+   * `pending_transaction_info_update`). Polling continues either way — the
+   * distinction is operational: a run that times out here timed out waiting on
+   * a human, not on a slow anchor. Optional and purely informational; absent
+   * means "not known to be blocked".
    */
-  readonly refund?: RefundStatus;
+  readonly awaitingInput?: boolean;
+  /**
+   * Refund detail, when the anchor reported any.
+   *
+   * Carried on the status rather than fetched separately because it arrives on
+   * the same record the poll already reads: a second call would be a second
+   * chance for the two to disagree. Absent whenever the anchor omits `refunds`
+   * (the happy path) or reports one that cannot be trusted — never a
+   * zero-filled placeholder, which would read as "refunded nothing" rather
+   * than "said nothing".
+   */
+  readonly refunds?: RefundInfo;
 }
 
 /**
- * One refund payment executed by an anchor (e.g. a SEP-31 refund payment).
- */
-export interface RefundPayment {
-  readonly id: string;
-  readonly idType?: "stellar" | "external";
-  readonly amount: Money;
-  readonly fee?: Money;
-}
-
-/**
- * Refund details reported by an anchor for a transaction.
+ * Reference returned when a refund request is accepted for processing.
  *
- * In SEP-31 and real-world payments, a refund cannot be executed unilaterally
- * by reversing an on-chain transaction once funds have been credited to an anchor.
- * Instead, refunds are anchor-driven operations where the anchor returns the
- * funds (minus fees) and reports the outcome on the transaction.
+ * A refund is *requested* here and *reported* on `TransactionStatus.refunds`:
+ * the request is the sender's side of the conversation, the report is the
+ * anchor's. They are separate types because a request can be accepted and still
+ * move no money yet — `status: "pending"` is the normal outcome, and the amounts
+ * only become knowable later, on the transaction record the poll already reads.
  */
-export interface RefundStatus {
-  readonly amountRefunded: Money;
-  readonly amountFee?: Money;
-  readonly payments: readonly RefundPayment[];
-}
-
-/** Reference returned when a refund request is accepted for processing. */
 export interface RefundRef {
   readonly transactionId: string;
   readonly status: "pending" | "refunded" | "rejected";
@@ -176,7 +215,8 @@ export interface MockAdapterOptions {
   terminalFailure?: boolean;
   /** Custom refund handler or result for mock testing. */
   refundResult?: Outcome<RefundRef>;
-  refundStatus?: RefundStatus;
+  /** Refund detail for getTransaction to report, on the `refunds` field. */
+  refundStatus?: RefundInfo;
 }
 
 export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter {
@@ -212,13 +252,13 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
           status: "error",
           settled: false,
           terminalFailure: true,
-          refund: opts.refundStatus,
+          refunds: opts.refundStatus,
         });
       }
       return ok<TransactionStatus>({
         status: opts.settled === false ? "pending_receiver" : "completed",
         settled: opts.settled !== false,
-        refund: opts.refundStatus,
+        refunds: opts.refundStatus,
       });
     },
     async requestRefund(transactionId, amount, reason) {

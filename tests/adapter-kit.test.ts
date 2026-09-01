@@ -116,14 +116,15 @@ describe("createMockAdapter", () => {
       payments: [
         {
           id: "ref-pay-1",
-          idType: "stellar" as const,
+          idType: "stellar",
           amount: { asset: "USDC", amount: "98.00" },
           fee: { asset: "USDC", amount: "2.00" },
         },
       ],
+      completeness: "full" as const,
     };
     const r = await createMockAdapter({ refundStatus }).getTransaction("tx_1");
-    expect(r.ok && r.value.refund).toEqual(refundStatus);
+    expect(r.ok && r.value.refunds).toEqual(refundStatus);
   });
 
   it("requestRefund: defaults to pending refund response", async () => {

@@ -7,6 +7,113 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Security — soroban-sdk 25 → 27 clears GHSA-x57h-xx53-v53w (2026-08-31)
+
+`contracts/Cargo.lock` pinned `stellar-xdr@25.0.0`, which carries a moderate
+advisory ([GHSA-x57h-xx53-v53w](https://github.com/advisories/GHSA-x57h-xx53-v53w):
+`StringM::from_str` accepts strings past the declared max length instead of
+rejecting them). It was failing `dependency-review` on every PR.
+
+It could not be patched in place. `soroban-sdk-macros` pins
+`stellar-xdr = "=25.0.0"` exactly, and every 25.x release of the SDK locks to
+that same vulnerable version, so neither `cargo update -p soroban-sdk` nor
+`cargo update -p stellar-xdr --precise 25.0.1` could move it. The fix exists only
+from soroban-sdk 26 onwards.
+
+`soroban-sdk` moves to `"27"` (resolving 27.0.6), which brings `stellar-xdr`
+27.0.0. **No contract source changed** — the 25 → 27 API surface used by these
+contracts is unchanged, and all 21 tests, `cargo fmt --check`, `cargo clippy
+--all-targets -D warnings` and the `wasm32v1-none` release build pass untouched.
+
+`contracts/deployments.json` is deliberately left alone. The SDK bump changes
+the compiled WASM, so the testnet contracts no longer match a `main` build
+byte-for-byte, but nothing in the contracts calls the affected code: they handle
+only `soroban_sdk::String` host handles, never `stellar-xdr` directly, and never
+`StringM::from_str`. Redeploying testnet is worth doing to keep the recorded
+addresses matching a `main` build, but it needs the deployer key and is a
+maintainer decision rather than part of clearing the advisory.
+
+### Added — `pnpm verify:corridor` (2026-08-31)
+
+`pnpm verify:settle` proves the settle leg on live testnet. There was no
+equivalent for a whole corridor run — quote → comply → open → settle → reconcile
+→ completed — against the local reference server, so "does the full corridor
+work end to end" was a manual, undocumented procedure.
+
+`examples/verify-corridor.ts` drives one payment through every leg against the
+Anchor Platform reference server and exits non-zero unless the terminal state is
+`completed`. It is a gate rather than a capture: distinct exit codes let CI tell
+"the stack was not ready" from "the corridor ran and did not complete", and the
+trail is printed on both paths — reconstructed from the audit sink, so the
+FAILING run gets one too, which is the case worth reading.
+
+It fails early rather than hanging: `reference-anchor.sh doctor` runs before a
+payment is opened, and the bridge asset is checked against the anchor's SEP-38
+`/info` (its own statement of what it will quote) so a wrong issuer is named up
+front instead of surfacing well after the quote. Every leg is pinned to the local
+reference server regardless of what the manifest says, and a `network: public`
+manifest is refused outright with no override — this runner drives payments at
+localhost, so mainnet here is always a mistake rather than a decision.
+
+### Added — `reference-anchor.sh doctor` (2026-08-31)
+
+When the reference anchor's observer falls behind, the symptom is a corridor run
+that reaches `settled`, polls for the whole of `recovery.timeout_seconds` and
+then fails with `SETTLEMENT_TIMEOUT` — minutes spent discovering something that
+was knowable before the run started.
+
+`doctor` checks the stack up front and exits non-zero, naming the failing check,
+so it can gate a CI job or a `verify:corridor` run: every expected container is
+running, SEP-1 serves, SEP-31 `/info` advertises a non-empty receive list (the
+asset codes are printed, since "which asset can I receive today" is the question
+§1 tells you to ask), and the observer's cursor lag against Horizon.
+
+The lag is reported as a number of ledgers rather than a boolean, because the
+borderline cases are the ones worth seeing. It fails past
+`CURSOR_LAG_FAIL_LEDGERS`, defaulting to 180 — the default
+`recovery.timeout_seconds` of 900s at testnet's ~5s close time, past which an
+observer cannot catch up to a fresh payment before the engine stops waiting.
+
+### Fixed — reference anchor started its observer on a stale cursor (2026-08-31)
+
+`scripts/reference-anchor.sh up` started the Stellar observer with whatever
+cursor was already in the platform DB. When that cursor was behind the ledger
+the settle leg landed in, the observer never matched the incoming payment and
+the transaction sat at `pending_sender` until the engine gave up with
+`SETTLEMENT_TIMEOUT` — the one full-stack attempt so far failed exactly this
+way, and it read as an engine bug rather than the harness bug it was.
+
+The cursor is not a config value: Anchor Platform 2.x keeps it in the platform
+DB (`stellar_payment_observer_page_token`, one row keyed `SINGLETON_ID`) and
+only falls back to Horizon's latest cursor when that row is absent, so a row
+left over from an earlier run is precisely how a stale value leaks into a fresh
+start. `up` now clears that row and reseeds it from Horizon's current ledger
+minus a safety margin, and prints the ledger it chose. Three ordering details
+that all turned out to matter:
+
+- The observer is started **after** the platform server rather than alongside
+  it, because the table being seeded is created by that server's Flyway
+  migration.
+- Any running observer is **stopped before** the seed. A live observer writes
+  its own paging token back to that row as it streams, so seeding underneath
+  one is overwritten within milliseconds and the new cursor never takes effect.
+- The observer container is recreated on every `up`, so it cannot resume from
+  the position a previous run left behind.
+
+`START_LEDGER`, `CURSOR_MARGIN_LEDGERS` and `HORIZON_URL` override the
+behaviour; see the script header and `docs/operations.md` §1.
+
+Two further fixes in the same path, both of which made the above unverifiable
+until they were dealt with:
+
+- Config extraction aborted `up` outright when its first `podman exec` raced
+  the container's start, because `set -e` plus `pipefail` treats the failed
+  command substitution as fatal. The probe is now guarded, which is what the
+  surrounding retry loop always intended.
+- The readiness-failure path dumped logs from a container named `ap`, which
+  this script has never created, so a failed `up` printed nothing useful. It
+  reads `ap-sep` now.
+
 ### Fixed — refunded runbook implied a reversal that never happens (2026-08-29)
 
 `docs/operations.md`'s `refunded` section said the engine "reversed (or had

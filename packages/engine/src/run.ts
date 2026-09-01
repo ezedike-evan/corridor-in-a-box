@@ -19,6 +19,7 @@ import type { RouteResolver } from "@corridor/router";
 import { canTransition, isTerminal, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
+  hasRequestedRefund,
   type IdempotencyStore,
   type StoredRun,
 } from "./idempotency";
@@ -41,6 +42,11 @@ export interface EngineDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Delay between reconcile polls (ms). Defaults to 2s. */
   reconcilePollMs?: number;
+  /**
+   * Consecutive polls with the same status before bailing with
+   * `RECONCILE_STALLED`. Defaults to 10. Set to `0` to disable.
+   */
+  stallThreshold?: number;
   /** Structured logger. Defaults to a silent logger. */
   logger?: Logger;
   /** Append-only audit sink; receives one entry per state transition. */
@@ -78,6 +84,7 @@ export async function execute(
   const now = deps.now ?? (() => Date.now());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const pollMs = deps.reconcilePollMs ?? 2_000;
+  const stallThreshold = deps.stallThreshold ?? 10;
   const metrics = deps.metrics ?? noopMetrics;
   const startedAt = now();
 
@@ -123,7 +130,17 @@ export async function execute(
       return ok(toResult(existing, [existing.state]));
     }
     if (existing.state === "settled" || existing.state === "reconciled") {
-      return resumeRun(existing, intent, corridor, deps, store, now, sleep, pollMs);
+      return resumeRun(
+        existing,
+        intent,
+        corridor,
+        deps,
+        store,
+        now,
+        sleep,
+        pollMs,
+        stallThreshold,
+      );
     }
     // settling / created / quoted / … : ambiguous (did the payment go out?) or
     // stale (quote may have expired). Surface for a fresh attempt or ops, rather
@@ -231,7 +248,11 @@ export async function execute(
     // Only reverse the chain if a payment actually went out. If settlement never
     // succeeded, there is nothing on-chain to undo — the sending anchor returns
     // the sender's funds off-chain — so we just record the refunded state.
-    if (run.stellarTxHash) {
+    // A refund already requested for this run is not requested again. The
+    // stored id is the only evidence a resumed process has that it already
+    // asked: without this check a crash between the refund and the next write
+    // would send the money back twice.
+    if (run.stellarTxHash && !hasRequestedRefund(run)) {
       const req: RefundRequest = {
         original: { stellarTxHash: run.stellarTxHash },
         amount: {
@@ -246,6 +267,10 @@ export async function execute(
         // Couldn't reverse the chain payment — escalate to a manual hold.
         return holdAndStop(rf.error);
       }
+      // Recorded before the state advance that persists it, so the very next
+      // write carries the id. Set once and never rewritten — see the coalesce
+      // in PostgresIdempotencyStore.put.
+      run.refundId = rf.value.stellarTxHash;
     }
     run.lastError = `${e.code}: ${e.message}`;
     const done = await advance("refunded");
@@ -320,7 +345,16 @@ export async function execute(
     // Poll until the anchor confirms payout or we hit the corridor timeout.
     // reconcileUntil returns a non-retryable error, so we never re-settle here.
     const r = await timed("reconcile", () =>
-      reconcileUntil(adapter, opened.value.transactionId, { now, sleep, deadlineMs, pollMs }),
+      reconcileUntil(adapter, opened.value.transactionId, {
+        now,
+        sleep,
+        deadlineMs,
+        pollMs,
+        stallThreshold,
+        corridorId: corridor.id,
+        logger: deps.logger,
+        metrics: deps.metrics,
+      }),
     );
     if (!r.ok) return finishFailure(r.error);
     {
@@ -392,6 +426,7 @@ async function resumeRun(
   now: () => number,
   sleep: (ms: number) => Promise<void>,
   pollMs: number,
+  stallThreshold: number,
 ): Promise<Outcome<RunResult>> {
   const run: StoredRun = { ...existing };
   const trail: CorridorState[] = [run.state];
@@ -422,6 +457,10 @@ async function resumeRun(
       sleep,
       deadlineMs: now() + corridor.recovery.timeout_seconds * 1000,
       pollMs,
+      stallThreshold,
+      corridorId: corridor.id,
+      logger: deps.logger,
+      metrics: deps.metrics,
     });
     if (!r.ok) {
       const from = run.state;

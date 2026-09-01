@@ -5,7 +5,7 @@
 
 import type { CorridorState } from "./state";
 
-export type LogLevel = "info" | "warn" | "error";
+export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export interface LogFields {
   readonly [key: string]: unknown;
@@ -21,6 +21,7 @@ export const consoleLogger: Logger = {
     const line = JSON.stringify({ ts: new Date().toISOString(), level, msg, ...fields });
     if (level === "error") console.error(line);
     else if (level === "warn") console.warn(line);
+    else if (level === "debug") (console.debug ?? console.log)(line);
     else console.log(line);
   },
 };
