@@ -17,6 +17,21 @@ export interface StoredRun {
   transactionId?: string;
   quoteId?: string;
   stellarTxHash?: string;
+  /**
+   * Identifier of a refund already requested for this run — the refund leg's
+   * own reference, not the settlement's.
+   *
+   * Without it a run knows whether the payment went out but not whether a
+   * refund did, which is the same class of bug the idempotency gate exists to
+   * prevent: a process that crashes after requesting a refund and resumes with
+   * no record of having done so requests a *second* one. Not settling twice,
+   * but money moving twice all the same.
+   *
+   * Set once, when a refund is first successfully requested, and treated as
+   * immutable thereafter — the refund request path reads it and refuses to
+   * issue another.
+   */
+  refundId?: string;
   lastError?: string;
   /**
    * Opaque tenant id that owns this run, so a read can be scoped to its creator.
@@ -26,6 +41,21 @@ export interface StoredRun {
    * service.
    */
   readonly owner?: string;
+}
+
+/**
+ * True when a refund has already been requested for this run.
+ *
+ * The one question the refund request path must ask before issuing another,
+ * and the reason `refundId` is persisted at all: a process that crashes after
+ * requesting a refund and resumes without this evidence sends the money back
+ * twice.
+ *
+ * A predicate rather than an inline `!run.refundId` so the rule has a name and
+ * a test of its own — this is the gate, not a null check.
+ */
+export function hasRequestedRefund(run: Pick<StoredRun, "refundId">): boolean {
+  return run.refundId !== undefined && run.refundId !== "";
 }
 
 export interface IdempotencyStore {

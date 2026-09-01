@@ -7,6 +7,7 @@
 #   scripts/reference-anchor.sh down           tear it down
 #   scripts/reference-anchor.sh logs           tail the platform logs
 #   scripts/reference-anchor.sh status         show what is running
+#   scripts/reference-anchor.sh doctor         check the stack is fit to run a corridor
 #   scripts/reference-anchor.sh logs-dump DIR  write every container's logs to DIR
 #
 # `logs-dump` is the non-interactive counterpart of `logs`: it never follows, so
@@ -29,6 +30,28 @@
 #   ap-ref                    --kotlin-reference-server        (business logic)
 #   ap-obs                    --stellar-observer --event-processor
 #
+# The Stellar observer's starting cursor is NOT a config value. Anchor Platform
+# 2.x keeps it in the platform DB (table `stellar_payment_observer_page_token`,
+# a single row keyed `SINGLETON_ID`) and only falls back to Horizon's latest
+# cursor when that row is absent. A row left behind by an earlier run is
+# therefore how a stale cursor leaks into a fresh `up`: the observer resumes
+# from a ledger the settle leg has already passed, never matches the incoming
+# payment, and the transaction sits at `pending_sender` until the engine gives
+# up. So `up` clears that row and reseeds it from Horizon's current ledger,
+# minus a small safety margin, on every start.
+#
+#   START_LEDGER=<n>            start the observer at exactly ledger <n>
+#   CURSOR_MARGIN_LEDGERS=<n>   ledgers of slack below Horizon's tip (default 10)
+#   HORIZON_URL=<url>           Horizon to read the current ledger from
+#
+# `doctor` is the counterpart to that seeding: it reports how far the observer's
+# cursor has drifted behind Horizon *before* a run, rather than letting the run
+# discover it by polling for the full recovery timeout and failing with
+# SETTLEMENT_TIMEOUT. It exits non-zero on any failed check, so it can gate CI or
+# a verify:corridor run.
+#
+#   CURSOR_LAG_FAIL_LEDGERS=<n>  lag at which the cursor check fails (default 180)
+#
 # Config is extracted from the image itself rather than vendored, so it stays in
 # step with whatever AP_IMAGE points at. Credentials come from the platform's own
 # bundled docker-compose (POSTGRES_PASSWORD=password) — nothing invented here,
@@ -43,12 +66,53 @@ NET="${NET:-apnet}"
 SEP_URL="http://localhost:8080"
 READY_TIMEOUT_SECS="${READY_TIMEOUT_SECS:-300}"
 CONFIG_DIR="${CONFIG_DIR:-${TMPDIR:-/tmp}/corridor-anchor-config}"
+HORIZON_URL="${HORIZON_URL:-https://horizon-testnet.stellar.org}"
+CURSOR_MARGIN_LEDGERS="${CURSOR_MARGIN_LEDGERS:-10}"
+START_LEDGER="${START_LEDGER:-}"
+# ~180 ledgers is the default recovery.timeout_seconds (900s) at testnet's ~5s
+# close time: beyond that an observer starting this far back cannot catch up to
+# a fresh payment before the engine gives up on it.
+CURSOR_LAG_FAIL_LEDGERS="${CURSOR_LAG_FAIL_LEDGERS:-180}"
 
 log() { printf '• %s\n' "$*"; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
 require_podman() {
   command -v podman >/dev/null 2>&1 || die "podman is not installed"
+}
+
+psql_platform() { podman exec db psql -qtAX -U postgres -d postgres "$@"; }
+
+# Horizon's paging token for a ledger is a TOID: the ledger sequence in the high
+# 32 bits, transaction and operation order zero. Starting the observer at the
+# first operation of ledger N is therefore N * 2^32.
+ledger_to_cursor() { printf '%s' "$(( $1 * 4294967296 ))"; }
+
+horizon_latest_ledger() {
+  curl -fsS --max-time 10 "$HORIZON_URL/ledgers?order=desc&limit=1" 2>/dev/null \
+    | tr ',' '\n' \
+    | sed -n 's/.*"sequence":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' \
+    | head -1
+}
+
+# Clear any cursor left over from a previous run and pin a fresh one, so the
+# observer cannot resume from a ledger the settle leg has already passed. See
+# the header for why this is a DB row and not a config value.
+seed_observer_cursor() {
+  local cursor tip
+  if [ -n "$START_LEDGER" ]; then
+    SEEDED_LEDGER="$START_LEDGER"
+    log "START_LEDGER=$SEEDED_LEDGER (override)"
+  else
+    tip="$(horizon_latest_ledger)"
+    [ -n "$tip" ] || die "could not read the current ledger from $HORIZON_URL (set START_LEDGER to bypass)"
+    SEEDED_LEDGER=$(( tip > CURSOR_MARGIN_LEDGERS ? tip - CURSOR_MARGIN_LEDGERS : 1 ))
+    log "Horizon is at ledger $tip; starting the observer at $SEEDED_LEDGER (margin ${CURSOR_MARGIN_LEDGERS})"
+  fi
+  cursor="$(ledger_to_cursor "$SEEDED_LEDGER")"
+  psql_platform -c "DELETE FROM stellar_payment_observer_page_token;" >/dev/null
+  psql_platform -c "INSERT INTO stellar_payment_observer_page_token (id, cursor) VALUES ('SINGLETON_ID', '$cursor');" >/dev/null
+  log "observer cursor seeded at ledger $SEEDED_LEDGER (cursor $cursor)"
 }
 
 up() {
@@ -102,7 +166,9 @@ up() {
     podman run -d --name ap-extract --network "$NET" "$AP_IMAGE" --test-profile-runner >/dev/null
     local res=""
     for _ in $(seq 1 30); do
-      res="$(podman exec ap-extract sh -c 'ls -d /tmp/resource-temp-dir* 2>/dev/null' | tr -d '\r' | head -1)"
+      # `set -e` + `pipefail`: this exec fails for the first second or two while
+      # the container boots, and an unguarded assignment would abort `up` there.
+      res="$(podman exec ap-extract sh -c 'ls -d /tmp/resource-temp-dir* 2>/dev/null' 2>/dev/null | tr -d '\r' | head -1)" || true
       [ -n "$res" ] && break
       sleep 2
     done
@@ -130,14 +196,6 @@ up() {
       "$AP_IMAGE" --kotlin-reference-server >/dev/null
   fi
 
-  # Watches Stellar for the incoming settlement and drives the transaction to
-  # completed. Without it a payment settles on-chain but never reconciles.
-  if ! podman container exists ap-obs 2>/dev/null; then
-    podman run -d --name ap-obs --network "$NET" \
-      -v "$CONFIG_DIR:/config:ro,z" --env-file "$CONFIG_DIR/config.env" \
-      "$AP_IMAGE" --stellar-observer --event-processor >/dev/null
-  fi
-
   log "waiting for the SEP server (this takes a minute on first boot)…"
   local waited=0
   until curl -fsS --max-time 3 "$SEP_URL/.well-known/stellar.toml" >/dev/null 2>&1; do
@@ -157,12 +215,34 @@ up() {
     sleep 5
   done
 
+  # The observer's tables are created by the platform server's Flyway migration,
+  # so the cursor can only be seeded once that server has booted — which serving
+  # SEP-1 above establishes.
+  wait_for 'psql_platform -c "SELECT 1 FROM stellar_payment_observer_page_token LIMIT 1"' \
+    "observer cursor table"
+
+  # Stop the observer BEFORE seeding. A running observer writes its own paging
+  # token back to this row as it streams, so seeding underneath a live one is
+  # overwritten within milliseconds and the new cursor never takes effect.
+  podman rm -f ap-obs >/dev/null 2>&1 || true
+  seed_observer_cursor
+
+  # Watches Stellar for the incoming settlement and drives the transaction to
+  # completed. Without it a payment settles on-chain but never reconciles.
+  # Recreated on every `up` so it reads the cursor just seeded rather than
+  # resuming from wherever the previous run left off.
+  podman run -d --name ap-obs --network "$NET" \
+    -v "$CONFIG_DIR:/config:ro,z" --env-file "$CONFIG_DIR/config.env" \
+    "$AP_IMAGE" --stellar-observer --event-processor >/dev/null
+  log "observer started"
+
   printf '\n✓ reference anchor is serving\n\n'
   printf '  SEP-1  %s/.well-known/stellar.toml\n' "$SEP_URL"
   printf '  SEP-10 %s/auth\n' "$SEP_URL"
   printf '  SEP-12 %s/sep12\n' "$SEP_URL"
   printf '  SEP-31 %s/sep31\n' "$SEP_URL"
   printf '  SEP-38 %s/sep38\n' "$SEP_URL"
+  printf '\n  observer starting at ledger %s\n' "$SEEDED_LEDGER"
   printf '\nNext: pnpm testnet   (see docs/operations.md §1)\n'
 }
 
@@ -195,6 +275,108 @@ logs_dump() {
     --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' >"$dir/containers.txt" 2>&1 || true
 }
 
+DOCTOR_FAILURES=0
+pass_() { printf '  ✓ %-16s %s\n' "$1" "$2"; }
+fail_() { printf '  ✗ %-16s %s\n' "$1" "$2"; DOCTOR_FAILURES=$((DOCTOR_FAILURES + 1)); }
+
+container_running() {
+  [ "$(podman inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]
+}
+
+# Asset codes one level inside SEP-31 /info's `receive` object. A depth-aware
+# scan rather than a regex: the nested sep12 blocks put quoted braces and commas
+# in the way of anything simpler.
+sep31_receive_codes() {
+  awk '
+    { s = s $0 }
+    END {
+      i = index(s, "\"receive\"")
+      if (i == 0) exit
+      s = substr(s, i)
+      i = index(s, "{")
+      if (i == 0) exit
+      depth = 0; inq = 0; esc = 0; key = ""; capturing = 0; expect = 0
+      for (n = i; n <= length(s); n++) {
+        c = substr(s, n, 1)
+        if (inq) {
+          if (esc) { esc = 0; if (capturing) key = key c; continue }
+          if (c == "\\") { esc = 1; continue }
+          if (c == "\"") { inq = 0; if (capturing) { print key; capturing = 0; key = "" }; continue }
+          if (capturing) key = key c
+          continue
+        }
+        if (c == "\"") { inq = 1; if (depth == 1 && expect) { capturing = 1; key = ""; expect = 0 }; continue }
+        if (c == "{") { depth++; if (depth == 1) expect = 1; continue }
+        if (c == "}") { depth--; if (depth == 0) break; continue }
+        if (c == ",") { if (depth == 1) expect = 1; continue }
+      }
+    }'
+}
+
+doctor() {
+  require_podman
+  printf 'reference anchor doctor\n\n'
+
+  local missing="" c
+  for c in db reference-db kafka ap-sep ap-ref ap-obs; do
+    container_running "$c" || missing="$missing $c"
+  done
+  if [ -n "$missing" ]; then
+    fail_ containers "not running:$missing"
+  else
+    pass_ containers "db reference-db kafka ap-sep ap-ref ap-obs"
+  fi
+
+  if curl -fsS --max-time 5 "$SEP_URL/.well-known/stellar.toml" >/dev/null 2>&1; then
+    pass_ sep1 "$SEP_URL/.well-known/stellar.toml"
+  else
+    fail_ sep1 "$SEP_URL/.well-known/stellar.toml does not serve"
+  fi
+
+  local info codes count
+  info="$(curl -fsS --max-time 5 "$SEP_URL/sep31/info" 2>/dev/null)" || info=""
+  if [ -z "$info" ]; then
+    fail_ sep31-info "$SEP_URL/sep31/info did not respond"
+  else
+    codes="$(printf '%s' "$info" | sep31_receive_codes | tr '\n' ' ' | sed 's/ *$//')"
+    count="$(printf '%s' "$info" | sep31_receive_codes | grep -c . || true)"
+    if [ "$count" -gt 0 ]; then
+      pass_ sep31-info "receive: $codes"
+    else
+      fail_ sep31-info "receive list is empty - no asset can be received today"
+    fi
+  fi
+
+  # The check this command exists for. Report the gap as ledgers, so a
+  # borderline stack is legible rather than a bare pass/fail.
+  local cursor tip lag
+  cursor="$(psql_platform -c 'SELECT cursor FROM stellar_payment_observer_page_token;' 2>/dev/null | head -1 | tr -d '[:space:]')" || cursor=""
+  tip="$(horizon_latest_ledger)"
+  case "$cursor" in
+    ''|*[!0-9]*) cursor="" ;;
+  esac
+  if [ -z "$cursor" ]; then
+    fail_ cursor-lag "no observer cursor stored - run \`up\` to seed one"
+  elif [ -z "$tip" ]; then
+    fail_ cursor-lag "could not read the current ledger from $HORIZON_URL"
+  else
+    lag=$(( tip - cursor / 4294967296 ))
+    if [ "$lag" -gt "$CURSOR_LAG_FAIL_LEDGERS" ]; then
+      fail_ cursor-lag "$lag ledgers behind Horizon (limit $CURSOR_LAG_FAIL_LEDGERS) - a fresh payment will not be seen in time"
+    else
+      pass_ cursor-lag "$lag ledgers behind Horizon (limit $CURSOR_LAG_FAIL_LEDGERS)"
+    fi
+  fi
+
+  printf '\n'
+  if [ "$DOCTOR_FAILURES" -eq 0 ]; then
+    printf '✓ stack is fit to run a corridor\n'
+    return 0
+  fi
+  printf '✗ %s check(s) failed\n' "$DOCTOR_FAILURES"
+  return 1
+}
+
 down() {
   require_podman
   podman rm -f ap ap-sep ap-ref ap-obs ap-extract kafka db reference-db >/dev/null 2>&1 || true
@@ -208,5 +390,6 @@ case "${1:-up}" in
   logs) podman logs -f "${2:-ap-sep}" ;;
   logs-dump) logs_dump "${2:-anchor-logs}" ;;
   status) podman ps --filter network="$NET" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' ;;
-  *) die "usage: $0 <up|down|logs|logs-dump [dir]|status>" ;;
+  doctor) doctor ;;
+  *) die "usage: $0 <up|down|logs|logs-dump [dir]|status|doctor>" ;;
 esac

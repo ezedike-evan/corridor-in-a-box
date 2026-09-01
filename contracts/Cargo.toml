@@ -3,7 +3,7 @@ resolver = "2"
 members = ["registry", "attester"]
 
 [workspace.dependencies]
-soroban-sdk = "25"
+soroban-sdk = "27"
 
 [profile.release]
 opt-level = "z"

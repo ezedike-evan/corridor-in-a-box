@@ -3,14 +3,19 @@ import { parseCorridor, type Corridor } from "@corridor/manifest";
 import { createMockAdapter } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
 import {
+  InMemoryAuditLog,
   InMemoryIdempotencyStore,
+  hasRequestedRefund,
   canTransition,
   createMockSubmitter,
   execute,
+  reconcileUntil,
+  type CorridorState,
   type EngineDeps,
   type SettlementSubmitter,
 } from "@corridor/engine";
-import { fail, type PaymentIntent } from "@corridor/types";
+import type { TransactionStatus } from "@corridor/adapter-kit";
+import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
 
 function corridor(): Corridor {
   const r = parseCorridor({
@@ -210,8 +215,181 @@ describe("engine recovery", () => {
       d,
     );
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.message).toContain("polls=3");
+      expect(r.error.message).toContain("elapsed=1000ms");
+      expect(r.error.message).toContain("first status=pending_receiver");
+      expect(r.error.message).toContain("last status=pending_receiver");
+    }
     // a settlement went out, so the engine must have reversed it on-chain
+    expect(refunded).toHaveLength(1);
+  });
+
+  it("SETTLEMENT_TIMEOUT carries poll count, elapsed ms, and first/last status in error message", async () => {
+    let clock = 1000;
+    let pollCount = 0;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        pollCount++;
+        const status = pollCount === 1 ? "pending_sender" : "pending_receiver";
+        return {
+          ok: true as const,
+          value: {
+            status,
+            settled: false,
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-stall", {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      deadlineMs: 3000,
+      pollMs: 1000,
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.message).toContain("tx tx-stall did not settle before timeout");
+      expect(r.error.message).toContain("polls=3");
+      expect(r.error.message).toContain("elapsed=2000ms");
+      expect(r.error.message).toContain("first status=pending_sender");
+      expect(r.error.message).toContain("last status=pending_receiver");
+    }
+  });
+
+  it("SETTLEMENT_TIMEOUT records identical first and last status for a stalled observer", async () => {
+    let clock = 0;
+    const adapter = createMockAdapter({ settled: false }); // returns pending_receiver
+
+    const r = await reconcileUntil(adapter, "tx-never-moves", {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      deadlineMs: 2000,
+      pollMs: 500,
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.message).toContain("polls=5");
+      expect(r.error.message).toContain("first status=pending_receiver");
+      expect(r.error.message).toContain("last status=pending_receiver");
+    }
+  });
+
+  it("says so in the timeout when the anchor was blocked on someone's input", async () => {
+    // An operator reading a SETTLEMENT_TIMEOUT needs to know who to chase. A run
+    // that timed out on `pending_customer_info_update` was waiting on a party to
+    // supply information, not on a slow anchor — the message must say which.
+    let t = 0;
+    const base = createMockAdapter({ settled: false });
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => ({
+        ...base,
+        getTransaction: async () =>
+          ok({
+            status: "pending_customer_info_update",
+            settled: false,
+            terminalFailure: false,
+            awaitingInput: true,
+          }),
+      })),
+      submitter: createMockSubmitter(),
+      idempotency: new InMemoryIdempotencyStore(),
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+    };
+    const r = await execute(
+      intent("awaiting-input"),
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "hold" }),
+      d,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+      expect(r.error.message).toContain("pending_customer_info_update");
+      expect(r.error.message).toContain("awaiting input from another party");
+    }
+  });
+
+  it("persists the refund id so a resumed run has evidence it already refunded", async () => {
+    // Without this, a run records that the payment went out but not that the
+    // refund did — and a resumed process asks for a second one. Not settling
+    // twice, but money moving twice.
+    let t = 0;
+    const store = new InMemoryIdempotencyStore();
+    const base = createMockSubmitter();
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      submitter: base,
+      idempotency: store,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+    };
+    const i = intent();
+    await execute(
+      i,
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" }),
+      d,
+    );
+
+    const stored = await store.get(i.idempotencyKey);
+    expect(stored?.state).toBe("refunded");
+    expect(stored?.stellarTxHash).toBeTruthy();
+    expect(stored?.refundId).toBeTruthy();
+    expect(stored?.refundId).not.toBe(stored?.stellarTxHash);
+    expect(hasRequestedRefund(stored!)).toBe(true);
+  });
+
+  it("does not issue a second refund for a key that already refunded", async () => {
+    let t = 0;
+    const refunded: string[] = [];
+    const store = new InMemoryIdempotencyStore();
+    const base = createMockSubmitter();
+    const deps = (): EngineDeps => ({
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      submitter: {
+        submit: base.submit,
+        refund: async (req) => {
+          refunded.push(req.original.stellarTxHash);
+          return base.refund(req);
+        },
+      },
+      idempotency: store,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+    });
+    const c = corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" });
+    const i = intent();
+
+    await execute(i, c, deps());
+    expect(refunded).toHaveLength(1);
+
+    // Re-running the same key must not send the money back again.
+    const again = await execute(i, c, deps());
+    expect(again.ok).toBe(false);
     expect(refunded).toHaveLength(1);
   });
 
@@ -311,6 +489,96 @@ describe("engine recovery", () => {
   });
 });
 
+describe("reconcile stall detection", () => {
+  // Build a tiny AnchorAdapter whose getTransaction always (or consecutively)
+  // returns the supplied status, while delegating everything else to the mock.
+  const stalledAdapter = (status: string) => {
+    let polls = 0;
+    const adapter = {
+      ...createMockAdapter({ settled: false }),
+      getTransaction: async (): Promise<Outcome<TransactionStatus>> => {
+        polls++;
+        return ok<TransactionStatus>({
+          status,
+          settled: false,
+          terminalFailure: false,
+        });
+      },
+    };
+    return { adapter, polls: () => polls };
+  };
+
+  it("returns RECONCILE_STALLED when status stays the same for stallThreshold polls", async () => {
+    const { adapter, polls } = stalledAdapter("pending_receiver");
+    let t = 0;
+    const result = await reconcileUntil(adapter, "tx_stall", {
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      deadlineMs: t + 600_000,
+      pollMs: 100,
+      stallThreshold: 3,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("RECONCILE_STALLED");
+      expect(result.error.retryable).toBe(false);
+      expect(result.error.message).toContain("pending_receiver");
+      expect(result.error.message).toContain("3");
+    }
+    expect(polls()).toBe(4); // threshold + 1 (the poll that triggers the bail)
+  });
+
+  it("does NOT stall when the status advances between polls", async () => {
+    let callIdx = 0;
+    const adapter = {
+      ...createMockAdapter({ settled: false }),
+      getTransaction: async (): Promise<Outcome<TransactionStatus>> => {
+        callIdx++;
+        // Every poll returns a different status — sameCount never accumulates.
+        return ok<TransactionStatus>({ status: `status_${callIdx}`, settled: false });
+      },
+    };
+    let t = 0;
+    const result = await reconcileUntil(adapter, "tx_no_stall", {
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      deadlineMs: t + 100,
+      pollMs: 10,
+      stallThreshold: 3,
+    });
+    // Should time out, NOT stall — because the status keeps advancing,
+    // resetting the consecutive counter on every poll.
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("SETTLEMENT_TIMEOUT");
+    }
+    expect(callIdx).toBeGreaterThan(3);
+  });
+
+  it("stalls exactly at threshold, not before", async () => {
+    const { adapter, polls } = stalledAdapter("stuck");
+    let t = 0;
+    // First poll sets lastStatus="stuck" with sameCount=0; each subsequent poll
+    // increments sameCount. So threshold=N means the stall fires on poll N+1.
+    const result = await reconcileUntil(adapter, "tx_exact", {
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      deadlineMs: t + 600_000,
+      pollMs: 100,
+      stallThreshold: 5,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("RECONCILE_STALLED");
+    expect(polls()).toBe(6);
+  });
+});
+
 describe("state machine", () => {
   it("permits the forward path and forbids skips", () => {
     expect(canTransition("created", "quoted")).toBe(true);
@@ -337,5 +605,193 @@ describe("state machine", () => {
     // And the path that motivated the split stays closed.
     expect(canTransition("settled", "settling")).toBe(false);
     expect(canTransition("settled", "recovering")).toBe(true);
+  });
+});
+
+// --- the refund path ------------------------------------------------------
+//
+// `refundAndStop` is the branch that runs after something has already gone
+// wrong, which is exactly when it is least likely to have been exercised by
+// hand. Every case below goes through the mock adapter and mock submitter — no
+// network, per CONTRIBUTING.md — and reads the outcome from the store and the
+// audit log rather than the return value, because a recovered run always
+// returns an error: the interesting part is *where it stopped*.
+
+interface RefundHarness {
+  deps: EngineDeps;
+  store: InMemoryIdempotencyStore;
+  audit: InMemoryAuditLog;
+  /** Every refund the engine asked for. Empty means it never touched the chain. */
+  refundCalls: { stellarTxHash: string; reason?: string }[];
+  /** The states the run passed through, in order, per the audit log. */
+  trail: () => CorridorState[];
+}
+
+function refundHarness(
+  opts: {
+    /** Make the on-chain settlement itself fail, so no payment ever goes out. */
+    failSubmit?: boolean;
+    /** Make the refund fail, standing in for an anchor that refuses it. */
+    refundError?: string;
+    /** Anchor never reports the payment as settled, so reconcile times out. */
+    settled?: boolean;
+  } = {},
+): RefundHarness {
+  const base = createMockSubmitter({ failSubmit: opts.failSubmit ?? false });
+  const refundCalls: RefundHarness["refundCalls"] = [];
+  const store = new InMemoryIdempotencyStore();
+  const audit = new InMemoryAuditLog();
+  let t = 0;
+
+  const submitter: SettlementSubmitter = {
+    submit: base.submit,
+    async refund(req) {
+      refundCalls.push({ stellarTxHash: req.original.stellarTxHash, reason: req.reason });
+      if (opts.refundError) {
+        return fail("SETTLEMENT_FAILED", opts.refundError, { retryable: false });
+      }
+      return base.refund(req);
+    },
+  };
+
+  return {
+    store,
+    audit,
+    refundCalls,
+    trail: () => audit.entries.map((e) => e.to),
+    deps: {
+      resolver: new StaticRouteResolver(() =>
+        createMockAdapter({ settled: opts.settled ?? true }),
+      ),
+      submitter,
+      idempotency: store,
+      audit,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+    },
+  };
+}
+
+describe("engine refund path", () => {
+  it("reaches refunded when the anchor accepts the refund", async () => {
+    const h = refundHarness({ settled: false });
+    const r = await execute(
+      intent("refund-ok"),
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" }),
+      h.deps,
+    );
+
+    // A recovered run still reports the failure that caused it.
+    expect(r.ok).toBe(false);
+
+    const run = await h.store.get("refund-ok");
+    expect(run?.state).toBe("refunded");
+    expect(h.trail()).toEqual([
+      "quoted",
+      "compliant",
+      "opened",
+      "settling",
+      "settled",
+      "recovering",
+      "refunded",
+    ]);
+
+    // The refund reversed the payment that actually went out, and carries the
+    // reason so the anchor's own record says why.
+    expect(h.refundCalls).toHaveLength(1);
+    expect(h.refundCalls[0]?.stellarTxHash).toBe(run?.stellarTxHash);
+    expect(h.refundCalls[0]?.reason).toContain("SETTLEMENT_TIMEOUT");
+  });
+
+  it("escalates to held when the refund is rejected, keeping the anchor's reason", async () => {
+    const h = refundHarness({
+      settled: false,
+      refundError: "anchor refused the refund: destination account closed",
+    });
+    const r = await execute(
+      intent("refund-rejected"),
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" }),
+      h.deps,
+    );
+
+    expect(r.ok).toBe(false);
+
+    const run = await h.store.get("refund-rejected");
+    // Money left and could not be returned: a human has to look at it, and the
+    // run must not look finished.
+    expect(run?.state).toBe("held");
+    expect(run?.lastError).toContain("destination account closed");
+    expect(h.trail().at(-1)).toBe("held");
+    expect(h.refundCalls).toHaveLength(1);
+  });
+
+  it("records the refund without touching the chain when no payment went out", async () => {
+    const h = refundHarness({ failSubmit: true });
+    const r = await execute(
+      intent("refund-no-payment"),
+      corridorWith({ max_retries: 1, rollback: "refund_sender" }),
+      h.deps,
+    );
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("SETTLEMENT_FAILED");
+
+    const run = await h.store.get("refund-no-payment");
+    expect(run?.state).toBe("refunded");
+    expect(run?.stellarTxHash).toBeUndefined();
+    // Nothing is on-chain to reverse — the sending anchor returns the sender's
+    // funds off-chain — so the engine must not ask the submitter to reverse it.
+    expect(h.refundCalls).toEqual([]);
+  });
+
+  it("never attempts a refund when the corridor says hold", async () => {
+    const h = refundHarness({ settled: false });
+    const r = await execute(
+      intent("rollback-hold"),
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "hold" }),
+      h.deps,
+    );
+
+    expect(r.ok).toBe(false);
+
+    const run = await h.store.get("rollback-hold");
+    expect(run?.state).toBe("held");
+    expect(run?.lastError).toContain("SETTLEMENT_TIMEOUT");
+    expect(h.refundCalls).toEqual([]);
+    expect(h.trail().at(-1)).toBe("held");
+  });
+
+  it("fails without a refund when the corridor says manual", async () => {
+    const h = refundHarness({ settled: false });
+    const r = await execute(
+      intent("rollback-manual"),
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "manual" }),
+      h.deps,
+    );
+
+    expect(r.ok).toBe(false);
+
+    const run = await h.store.get("rollback-manual");
+    expect(run?.state).toBe("failed");
+    expect(h.refundCalls).toEqual([]);
+    expect(h.trail()).not.toContain("refunded");
+  });
+
+  it("never re-enters settling once the refund path has been taken", async () => {
+    // The invariant, asserted on a real run rather than only on the table: a
+    // run that has settled and then recovered must never submit again.
+    const h = refundHarness({ settled: false });
+    await execute(
+      intent("no-resettle"),
+      corridorWith({ max_retries: 2, timeout_seconds: 1, rollback: "refund_sender" }),
+      h.deps,
+    );
+
+    const afterRecovering = h.trail().slice(h.trail().indexOf("recovering"));
+    expect(afterRecovering).not.toContain("settling");
+    expect(afterRecovering).not.toContain("retrying");
   });
 });

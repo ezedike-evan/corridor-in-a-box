@@ -20,9 +20,13 @@ jobs:
     # `if:` below actually evaluate. Same fix as attest-anchors.yml.
     env:
       SIGNER_SECRET: ${{ secrets.CORRIDOR_SIGNER_SECRET }}
+      # Lifted here for the same reason as SIGNER_SECRET: a step-level `if:`
+      # cannot read the `secrets` context, and doing so invalidates the whole
+      # workflow file rather than failing the one step.
+      LIVE_SETTLEMENT: ${{ secrets.CORRIDOR_LIVE_SETTLEMENT }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -53,3 +57,14 @@ jobs:
         run: |
           echo "::warning::CORRIDOR_SIGNER_SECRET is not set, so the SEP-10 and" \
                "SEP-12 legs were skipped. This run verified less than it looks like."
+
+      # The settlement case moves money, so it is off here by default and this
+      # job keeps verifying only the read-only legs. Same discipline as the
+      # gate above: the skip is announced rather than silent, so the run is not
+      # mistaken for evidence that `completed` was reached.
+      - name: Note that the terminal-state capture did not run
+        if: ${{ env.LIVE_SETTLEMENT != '1' }}
+        run: |
+          echo "::warning::CORRIDOR_LIVE_SETTLEMENT is not 1, so the terminal-state" \
+               "capture (settled -> reconciled -> completed) was skipped. This run does" \
+               "not evidence that a corridor reaches 'completed'."

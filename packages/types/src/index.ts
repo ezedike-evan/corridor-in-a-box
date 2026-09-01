@@ -28,6 +28,7 @@ export type CorridorErrorCode =
   | "SETTLEMENT_TIMEOUT"
   | "REFUND_UNSUPPORTED"
   | "RECONCILE_MISMATCH"
+  | "RECONCILE_STALLED"
   | "IDEMPOTENCY_CONFLICT";
 
 export interface CorridorError {

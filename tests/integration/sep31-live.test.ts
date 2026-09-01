@@ -11,15 +11,37 @@
 //   CORRIDOR_SIGNER_SECRET=S...   # testnet only; enables SEP-10 auth \
 //   pnpm exec vitest run tests/integration/sep31-live.test.ts
 //
-// It is intentionally READ-ONLY: it exercises SEP-10 auth, the SEP-38 quote, and
-// the conformance probes. It does NOT open a transaction or move any funds — the
-// money-moving end-to-end capture is a manual step documented in docs/operations.md.
+// The default cases are READ-ONLY: they exercise SEP-10 auth, the SEP-38 quote,
+// and the conformance probes without opening a transaction or moving funds.
+//
+// One further case DOES move money, and is therefore behind its own explicit
+// gate on top of the anchor/signer ones: it runs a full execute() and asserts
+// the run reaches the terminal state `completed` — the claim the roadmap will
+// not make until something checks it. Enable it with:
+//
+//   CORRIDOR_LIVE_SETTLEMENT=1 \
+//   RECIPIENT_SEP12_ID=… SENDER_SEP12_ID=…   # ids this anchor issued \
+//   HORIZON_URL=https://horizon-testnet.stellar.org \
+//   pnpm exec vitest run tests/integration/sep31-live.test.ts
+//
+// The manual end-to-end capture it automates is documented in docs/operations.md.
 
 import { describe, expect, it } from "vitest";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
 import { Sep31Adapter } from "@corridor/sep31";
 import { conformanceSuite } from "@corridor/adapter-kit";
-import { StellarSep10Signer } from "@corridor/stellar";
+import {
+  LocalKeypairSigner,
+  StellarSep10Signer,
+  StellarSettlementSubmitter,
+} from "@corridor/stellar";
+import { StaticRouteResolver } from "@corridor/router";
+import {
+  InMemoryIdempotencyStore,
+  execute,
+  type CorridorState,
+  type EngineDeps,
+} from "@corridor/engine";
 import { Keypair } from "@stellar/stellar-sdk";
 import type { PaymentIntent } from "@corridor/types";
 
@@ -112,6 +134,98 @@ describe.skipIf(!hasAnchor)("SEP-31 live anchor (read-only)", () => {
   });
 });
 
+// --- terminal-state capture (MOVES MONEY) ---------------------------------
+//
+// Everything above is read-only. This is not: it settles one payment on the
+// configured network, so it needs its own opt-in rather than riding on the
+// anchor vars. `||` not `??`, for the same empty-string reason as above.
+const wantsSettlement = (env.CORRIDOR_LIVE_SETTLEMENT || "") === "1";
+// execute() runs `comply` before it opens anything, and a SEP-31 anchor needs
+// both parties identified by ids IT issued. Registering them is a write this
+// suite does not perform (same reasoning as recipientSep12Id above), so they
+// are supplied — and without them the case is skipped rather than counted as a
+// failure of a fail-closed control.
+const senderSep12Id = env.SENDER_SEP12_ID || undefined;
+const canSettle = Boolean(wantsSettlement && hasSigner && recipientSep12Id && senderSep12Id);
+
+/** The states a payment must pass through, in order, after the money has moved. */
+const TERMINAL_TRAIL: readonly CorridorState[] = ["settled", "reconciled", "completed"];
+
+/** True when `trail` contains every state in `expected`, in that order. */
+function containsInOrder(
+  trail: readonly CorridorState[],
+  expected: readonly CorridorState[],
+): boolean {
+  let i = 0;
+  for (const state of trail) {
+    if (state === expected[i]) i++;
+    if (i === expected.length) return true;
+  }
+  return false;
+}
+
+describe.skipIf(!hasAnchor)("SEP-31 live anchor (settlement)", () => {
+  it.skipIf(!canSettle)(
+    "reaches completed, through settled -> reconciled -> completed",
+    async () => {
+      const c = liveCorridor();
+      const secret = env.CORRIDOR_SIGNER_SECRET as string;
+      const signer = LocalKeypairSigner.fromSecret(secret);
+      const store = new InMemoryIdempotencyStore();
+
+      const deps: EngineDeps = {
+        resolver: new StaticRouteResolver(() => adapterFor(c)),
+        submitter: new StellarSettlementSubmitter({
+          signer,
+          horizonUrl: env.HORIZON_URL || "https://horizon-testnet.stellar.org",
+        }),
+        idempotency: store,
+      };
+
+      const settlementIntent: PaymentIntent = {
+        ...intent,
+        idempotencyKey: `integration-settle-${Date.now()}`,
+        sender: { ...intent.sender, sep12Id: senderSep12Id },
+        recipient: { ...intent.recipient, sep12Id: recipientSep12Id },
+        destinationFields: {
+          receiver_routing_number: env.RECEIVER_ROUTING_NUMBER || "021000021",
+          receiver_account_number: env.RECEIVER_ACCOUNT_NUMBER || "12345678901234",
+          type: env.RECEIVER_DEPOSIT_TYPE || "SWIFT",
+        },
+      };
+
+      const result = await execute(settlementIntent, c, deps);
+
+      // An anchor-side stall shows up here as a bare `false !== true` unless the
+      // run's own record is printed with it: which states it did reach, and the
+      // error that stopped it. That is the whole debugging surface for a failure
+      // that cannot be reproduced locally.
+      const run = await store.get(settlementIntent.idempotencyKey);
+      const diagnostics = [
+        `state:     ${run?.state ?? "(no stored run)"}`,
+        `trail:     ${result.ok ? result.value.trail.join(" -> ") : "(execute returned an error)"}`,
+        `lastError: ${run?.lastError ?? "(none recorded)"}`,
+        `tx:        ${run?.transactionId ?? "(none)"} / stellar ${run?.stellarTxHash ?? "(none)"}`,
+        result.ok ? "" : `error:     ${result.error.code}: ${result.error.message}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      expect(result.ok, diagnostics).toBe(true);
+      if (!result.ok) return;
+
+      expect(result.value.state, diagnostics).toBe("completed");
+      expect(
+        containsInOrder(result.value.trail, TERMINAL_TRAIL),
+        `trail did not contain ${TERMINAL_TRAIL.join(" -> ")} in order\n${diagnostics}`,
+      ).toBe(true);
+    },
+    // A live corridor waits on an anchor's own reconcile cadence, which is far
+    // longer than vitest's default 5s.
+    Number(env.CORRIDOR_LIVE_SETTLEMENT_TIMEOUT_MS || 300_000),
+  );
+});
+
 // A tiny always-present assertion so the file is never an empty suite when the
 // anchor vars are unset (keeps the default test run green and explicit).
 //
@@ -127,5 +241,31 @@ describe("SEP-31 live anchor (gating)", () => {
 
   it("skips the auth-dependent cases unless CORRIDOR_SIGNER_SECRET is set", () => {
     expect(typeof hasSigner).toBe("boolean");
+  });
+
+  // The settlement case moves money, so it stays off until asked for
+  // explicitly — an anchor being configured is not consent to settle on it.
+  it("skips the settlement case unless CORRIDOR_LIVE_SETTLEMENT=1 and both SEP-12 ids are set", () => {
+    expect(typeof canSettle).toBe("boolean");
+    if (!wantsSettlement) expect(canSettle).toBe(false);
+    if (!senderSep12Id || !recipientSep12Id) expect(canSettle).toBe(false);
+  });
+
+  it("requires the whole terminal trail, not just settlement", () => {
+    // The claim under test is `completed`, and the ordered trail behind it.
+    // Guarding the helper here means the assertion above cannot quietly pass on
+    // a trail that merely ends in the right place.
+    expect(containsInOrder(["settled", "reconciled", "completed"], TERMINAL_TRAIL)).toBe(true);
+    expect(
+      containsInOrder(
+        ["created", "settled", "recovering", "reconciled", "completed"],
+        TERMINAL_TRAIL,
+      ),
+    ).toBe(true);
+    expect(containsInOrder(["settled", "completed"], TERMINAL_TRAIL)).toBe(false);
+    expect(containsInOrder(["reconciled", "settled", "completed"], TERMINAL_TRAIL)).toBe(
+      false,
+    );
+    expect(containsInOrder(["settled", "reconciled"], TERMINAL_TRAIL)).toBe(false);
   });
 });
