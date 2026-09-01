@@ -254,7 +254,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
 
   async refund(req: RefundRequest): Promise<Outcome<SettlementRef>> {
     return fail(
-      "SETTLEMENT_FAILED",
+      "REFUND_UNSUPPORTED",
       `payment ${req.original.stellarTxHash} cannot be reversed on-chain; ` +
         `resolve out-of-band with the receiving anchor (SEP-31 gives the sender ` +
         `no refund endpoint) — see the held runbook in docs/operations.md`,

@@ -71,6 +71,8 @@ describe("StellarSep10Signer", () => {
 });
 
 describe("StellarSettlementSubmitter", () => {
+  // The refusal is by design, not a settlement outage: it must report under its
+  // own code so paging on SETTLEMENT_FAILED doesn't fire on a design invariant.
   it("refuses to reverse a settled payment on-chain (escalates to manual)", async () => {
     const sub = new StellarSettlementSubmitter({
       signerSecret: Keypair.random().secret(),
@@ -85,8 +87,9 @@ describe("StellarSettlementSubmitter", () => {
     const r = await sub.refund(req);
     expect(r.ok).toBe(false);
     if (!r.ok) {
-      expect(r.error.code).toBe("SETTLEMENT_FAILED");
+      expect(r.error.code).toBe("REFUND_UNSUPPORTED");
       expect(r.error.retryable).toBe(false);
+      expect(r.error.message).toContain("cannot be reversed on-chain");
     }
   });
 });

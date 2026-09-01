@@ -164,14 +164,24 @@ may have left the distribution account.
    run came through: under a `hold` policy it carries the **original failure**
    (`SETTLEMENT_TIMEOUT`, `RECONCILE_MISMATCH`, …) — the refund port was never
    consulted; under `refund_sender` it carries the **refund port's refusal**,
-   which with the real `StellarSettlementSubmitter` today reads
-   `SETTLEMENT_FAILED: payment … cannot be reversed on-chain` (`@corridor/stellar`
-   is slated to adopt a dedicated `REFUND_UNSUPPORTED` code for this; the
-   "cannot be reversed" message is the stable part).
+   which with the real `StellarSettlementSubmitter` reads
+   `REFUND_UNSUPPORTED: payment … cannot be reversed on-chain`. The code is
+   distinct from `SETTLEMENT_FAILED` on purpose: this is a design invariant,
+   not a settlement outage, so it should not page the settlement alert.
 2. **Contact the receiving anchor** — exactly that; there is no API for this
    step. Ask it to refund on its side or to complete the payout manually.
 3. Once settled out-of-band, the run stays `held` as an audit record. Do not
    re-submit the same `idempotencyKey` — the idempotency gate will reject it.
+
+**Timed out waiting on whom?** A `SETTLEMENT_TIMEOUT` message ends with the last
+status the anchor reported. When that status is one the engine classifies as
+_awaiting input_ — `incomplete`, `pending_customer_info_update`,
+`pending_transaction_info_update` — the message also says
+`awaiting input from another party`. That is the anchor telling you it was
+blocked on information (usually a SEP-12 customer record or a
+`PATCH /transactions/:id` correction), not that it was slow. Chase the party that
+owes the information, not the anchor's throughput. Any other status — including
+one the engine has never seen — means the anchor was working on it.
 
 ### `refunded`
 
@@ -199,7 +209,25 @@ the chain. Verify the belief before closing the run:
 If an anchor-driven refund path ever lands (a refund-wait state between
 `recovering` and `refunded`), a second, legitimate way into this state appears —
 one where a payment **did** go out and the anchor returned it, hash set. The
-run's trail tells the two apart.
+run's trail tells the two apart — and `refund_id`, described below, records
+which refund it was.
+
+### `refund_id` on the run
+
+The run carries `refund_id` alongside `stellar_tx_hash`: the reference of a
+refund that has already been requested, empty until one is.
+
+It exists so a resumed run can tell "a refund was requested" from "a refund was
+never requested". Without it a process that crashed after requesting a refund
+comes back with no record of having done so and asks for a second one — not
+settling twice, but money moving twice all the same. The refund request path
+reads it and refuses to issue another.
+
+Consequently it is **write-once**: `migrate()` adds the column additively, and
+`put()` coalesces rather than overwrites, so a writer holding a stale copy of
+the run cannot erase the evidence. If you see a run whose `refund_id` is set,
+a refund reference exists at the submitter — check there before initiating
+anything by hand.
 
 ### `failed` before `settled`
 
