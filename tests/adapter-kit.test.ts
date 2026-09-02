@@ -127,6 +127,33 @@ describe("createMockAdapter", () => {
     expect(r.ok && r.value.refunds).toEqual(refundStatus);
   });
 
+  it('requestRefund: refund:"complete" reports the refund already done', async () => {
+    const r = await createMockAdapter({ refund: "complete" }).requestRefund(
+      "tx_1",
+      { asset: "USDC", amount: "100.00" },
+      "payout timed out",
+    );
+    expect(r.ok && r.value.status).toBe("refunded");
+  });
+
+  it('requestRefund: refund:"pending" reports it accepted but not yet moved', async () => {
+    const r = await createMockAdapter({ refund: "pending" }).requestRefund(
+      "tx_1",
+      { asset: "USDC", amount: "100.00" },
+      "payout timed out",
+    );
+    expect(r.ok && r.value.status).toBe("pending");
+  });
+
+  it('requestRefund: refund:"rejected" reports the anchor declining', async () => {
+    const r = await createMockAdapter({ refund: "rejected" }).requestRefund(
+      "tx_1",
+      { asset: "USDC", amount: "100.00" },
+      "payout timed out",
+    );
+    expect(r.ok && r.value.status).toBe("rejected");
+  });
+
   it("requestRefund: defaults to pending refund response", async () => {
     const adapter = createMockAdapter();
     const r = await adapter.requestRefund(

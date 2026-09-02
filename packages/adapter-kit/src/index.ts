@@ -213,7 +213,20 @@ export interface MockAdapterOptions {
   settled?: boolean;
   /** Make getTransaction report a terminal anchor failure (error/expired/refunded). */
   terminalFailure?: boolean;
-  /** Custom refund handler or result for mock testing. */
+  /**
+   * Which branch `requestRefund` takes, so a test can pick a refund outcome
+   * without assembling a `RefundRef`:
+   * - `"complete"` — the anchor accepted the refund and it is already done
+   * - `"pending"`  — accepted, but the money has not moved yet (the default,
+   *   and the honest common case: a refund is asynchronous at the anchor)
+   * - `"rejected"` — the anchor declined it
+   *
+   * Omitted, `requestRefund` reports `"pending"`, so existing tests are
+   * unaffected. `refundResult` overrides this when a test needs an exact
+   * payload or a failure `Outcome`.
+   */
+  refund?: "complete" | "pending" | "rejected";
+  /** Custom refund handler or result for mock testing. Overrides `refund`. */
   refundResult?: Outcome<RefundRef>;
   /** Refund detail for getTransaction to report, on the `refunds` field. */
   refundStatus?: RefundInfo;
@@ -263,9 +276,12 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
     },
     async requestRefund(transactionId, amount, reason) {
       if (opts.refundResult) return opts.refundResult;
+      // "complete" maps to the port's `refunded`: the mock chooses a branch, it
+      // does not model an anchor — the wire vocabulary stays on RefundRef.
+      const status = opts.refund === "complete" ? "refunded" : (opts.refund ?? "pending");
       return ok<RefundRef>({
         transactionId,
-        status: "pending",
+        status,
         message: `Refund requested for ${amount.amount} ${amount.asset}: ${reason}`,
       });
     },

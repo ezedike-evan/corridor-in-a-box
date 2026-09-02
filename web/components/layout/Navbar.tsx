@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { Boxes, Github } from "lucide-react";
+import { Boxes } from "lucide-react";
+import { GithubIcon } from "../icons/GithubIcon";
 import { ThemeToggle } from "./ThemeToggle";
 
 const links = [
@@ -34,7 +35,7 @@ export function Navbar() {
             aria-label="GitHub"
             className="rounded-lg p-2 text-secondary-text transition-colors hover:bg-bg-subtle"
           >
-            <Github size={18} />
+            <GithubIcon size={18} />
           </a>
           <ThemeToggle />
         </nav>
