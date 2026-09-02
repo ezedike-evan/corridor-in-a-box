@@ -3,11 +3,17 @@
 # #0 has a conformant counterparty to run against. No agreements, no
 # credentials, no real money — this is the lane anyone can run today.
 #
-#   scripts/reference-anchor.sh up      start the stack, wait for SEP-1 to serve
-#   scripts/reference-anchor.sh down    tear it down
-#   scripts/reference-anchor.sh logs    tail the platform logs
-#   scripts/reference-anchor.sh status  show what is running
-#   scripts/reference-anchor.sh doctor  check the stack is fit to run a corridor
+#   scripts/reference-anchor.sh up             start the stack, wait for SEP-1 to serve
+#   scripts/reference-anchor.sh down           tear it down
+#   scripts/reference-anchor.sh logs           tail the platform logs
+#   scripts/reference-anchor.sh status         show what is running
+#   scripts/reference-anchor.sh doctor         check the stack is fit to run a corridor
+#   scripts/reference-anchor.sh logs-dump DIR  write every container's logs to DIR
+#
+# `logs-dump` is the non-interactive counterpart of `logs`: it never follows, so
+# it terminates, which is what makes it usable from CI (see
+# .github/workflows/reference-corridor.yml). An anchor-side stall is
+# undebuggable from a bare exit code, and `logs -f` in a job would simply hang.
 #
 # Uses podman (rootless, no daemon).
 #
@@ -196,7 +202,14 @@ up() {
     waited=$((waited + 5))
     if [ "$waited" -ge "$READY_TIMEOUT_SECS" ]; then
       printf '\n'
-      podman logs --tail 40 ap-sep 2>&1 || true
+      # The platform runs as ap-sep/ap-ref/ap-obs; there has never been a
+      # container called `ap`, so this printed nothing at exactly the moment it
+      # was needed.
+      for c in ap-sep ap-ref ap-obs; do
+        podman container exists "$c" 2>/dev/null || continue
+        printf -- '--- %s (last 40 lines) ---\n' "$c" >&2
+        podman logs --tail 40 "$c" >&2 2>&1 || true
+      done
       die "SEP server did not come up within ${READY_TIMEOUT_SECS}s"
     fi
     sleep 5
@@ -241,6 +254,25 @@ wait_for() {
     sleep 3
   done
   log "$name ready"
+}
+
+# Write each container's logs to DIR, one file apiece. Non-following and
+# non-interactive: it always terminates, and it never fails the caller — this
+# runs on the failure path, where the logs are the only evidence left.
+logs_dump() {
+  require_podman
+  local dir="${1:-anchor-logs}"
+  mkdir -p "$dir"
+  for c in ap-sep ap-ref ap-obs kafka db reference-db; do
+    if podman container exists "$c" 2>/dev/null; then
+      podman logs "$c" >"$dir/$c.log" 2>&1 || true
+      log "wrote $dir/$c.log"
+    else
+      printf 'container %s was never created\n' "$c" >"$dir/$c.log"
+    fi
+  done
+  podman ps -a --filter network="$NET" \
+    --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' >"$dir/containers.txt" 2>&1 || true
 }
 
 DOCTOR_FAILURES=0
@@ -356,7 +388,8 @@ case "${1:-up}" in
   up) up ;;
   down) down ;;
   logs) podman logs -f "${2:-ap-sep}" ;;
+  logs-dump) logs_dump "${2:-anchor-logs}" ;;
   status) podman ps --filter network="$NET" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' ;;
   doctor) doctor ;;
-  *) die "usage: $0 <up|down|logs|status|doctor>" ;;
+  *) die "usage: $0 <up|down|logs|logs-dump [dir]|status|doctor>" ;;
 esac
