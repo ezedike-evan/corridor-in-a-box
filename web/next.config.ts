@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import type { NextConfig } from "next";
 
 // This app renders untrusted-looking strings (corridor ids, anchor names, error
@@ -28,6 +30,13 @@ const csp = [
 ].join("; ");
 
 const nextConfig: NextConfig = {
+  // web/ keeps its own lockfile outside the monorepo's pnpm workspace, so Next
+  // sees two and has to guess which one marks the root it traces from, and warns.
+  // Pin it to the repo root rather than to web/: lib/registry.ts imports
+  // ../../contracts/deployments.json, and a root of web/ puts that file out of
+  // reach — Turbopack fails the build with "Can't resolve
+  // '../../contracts/deployments.json'".
+  outputFileTracingRoot: path.join(import.meta.dirname, ".."),
   poweredByHeader: false,
   async headers() {
     return [

@@ -10,12 +10,21 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
+    // Next 16 requires the React automatic runtime; "preserve" is rewritten on
+    // every build, so it is set here rather than left for next build to patch.
+    "jsx": "react-jsx",
     "isolatedModules": true,
-    "jsx": "preserve",
     "incremental": true,
     "plugins": [{ "name": "next" }],
     "paths": { "@/*": ["./*"] }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  // .next/dev/types is where Next 16 emits its generated route types.
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
+  ],
   "exclude": ["node_modules"]
 }

@@ -7,7 +7,9 @@ import prettier from "eslint-config-prettier";
 
 export default tseslint.config(
   {
-    // web/ is a standalone Next.js app with its own toolchain and lint config.
+    // web/ is a standalone Next.js app with its own toolchain, outside this
+    // workspace. It has no ESLint config of its own: `next lint` was removed in
+    // Next 16, and web/ is gated by typecheck + build instead.
     ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**", "web/**"],
   },
   js.configs.recommended,
