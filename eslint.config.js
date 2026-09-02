@@ -8,8 +8,13 @@ import prettier from "eslint-config-prettier";
 export default tseslint.config(
   {
     // web/ is a standalone Next.js app with its own toolchain, outside this
-    // workspace. It has no ESLint config of its own: `next lint` was removed in
-    // Next 16, and web/ is gated by typecheck + build instead.
+    // workspace, and is gated by typecheck + build rather than by lint.
+    //
+    // It cannot currently be linted at all: `next lint` was removed in Next 16,
+    // and ESLint needs @typescript-eslint/parser to read .ts/.tsx, which throws
+    // "typescript-eslint does not support TS 7.0." at import time since web/
+    // moved to TypeScript 7. Revisit once typescript-eslint supports TS >=7.1:
+    // https://github.com/typescript-eslint/typescript-eslint/issues/10940
     ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**", "web/**"],
   },
   js.configs.recommended,
