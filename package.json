@@ -51,7 +51,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
-    "@stellar/stellar-sdk": "^16.2.0",
+    "@stellar/stellar-sdk": "^17.0.1",
     "@types/node": "^26.4.0",
     "@types/pg": "^8.11.0",
     "eslint": "^10.9.1",

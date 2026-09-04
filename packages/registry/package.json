@@ -25,6 +25,6 @@
   },
   "dependencies": {
     "@corridor/types": "workspace:*",
-    "@stellar/stellar-sdk": "^16.2.0"
+    "@stellar/stellar-sdk": "^17.0.1"
   }
 }
