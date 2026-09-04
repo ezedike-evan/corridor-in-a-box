@@ -50,7 +50,7 @@
     "@corridor/types": "workspace:*"
   },
   "devDependencies": {
-    "@eslint/js": "^9.17.0",
+    "@eslint/js": "^10.0.1",
     "@stellar/stellar-sdk": "^16.2.0",
     "@types/node": "^26.4.0",
     "@types/pg": "^8.11.0",
