@@ -1,9 +1,9 @@
-# Re-runs the opt-in live-anchor probe (tests/integration/sep31-live.test.ts)
-# nightly so the "verified against a real anchor" claim is continuously
-# checked, not a one-off capture. Safe to ship before any anchor is
-# configured: the test self-skips (describe.skipIf) when the ANCHOR_* secrets
-# below are unset, so this job goes green-but-skipped until repo secrets are
-# added — no code change needed when that day comes.
+# Re-runs the live-anchor probe (tests/integration/sep31-live.test.ts) nightly
+# against the public SDF test anchor (testanchor.stellar.org) so the "verified
+# against a real anchor" claim is continuously checked. Read-only legs run
+# with the public defaults below; the auth-dependent legs (SEP-10, SEP-12)
+# and live settlement write leg require repository secrets (CORRIDOR_SIGNER_SECRET,
+# CORRIDOR_LIVE_SETTLEMENT) and report warnings or skip when unset.
 name: nightly-live-anchor
 on:
   schedule:

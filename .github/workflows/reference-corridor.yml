@@ -50,9 +50,8 @@ jobs:
       - name: Refuse a non-testnet corridor
         run: pnpm exec tsx scripts/assert-testnet-corridor.ts "$MANIFEST"
 
-      # Until the two commands below exist (#40, #41), a run must say which one
-      # is missing rather than failing somewhere inside a container it took
-      # four minutes to start.
+      # Preflight checks: ensure runner commands exist before spinning up
+      # containers or attempting testnet settlement.
       - name: Check the corridor runner's prerequisites
         run: |
           set -euo pipefail
