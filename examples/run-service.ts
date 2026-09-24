@@ -21,8 +21,8 @@
 // SAFETY: a corridor manifest with settlement.network=public is NOT served
 // unless CORRIDOR_ALLOW_MAINNET=1 — same guard as `pnpm testnet`, applied per
 // corridor so one mainnet lane can't silently move real money behind a server
-// nobody's watching. mx-example and ng-cn are both `network: public` today, so by
-// default this serves only reference-testnet. Read docs/key-management.md
+// nobody's watching. mx-example, ng-cn, and ng-cowrie are all `network: public`
+// today, so by default this serves only reference-testnet. Read docs/key-management.md
 // before setting that flag with anything but a throwaway testnet secret.
 
 import { readdirSync } from "node:fs";
