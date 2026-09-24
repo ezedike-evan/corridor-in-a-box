@@ -5,14 +5,17 @@ covers the manual procedures the engine does **not** automate: capturing a
 testnet run, recovering `held`/`refunded` payments, rotating the signing key,
 running migrations, and the project's versioning/release policy.
 
-> Pre-1.0 and not yet validated against a live anchor — see the [ROADMAP](../ROADMAP.md).
+> Pre-1.0; endpoints of one production anchor were probed live, the full money-moving run
+> is automated by `pnpm verify:corridor` and the `reference-corridor` workflow, but
+> `reconcile → completed` is still unproven — see the [ROADMAP](../ROADMAP.md).
 > Treat this runbook as the plan for a self-run testnet/close-beta pilot, not a
 > claim of production-readiness.
 
 ## 1. Capturing the testnet end-to-end run
 
-This is the one open Phase-1 item: a real `open → settle → reconcile` against a
-live SEP-31 server, captured in the README.
+Endpoints of one production anchor were probed live, and the full money-moving
+run is automated by `pnpm verify:corridor` and the `reference-corridor` workflow;
+`reconcile → completed` is still unproven and remains the open Phase-1 item.
 
 1. **Pick the anchor.** Two zero-agreement options:
    - **SDF test anchor** (`testanchor.stellar.org`) — public, always up, no
@@ -21,10 +24,10 @@ live SEP-31 server, captured in the README.
      2026-07-12). Check its `/sep31/info` first: an empty `receive` list means
      quotes/auth/KYC work but a money-moving transaction cannot be opened there
      that day.
-   - **Self-hosted Anchor Platform reference server** (Docker) — full control
+   - **Self-hosted Anchor Platform reference server** (podman) — full control
      of the receive side; required if the public anchor exposes no receivable
      asset. Read its `stellar.toml` for the `DIRECT_PAYMENT_SERVER`,
-     `WEB_AUTH_ENDPOINT`, `KYC_SERVER`, `QUOTE_SERVER`.
+     `WEB_AUTH_ENDPOINT`, `KYC_SERVER`, `ANCHOR_QUOTE_SERVER`.
 2. **Fund a testnet distribution account** (Friendbot) and trustline the bridge
    asset. Keep the secret in `CORRIDOR_SIGNER_SECRET` (testnet only).
 3. **Smoke-test read-only first** with the opt-in integration suite (see
@@ -51,11 +54,12 @@ Anchor Platform reference server up locally, so option 2 above needs no
 agreement with anybody. It needs `podman`; everything is testnet.
 
 ```bash
-scripts/reference-anchor.sh up      # start, wait for SEP-1 to serve
-scripts/reference-anchor.sh doctor  # is the stack fit to run a corridor?
-scripts/reference-anchor.sh status  # what is running
-scripts/reference-anchor.sh logs    # tail ap-sep (pass a name for another)
-scripts/reference-anchor.sh down    # tear it all down
+scripts/reference-anchor.sh up             # start, wait for SEP-1 to serve
+scripts/reference-anchor.sh doctor         # is the stack fit to run a corridor?
+scripts/reference-anchor.sh status         # what is running
+scripts/reference-anchor.sh logs           # tail ap-sep (pass a name for another)
+scripts/reference-anchor.sh logs-dump [dir] # non-following dump of all container logs (used by CI on failure)
+scripts/reference-anchor.sh down           # tear it all down
 ```
 
 #### `doctor` - check before you run, not after
