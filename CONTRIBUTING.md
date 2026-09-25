@@ -61,6 +61,18 @@ under ~72 characters and explain the _why_ in the body.
 - Widen the SEP-31 status mapping in `packages/sep31` as you hit real anchors that
   report statuses we don't yet classify (see `mapSep31Status`).
 
+## Keeping docs in sync
+
+| If you change X          | Also update Y                                                                                         |
+| ------------------------ | ----------------------------------------------------------------------------------------------------- |
+| New error code           | `packages/service/src/index.ts` STATUS_BY_CODE, `web/lib/docs.ts` HTTP API page, `docs/operations.md` |
+| New package              | README tree and web Architecture page                                                                 |
+| New env var              | `.env.example`                                                                                        |
+| Corridor liveness change | README tables, ROADMAP, grant-proposal                                                                |
+| Any merged PR            | CHANGELOG Unreleased                                                                                  |
+
+Note that `web/lib/docs.ts` duplicates README content by hand.
+
 ## License
 
 By contributing you agree that your contributions are licensed under the
