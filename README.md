@@ -88,11 +88,16 @@ Three boundaries do the work:
 Picking the destination is the binding constraint, not the code. SEP-31 needs a
 _live receiving anchor_ on the destination side, so corridors ship in this order:
 
-| Stage  | Corridor                                                              | Why                                                                                                                                                                                                                                                                |
-| ------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet)        | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.**                                                                                                                                 |
-| **#1** | `mx-example.corridor.yaml` (Mexico) — **a template, not a live lane** | Shows the shape of a real corridor. **Every endpoint in it is fictional** and `corridor plan` reports it `UNVERIFIED`. Becomes real when an anchor relationship exists: replace the URLs from the anchor's published stellar.toml and set `endpoints_verified_at`. |
-| later  | `ng-cn.corridor.yaml` (Nigeria → China)                               | The headline case study, **not** corridor #1. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else.                                                                                         |
+| Stage  | Corridor                                                                           | Why                                                                                                                                                                                                      |
+| ------ | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet)                     | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.**                                                                       |
+| **#1** | `ng-cowrie.corridor.yaml` (USD → NGN via Cowrie Exchange) — **VERIFIED endpoints** | First real lane. Endpoints confirmed 2026-08-11 via `@corridor/probe`. `quote_source: external` (no SEP-38). No payment attempted, no business relationship in place — see the manifest's `status_note`. |
+| later  | `ng-cn.corridor.yaml` (Nigeria → China)                                            | The headline case study. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else.                                                    |
+
+> **Template**: `mx-example.corridor.yaml` (Mexico) shows the _shape_ of a real
+> corridor but **every endpoint in it is fictional** — `corridor plan` reports it
+> `UNVERIFIED`. It becomes real when an anchor relationship exists: replace the
+> URLs from the anchor's published `stellar.toml` and set `endpoints_verified_at`.
 
 The CLI makes the constraint visible. `ng-cn` validates structurally, but:
 
