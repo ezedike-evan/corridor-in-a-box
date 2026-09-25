@@ -29,7 +29,16 @@ export type CorridorErrorCode =
   | "REFUND_UNSUPPORTED"
   | "RECONCILE_MISMATCH"
   | "RECONCILE_STALLED"
-  | "IDEMPOTENCY_CONFLICT";
+  | "IDEMPOTENCY_CONFLICT"
+  /** our balance cannot cover amount + fee + reserve */
+  | "PRESETTLE_INSUFFICIENT_FUNDS";
+
+/**
+ * Returns true if the error code is a pre-settle gate check refusal.
+ */
+export function isPreSettleCode(code: string): boolean {
+  return code.startsWith("PRESETTLE_");
+}
 
 export interface CorridorError {
   readonly code: CorridorErrorCode;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { constantTimeEqual } from "@corridor/types";
+import { constantTimeEqual, isPreSettleCode, type CorridorErrorCode } from "@corridor/types";
 
 describe("constantTimeEqual", () => {
   it("returns true for identical strings", () => {
@@ -22,3 +22,23 @@ describe("constantTimeEqual", () => {
     expect(constantTimeEqual("", "")).toBe(true);
   });
 });
+
+describe("isPreSettleCode", () => {
+  it("returns true for PRESETTLE_INSUFFICIENT_FUNDS", () => {
+    expect(isPreSettleCode("PRESETTLE_INSUFFICIENT_FUNDS")).toBe(true);
+  });
+
+  it("returns false for non-presettle codes", () => {
+    const nonPreSettleCodes: CorridorErrorCode[] = [
+      "MANIFEST_INVALID",
+      "AMOUNT_INVALID",
+      "QUOTE_UNAVAILABLE",
+      "SETTLEMENT_FAILED",
+      "SETTLEMENT_TIMEOUT",
+    ];
+    for (const code of nonPreSettleCodes) {
+      expect(isPreSettleCode(code)).toBe(false);
+    }
+  });
+});
+

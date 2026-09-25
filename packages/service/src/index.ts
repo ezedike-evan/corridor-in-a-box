@@ -104,6 +104,7 @@ const STATUS_BY_CODE: Record<CorridorErrorCode, number> = {
   RECONCILE_MISMATCH: 500,
   RECONCILE_STALLED: 504,
   IDEMPOTENCY_CONFLICT: 409,
+  PRESETTLE_INSUFFICIENT_FUNDS: 422,
 };
 
 /** Token-bucket rate limiter, keyed per client. In-memory; swap for Redis at scale. */

@@ -33,6 +33,16 @@ contract itself rejected the attestation, the error carries its number as
 The error `code` and message text are unchanged, so existing callers keep
 working.
 
+### Added — Gate check: balance covers amount, fee and minimum reserve (#151) (2026-09-25)
+
+Added `balanceCheck(inspector, signerPublicKey, opts?)` GateCheck (name `chain.balance`) in `@corridor/stellar`:
+- Minimum reserve = `(2 + subentry_count + num_sponsoring − num_sponsored) × base_reserve`, computed strictly with `@corridor/types` decimal money helpers, never floats.
+- Exposes `fee` from `StellarSettlementSubmitter` rather than duplicating `BASE_FEE`.
+- Refuses before signing unless bridge asset balance − selling liabilities ≥ amount, and XLM balance − selling liabilities − minimum reserve ≥ fee (plus amount when bridge asset is XLM).
+- Reports `PRESETTLE_INSUFFICIENT_FUNDS` with required vs available in `detail`.
+- Added `AccountInspector` read-only Horizon inspector and typed account facts in `@corridor/stellar`.
+
+
 ### Security — soroban-sdk 25 → 27 clears GHSA-x57h-xx53-v53w (2026-08-31)
 
 `contracts/Cargo.lock` pinned `stellar-xdr@25.0.0`, which carries a moderate
