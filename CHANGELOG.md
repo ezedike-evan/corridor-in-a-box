@@ -16,6 +16,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   rather than a release comparison. The historical 0.1.0 section below remains
   unlinked until its release commit can be tagged.
 
+### Changed — attester rejections carry a typed contract error code (2026-09-24)
+
+`AnchorAttester.attest` turned an attester-contract revert into a message such
+as "too soon: this domain was attested within the cooldown window (contract
+error #3)", and `examples/attest.ts` decided whether to fail the job by
+checking that message for the word "cooldown". Rewording the message would
+have silently turned every cooldown hit into a job failure (or the reverse).
+
+`@corridor/attester` now exports `AttesterContractError` (mirroring the
+contract's `enum Error`: `NotInitialised = 1`, `NotAnAttester = 2`,
+`TooSoon = 3`, `InvalidDomain = 4`) and an `AttesterError` type: when the
+contract itself rejected the attestation, the error carries its number as
+`contractError`. `explain()` is exported and returns `{ code?, message }`.
+`examples/attest.ts` now checks `contractError === AttesterContractError.TooSoon`.
+The error `code` and message text are unchanged, so existing callers keep
+working.
+
 ### Security — soroban-sdk 25 → 27 clears GHSA-x57h-xx53-v53w (2026-08-31)
 
 `contracts/Cargo.lock` pinned `stellar-xdr@25.0.0`, which carries a moderate

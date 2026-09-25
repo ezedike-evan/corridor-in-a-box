@@ -13,7 +13,7 @@
 import { readFileSync } from "node:fs";
 import { Keypair } from "@stellar/stellar-sdk";
 import { probeAnchor, decodeProbes, decodeSeps } from "@corridor/probe";
-import { AnchorAttester } from "@corridor/attester";
+import { AnchorAttester, AttesterContractError } from "@corridor/attester";
 
 interface Deployments {
   [network: string]: {
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
     } else {
       // A cooldown rejection is the system working, not a failure of the job —
       // don't fail the run over it.
-      const cooldown = submitted.error.message.includes("cooldown");
+      const cooldown = submitted.error.contractError === AttesterContractError.TooSoon;
       console.log(
         `  ${cooldown ? "•" : "✗"} ${submitted.error.code}: ${submitted.error.message}\n`,
       );
