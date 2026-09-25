@@ -125,14 +125,36 @@ Body is a \`PaymentIntent\`:
 }
 \`\`\`
 
-Status mapping: \`200\` completed · \`409\` idempotency conflict / quote issues ·
-\`403\` KYC rejected · \`422\` invalid amount · \`502/504\` anchor/settlement ·
-\`401\` missing API key · \`429\` rate limited.
+## Status code mapping
+
+| Status | Error / Condition | Description |
+|---|---|---|
+| \`200\` | — | Payment completed successfully, run state returned, health check ok, or metrics rendered |
+| \`400\` | \`invalid payment body\`, \`invalid JSON\` | Malformed JSON or invalid \`PaymentIntent\` body structure |
+| \`401\` | \`unauthorized\` | Missing or invalid Bearer API key |
+| \`403\` | \`KYC_REJECTED\` | Receiving anchor rejected customer KYC |
+| \`404\` | \`unknown corridor\`, \`not found\` | Unknown corridor ID, run key not found (or foreign tenant key), or unmatched route |
+| \`409\` | \`IDEMPOTENCY_CONFLICT\` | Replay with conflicting parameters or in-flight payment with same key |
+| \`409\` | \`QUOTE_EXPIRED\` | Anchor quote expired before settlement could begin |
+| \`409\` | \`KYC_REQUIRED\` | Customer KYC incomplete or customer action required |
+| \`413\` | \`payload too large\` | Request body exceeds \`maxBodyBytes\` cap (default 64 KiB) |
+| \`422\` | \`AMOUNT_INVALID\` | Amount is not a positive decimal or cannot be settled |
+| \`422\` | \`MANIFEST_INVALID\` | Corridor manifest validation failed |
+| \`429\` | \`rate_limited\` | Token-bucket rate limit exceeded for client IP or API key |
+| \`500\` | \`SETTLEMENT_FAILED\` | On-chain Stellar payment transaction failed |
+| \`500\` | \`RECONCILE_MISMATCH\` | Settled amounts or assets do not match anchor transaction record |
+| \`500\` | \`internal\` | Unexpected server error or unhandled failure fallback |
+| \`501\` | \`REFUND_UNSUPPORTED\` | Payment failed and anchor does not support refund |
+| \`502\` | \`QUOTE_UNAVAILABLE\` | Origin or destination anchor failed to provide a quote |
+| \`502\` | \`ANCHOR_UNAVAILABLE\` | Upstream anchor service unreachable or returned an upstream error |
+| \`504\` | \`SETTLEMENT_TIMEOUT\` | Stellar network submission timed out |
+| \`504\` | \`RECONCILE_STALLED\` | Anchor transaction polling timed out |
 
 ## Other endpoints
 
-- \`GET /payments/:key\` — current run state.
+- \`GET /payments/:key\` — current run state (scoped to authenticated tenant).
 - \`GET /healthz\` — liveness (public, unmetered).
+- \`GET /metrics\` — Prometheus text exposition format (public, unmetered; served when \`metricsText\` is configured).
 
 Optional bearer **API-key** auth and an in-memory **token-bucket** rate limiter
 are configured on the service context.
