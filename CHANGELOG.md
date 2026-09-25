@@ -16,6 +16,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   rather than a release comparison. The historical 0.1.0 section below remains
   unlinked until its release commit can be tagged.
 
+### Added — Pre-settle gate and corridor-halt error codes (#139) (2026-09-25)
+
+Added 9 dedicated pre-settle gate and circuit breaker error codes to `CorridorErrorCode`:
+
+- `PRESETTLE_ANCHOR_DRIFT` — live /info or stellar.toml no longer matches what was verified
+- `PRESETTLE_TX_MISMATCH` — the opened anchor transaction is not what we are about to pay
+- `PRESETTLE_DESTINATION_UNSAFE` — destination missing, no trustline, or not authorized
+- `PRESETTLE_INSUFFICIENT_FUNDS` — our balance cannot cover amount + fee + reserve
+- `PRESETTLE_QUOTE_WINDOW` — firm quote will not survive settle + confirm
+- `PRESETTLE_AMOUNT_OUT_OF_RANGE` — outside anchor or manifest min/max
+- `PRESETTLE_RECEIVER_NOT_ACCEPTED` — SEP-12 status is no longer ACCEPTED
+- `CORRIDOR_UNPROVEN` — amount above the canary cap on a non-PROVEN lane
+- `CORRIDOR_HALTED` — per-corridor circuit breaker is open
+
+Added helper `isPreSettleCode(code): boolean` in `@corridor/types` and mapped the error codes in `@corridor/service` HTTP router.
+
 ### Security — soroban-sdk 25 → 27 clears GHSA-x57h-xx53-v53w (2026-08-31)
 
 `contracts/Cargo.lock` pinned `stellar-xdr@25.0.0`, which carries a moderate
