@@ -51,16 +51,18 @@ describe("audit trail", () => {
       idempotency: new InMemoryIdempotencyStore(),
       audit,
       now: () => 1700000000000,
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(intent, corridor(), deps);
     expect(r.ok).toBe(true);
 
-    // created -> quoted -> compliant -> opened -> settling -> settled
-    //   -> reconciled -> completed = 7 transitions
+    // created -> quoted -> compliant -> opened -> verifying -> settling
+    //   -> settled -> reconciled -> completed = 8 transitions
     expect(audit.entries.map((e) => e.to)).toEqual([
       "quoted",
       "compliant",
       "opened",
+      "verifying",
       "settling",
       "settled",
       "reconciled",
@@ -85,6 +87,7 @@ describe("audit trail", () => {
       submitter: createMockSubmitter(),
       idempotency: new InMemoryIdempotencyStore(),
       audit,
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(intent, corridor(), deps);
     expect(r.ok).toBe(false);
@@ -210,6 +213,7 @@ describe("reconcile polling observability", () => {
       idempotency: new InMemoryIdempotencyStore(),
       logger,
       metrics,
+      unsafeSkipPreSettleGate: true,
     };
 
     const r = await execute(intent, corridor(), deps);

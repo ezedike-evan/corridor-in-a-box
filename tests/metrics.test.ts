@@ -48,6 +48,7 @@ function deps(metrics: InMemoryMetrics, adapterOpts = {}): EngineDeps {
     idempotency: new InMemoryIdempotencyStore(),
     metrics,
     sleep: async () => {},
+    unsafeSkipPreSettleGate: true,
   };
 }
 
@@ -63,8 +64,10 @@ describe("metrics", () => {
     }
     expect(timingNames).toContain("corridor.duration");
 
-    // 7 transitions counted
-    expect(m.counters.filter((c) => c.name === "corridor.transition")).toHaveLength(7);
+    // 8 transitions counted, including the pre-settle `verifying` gate
+    const transitions = m.counters.filter((c) => c.name === "corridor.transition");
+    expect(transitions).toHaveLength(8);
+    expect(transitions.map((c) => c.tags?.to)).toContain("verifying");
     const terminal = m.counters.find((c) => c.name === "corridor.terminal");
     expect(terminal?.tags?.state).toBe("completed");
   });

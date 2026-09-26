@@ -51,6 +51,7 @@ function deps(store: InMemoryIdempotencyStore): EngineDeps {
     submitter: createMockSubmitter(),
     idempotency: store,
     sleep: async () => {},
+    unsafeSkipPreSettleGate: true,
   };
 }
 
@@ -109,6 +110,7 @@ describe("concurrent claim", () => {
       submitter: counting,
       idempotency: store,
       sleep: async () => {},
+      unsafeSkipPreSettleGate: true,
     };
 
     const [a, b] = await Promise.all([

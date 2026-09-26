@@ -1,4 +1,4 @@
-﻿// Crash-resume integration test: kill after settled, resume to completed
+// Crash-resume integration test: kill after settled, resume to completed
 // against a real anchor.
 //
 // This test exercises the exact path most likely to be wrong in production:
@@ -137,7 +137,12 @@ describe.skipIf(!hasAnchor)("crash-resume (live anchor, in-memory store)", () =>
     };
 
     // First run: complete normally
-    const firstRun = await execute(intent, c, { resolver, submitter, idempotency: store });
+    const firstRun = await execute(intent, c, {
+      resolver,
+      submitter,
+      idempotency: store,
+      unsafeSkipPreSettleGate: true,
+    });
 
     if (!firstRun.ok) {
       console.warn(
@@ -165,7 +170,12 @@ describe.skipIf(!hasAnchor)("crash-resume (live anchor, in-memory store)", () =>
     });
 
     // Second execute() with same key: must resume, never re-settle
-    const secondRun = await execute(intent, c, { resolver, submitter, idempotency: store });
+    const secondRun = await execute(intent, c, {
+      resolver,
+      submitter,
+      idempotency: store,
+      unsafeSkipPreSettleGate: true,
+    });
 
     expect(secondRun.ok).toBe(true);
     if (secondRun.ok) {
@@ -215,7 +225,12 @@ describe.skipIf(!hasAnchor || !hasDb)("crash-resume (live anchor + Postgres)", (
     };
 
     // First execute: run through to completion
-    const firstRun = await execute(intent, c, { resolver, submitter, idempotency: store });
+    const firstRun = await execute(intent, c, {
+      resolver,
+      submitter,
+      idempotency: store,
+      unsafeSkipPreSettleGate: true,
+    });
 
     if (!firstRun.ok) {
       console.warn(
@@ -244,7 +259,12 @@ describe.skipIf(!hasAnchor || !hasDb)("crash-resume (live anchor + Postgres)", (
     expect(rowAfterRollback?.transactionId).toBe(txId);
 
     // Second execute() with same key: must resume from settled, not re-settle
-    const secondRun = await execute(intent, c, { resolver, submitter, idempotency: store });
+    const secondRun = await execute(intent, c, {
+      resolver,
+      submitter,
+      idempotency: store,
+      unsafeSkipPreSettleGate: true,
+    });
 
     expect(secondRun.ok).toBe(true);
     if (secondRun.ok) {

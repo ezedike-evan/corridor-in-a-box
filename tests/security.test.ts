@@ -53,6 +53,7 @@ function service(opts: {
       resolver: new StaticRouteResolver(() => createMockAdapter()),
       idempotency: opts.store ?? new InMemoryIdempotencyStore(),
       submitter: opts.submitter ?? recordingSubmitter().submitter,
+      unsafeSkipPreSettleGate: true,
     },
   });
 }

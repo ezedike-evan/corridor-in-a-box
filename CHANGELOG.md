@@ -7,6 +7,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Breaking — Pre-settle gate mandatory by default with explicit named opt-out (2026-09-25)
+
+The pre-settle gate is now mandatory before settlement execution. In `EngineDeps`, callers must supply either `gate: PreSettleGate` (e.g. `defaultSep31Gate()`) or explicitly opt out with `unsafeSkipPreSettleGate: true`. If neither is provided, `execute()` fails fast immediately with error code `ENGINE_MISCONFIGURED` before claiming the idempotency key (ensuring no run row is persisted).
+
+When opted out via `unsafeSkipPreSettleGate: true`, the engine passes through the `verifying` state, emits a warning log, and records a synthetic `gate.skipped` check on the transition audit entry. The `CompositeGate` runs checks concurrently, fail-closed, recording results on the `AuditEntry` and incrementing the `corridor.gate.check` metric.
+
+### Added — `verifying` state between `opened` and `settling` (2026-09-25)
+
+The engine moved straight from `opened` to `settling`, so a pre-settle gate done
+inside `opened` would have been invisible in the trail — `opened -> failed` could
+mean either "the anchor rejected the open" or "we refused to pay" — and it would
+have run only once, while a retry re-entered `settling` after a backoff during
+which balances, quote validity and anchor status can all change.
+
+`verifying` makes the gate an auditable fact and, more importantly, an
+unskippable one. `settling` is now reachable ONLY from `verifying`, so a
+control-flow bug in `run.ts` cannot bypass it — the same "unreachable by
+construction" argument the recovery states already make. `opened` and `retrying`
+lost their direct edges into `settling`; every attempt walks
+`opened -> verifying -> settling` on the first pass and
+`retrying -> verifying -> settling` after a retry. A refusal is `failed`, never
+`recovering`, because no money has moved and there is nothing to unwind. The gate
+checks themselves (quote validity, balances, anchor status) land in a follow-up;
+this change is the state-machine wiring and its property tests.
+
 ### Security — soroban-sdk 25 → 27 clears GHSA-x57h-xx53-v53w (2026-08-31)
 
 `contracts/Cargo.lock` pinned `stellar-xdr@25.0.0`, which carries a moderate

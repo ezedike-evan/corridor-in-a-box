@@ -44,7 +44,7 @@ See [CONTRIBUTING](./CONTRIBUTING.md), [SECURITY](./SECURITY.md), and the
 `pnpm example` walks a payment through every state and proves idempotency:
 
 ```
-created -> quoted -> compliant -> opened -> settling -> settled -> reconciled -> completed
+created -> quoted -> compliant -> opened -> verifying -> settling -> settled -> reconciled -> completed
 replay with same key -> idempotent return (state=completed)
 ```
 
@@ -186,7 +186,7 @@ USDC trustline and balance, and `pnpm testnet` drives a payment across it.
 A captured run on **2026-08-08**, corridor `reference-testnet`:
 
 ```
-created → quoted → compliant → opened → settling → settled → (polling reconcile)
+created → quoted → compliant → opened → verifying → settling → settled → (polling reconcile)
 ```
 
 Every leg below happened against the anchor and is visible in _its_ logs, not
@@ -280,6 +280,9 @@ Swap the mocks for the real implementations (both ship in this repo):
   durable, crash-resumable run log (run `migrate(pool)` once at startup).
 - Pass an `audit` sink (and a `logger`) to `execute()` so every state transition
   is recorded.
+- Provide `gate: defaultSep31Gate(...)` (or a custom `PreSettleGate`) to `execute()`.
+  Pre-settle safety checks are mandatory by default before money moves on chain
+  (`unsafeSkipPreSettleGate: true` is strictly an explicit opt-out for tests).
 
 Then point a manifest at the testnet reference server and run it for real. The
 proprietary `RouteResolver` is the one piece injected from the private repo.

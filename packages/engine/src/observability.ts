@@ -4,6 +4,7 @@
 // audit entry. Both sinks are injected; the engine never reaches for a global.
 
 import type { CorridorState } from "./state";
+import type { CheckResult } from "./gate";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -30,7 +31,7 @@ export const consoleLogger: Logger = {
 export const silentLogger: Logger = { log() {} };
 
 /** One immutable record of a single state transition. */
-export interface AuditEntry {
+export interface AuditEntry extends LogFields {
   readonly idempotencyKey: string;
   readonly corridorId: string;
   readonly from: CorridorState;
@@ -38,6 +39,7 @@ export interface AuditEntry {
   readonly version: number;
   readonly at: number;
   readonly error?: string;
+  readonly checks?: readonly CheckResult[];
 }
 
 export interface AuditSink {

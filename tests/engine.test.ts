@@ -13,6 +13,7 @@ import {
   type CorridorState,
   type EngineDeps,
   type SettlementSubmitter,
+  type PreSettleGate,
 } from "@corridor/engine";
 import type { TransactionStatus } from "@corridor/adapter-kit";
 import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
@@ -53,6 +54,7 @@ function deps(adapterOpts = {}): EngineDeps {
     resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts)),
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
+    unsafeSkipPreSettleGate: true,
   };
 }
 
@@ -68,6 +70,7 @@ describe("engine.execute", () => {
         "quoted",
         "compliant",
         "opened",
+        "verifying",
         "settling",
         "settled",
         "reconciled",
@@ -113,6 +116,7 @@ describe("engine.execute", () => {
       idempotency: new InMemoryIdempotencyStore(),
       now,
       sleep,
+      unsafeSkipPreSettleGate: true,
     });
 
     expect(r.ok).toBe(false);
@@ -179,6 +183,7 @@ describe("engine recovery", () => {
       submitter: createMockSubmitter({ failSubmit: true }),
       idempotency: new InMemoryIdempotencyStore(),
       sleep: async () => {},
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(
       intent(),
@@ -208,6 +213,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(
       intent(),
@@ -314,6 +320,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(
       intent("awaiting-input"),
@@ -344,6 +351,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      unsafeSkipPreSettleGate: true,
     };
     const i = intent();
     await execute(
@@ -380,6 +388,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      unsafeSkipPreSettleGate: true,
     });
     const c = corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" });
     const i = intent();
@@ -422,6 +431,7 @@ describe("engine recovery", () => {
       // A long timeout: if the engine waited it out instead of bailing, the test
       // would still pass on the error code — so assert it polled only once.
       reconcilePollMs: 500,
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(
       intent("terminal-1"),
@@ -457,6 +467,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      unsafeSkipPreSettleGate: true,
     };
     const store = d.idempotency!;
     const r = await execute(
@@ -476,6 +487,7 @@ describe("engine recovery", () => {
       submitter: createMockSubmitter({ failSubmit: true }),
       idempotency: new InMemoryIdempotencyStore(),
       sleep: async () => {},
+      unsafeSkipPreSettleGate: true,
     };
     const store = d.idempotency!;
     const r = await execute(
@@ -587,7 +599,7 @@ describe("state machine", () => {
     expect(canTransition("completed", "settling")).toBe(false);
   });
 
-  it("routes the settle retry loop through `retrying`, not `recovering`", () => {
+  it("routes the settle retry loop through retrying and verifying, not recovering", () => {
     // These were one state, and this test used to assert
     // `canTransition("recovering", "settling") === true` — which, combined with
     // `settled -> recovering`, made `settled -> recovering -> settling` a legal
@@ -595,7 +607,12 @@ describe("state machine", () => {
     // test walking the graph found it. The two kinds of recovery are now
     // distinct so the double-spend is unreachable by construction.
     expect(canTransition("settling", "retrying")).toBe(true);
-    expect(canTransition("retrying", "settling")).toBe(true);
+
+    // A retry re-enters through the gate, never straight back into submit.
+    expect(canTransition("retrying", "verifying")).toBe(true);
+    expect(canTransition("verifying", "settling")).toBe(true);
+    expect(canTransition("retrying", "settling")).toBe(false);
+    expect(canTransition("opened", "settling")).toBe(false);
 
     // `recovering` is terminal-bound and cannot get back to the chain.
     expect(canTransition("recovering", "settling")).toBe(false);
@@ -671,6 +688,7 @@ function refundHarness(
         t += ms;
       },
       reconcilePollMs: 500,
+      unsafeSkipPreSettleGate: true,
     },
   };
 }
@@ -693,6 +711,7 @@ describe("engine refund path", () => {
       "quoted",
       "compliant",
       "opened",
+      "verifying",
       "settling",
       "settled",
       "recovering",
@@ -793,5 +812,142 @@ describe("engine refund path", () => {
     const afterRecovering = h.trail().slice(h.trail().indexOf("recovering"));
     expect(afterRecovering).not.toContain("settling");
     expect(afterRecovering).not.toContain("retrying");
+  });
+});
+
+describe("pre-settle gate enforcement", () => {
+  it("fails fast with ENGINE_MISCONFIGURED and creates no run record when neither gate nor opt-out is provided", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const r = await execute(intent("no-gate"), corridor(), {
+      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      submitter: createMockSubmitter(),
+      idempotency: store,
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("ENGINE_MISCONFIGURED");
+      expect(r.error.retryable).toBe(false);
+    }
+    // Verify no run was persisted in the store
+    const stored = await store.get("no-gate");
+    expect(stored).toBeUndefined();
+  });
+
+  it("records gate.skipped check and logs a warning when unsafeSkipPreSettleGate is enabled", async () => {
+    const audit = new InMemoryAuditLog();
+    const warnings: string[] = [];
+    const r = await execute(intent("skipped-gate"), corridor(), {
+      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      submitter: createMockSubmitter(),
+      idempotency: new InMemoryIdempotencyStore(),
+      audit,
+      unsafeSkipPreSettleGate: true,
+      logger: {
+        log(level, msg) {
+          if (level === "warn") warnings.push(msg);
+        },
+      },
+    });
+
+    expect(r.ok).toBe(true);
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0]).toContain("unsafeSkipPreSettleGate");
+
+    const verifyingEntry = audit.entries.find((e) => e.to === "verifying");
+    expect(verifyingEntry).toBeDefined();
+    expect(verifyingEntry?.checks).toBeDefined();
+    expect(verifyingEntry?.checks?.[0]).toEqual({
+      name: "gate.skipped",
+      passed: true,
+      detail: "unsafeSkipPreSettleGate",
+      durationMs: 0,
+    });
+  });
+
+  it("fails in verifying state and does not call submitter.submit when a gate check fails", async () => {
+    let submitCalled = false;
+    const audit = new InMemoryAuditLog();
+    const store = new InMemoryIdempotencyStore();
+    const failingGate: PreSettleGate = {
+      evaluate: async () => ({
+        passed: false,
+        results: [
+          {
+            name: "test.check",
+            passed: false,
+            detail: "simulated gate failure",
+            code: "PRESETTLE_ANCHOR_DRIFT",
+            durationMs: 5,
+          },
+        ],
+      }),
+    };
+
+    const r = await execute(intent("failing-gate"), corridor(), {
+      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      submitter: {
+        submit: async () => {
+          submitCalled = true;
+          return fail("SETTLEMENT_FAILED", "should not be called", { retryable: false });
+        },
+        refund: async () => fail("SETTLEMENT_FAILED", "not reached", { retryable: false }),
+      },
+      idempotency: store,
+      audit,
+      gate: failingGate,
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("PRESETTLE_ANCHOR_DRIFT");
+    }
+    expect(submitCalled).toBe(false);
+
+    const stored = await store.get("failing-gate");
+    expect(stored?.state).toBe("failed");
+    expect(stored?.lastError).toContain("PRESETTLE_ANCHOR_DRIFT");
+
+    const verifyingEntry = audit.entries.find((e) => e.to === "verifying");
+    expect(verifyingEntry?.checks).toHaveLength(1);
+    expect(verifyingEntry?.checks?.[0].passed).toBe(false);
+  });
+
+  it("re-evaluates gate after retry", async () => {
+    let gateEvaluations = 0;
+    let submitCalls = 0;
+    const dynamicGate: PreSettleGate = {
+      evaluate: async () => {
+        gateEvaluations++;
+        return {
+          passed: true,
+          results: [{ name: "gate.dynamic", passed: true, detail: "ok", durationMs: 1 }],
+        };
+      },
+    };
+
+    const submitter: SettlementSubmitter = {
+      submit: async () => {
+        submitCalls++;
+        if (submitCalls === 1) {
+          return fail("SETTLEMENT_FAILED", "transient failure", { retryable: true });
+        }
+        return ok({ stellarTxHash: "0xabc", anchorTxId: "tx-123" });
+      },
+      refund: async () => fail("SETTLEMENT_FAILED", "not reached", { retryable: false }),
+    };
+
+    const r = await execute(intent("gate-retry"), corridorWith({ max_retries: 2 }), {
+      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      submitter,
+      idempotency: new InMemoryIdempotencyStore(),
+      gate: dynamicGate,
+      sleep: async () => {},
+    });
+
+    expect(r.ok).toBe(true);
+    expect(submitCalls).toBe(2);
+    // Gate was evaluated before first settle and re-evaluated before retry settle
+    expect(gateEvaluations).toBe(2);
   });
 });

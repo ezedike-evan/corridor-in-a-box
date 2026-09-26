@@ -180,6 +180,7 @@ describe.skipIf(!hasAnchor)("SEP-31 live anchor (settlement)", () => {
           horizonUrl: env.HORIZON_URL || "https://horizon-testnet.stellar.org",
         }),
         idempotency: store,
+        unsafeSkipPreSettleGate: true,
       };
 
       const settlementIntent: PaymentIntent = {

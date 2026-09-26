@@ -15,6 +15,7 @@ const ALL: CorridorState[] = [
   "quoted",
   "compliant",
   "opened",
+  "verifying",
   "settling",
   "retrying",
   "settled",
@@ -30,13 +31,22 @@ const ALL: CorridorState[] = [
 const successors = (s: CorridorState): CorridorState[] =>
   ALL.filter((to) => canTransition(s, to));
 
-/** Every state reachable from `start`, by breadth-first search. */
-function reachableFrom(start: CorridorState): Set<CorridorState> {
+/**
+ * Every state reachable from `start`, by breadth-first search. `skip` removes
+ * states (and any edge into them) from the graph, which lets a property ask
+ * "can this target still be reached without passing through the gate?".
+ */
+function reachableFrom(
+  start: CorridorState,
+  skip: ReadonlySet<CorridorState> = new Set<CorridorState>(),
+): Set<CorridorState> {
   const seen = new Set<CorridorState>();
   const queue: CorridorState[] = [start];
   while (queue.length) {
     const s = queue.shift()!;
+    if (skip.has(s)) continue;
     for (const next of successors(s)) {
+      if (skip.has(next)) continue;
       if (!seen.has(next)) {
         seen.add(next);
         queue.push(next);
@@ -169,12 +179,51 @@ describe("state machine structure", () => {
     expect(entrances).toEqual(["settling"]);
   });
 
-  it("only retrying can re-enter settling", () => {
-    // Retry exists and is intended, but it must go through `retrying`, which is
-    // reachable only from a settle that failed BEFORE money moved. `recovering`
-    // — which a post-settlement failure enters — deliberately cannot get back.
+  it("only verifying can enter settling", () => {
+    // `settling` is the state that submits money, and the gate is the only door
+    // into it. `opened` and `retrying` deliberately lost their direct edges:
+    // with a single entrance, "did the gate run?" is answerable from the table
+    // alone rather than by reading run.ts.
     const entrances = ALL.filter((s) => canTransition(s, "settling")).sort();
-    expect(entrances).toEqual(["opened", "retrying"]);
+    expect(entrances).toEqual(["verifying"]);
+  });
+
+  it("retrying re-enters settling only through verifying", () => {
+    // Retry exists and is intended, but a retry must re-verify: the backoff
+    // gives balances, the firm quote and the anchor's state time to change, so
+    // every attempt goes through the gate rather than straight back to submit.
+    expect(canTransition("retrying", "verifying")).toBe(true);
+    expect(canTransition("retrying", "settling")).toBe(false);
+  });
+
+  // --- the pre-settle gate ------------------------------------------------
+
+  it("every path from created to settling passes through verifying", () => {
+    // Remove `verifying` from the graph: if `settling` is still reachable, some
+    // walk skips the gate. Since `verifying` is the only entrance, deleting it
+    // must close the door — the "unreachable by construction" property, checked
+    // over all paths rather than the direct edge alone.
+    const withoutGate = reachableFrom("created", new Set<CorridorState>(["verifying"]));
+    expect(
+      withoutGate.has("settling"),
+      "settling is reachable without passing through verifying",
+    ).toBe(false);
+
+    // Control: with the gate present, settling IS reachable from created.
+    expect(reachableFrom("created").has("settling")).toBe(true);
+  });
+
+  it("verifying refuses without recovering", () => {
+    // Its only successors are `settling` and `failed`: a gate refusal is a
+    // terminal-bound `failed`, never `recovering`, because no money has moved
+    // and there is nothing to unwind.
+    expect(successors("verifying").sort()).toEqual(["failed", "settling"]);
+    expect(canTransition("verifying", "recovering")).toBe(false);
+  });
+
+  it("opened can no longer settle directly", () => {
+    expect(canTransition("opened", "verifying")).toBe(true);
+    expect(canTransition("opened", "settling")).toBe(false);
   });
 
   it("completed is only reachable after reconciliation", () => {
@@ -220,6 +269,7 @@ describe("state machine structure", () => {
       "quoted",
       "compliant",
       "opened",
+      "verifying",
       "settling",
       "settled",
       "reconciled",

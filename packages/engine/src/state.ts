@@ -8,6 +8,7 @@ export type CorridorState =
   | "quoted"
   | "compliant"
   | "opened"
+  | "verifying"
   | "settling"
   | "retrying"
   | "settled"
@@ -23,11 +24,20 @@ const NEXT: Record<CorridorState, readonly CorridorState[]> = {
   created: ["quoted", "failed"],
   quoted: ["compliant", "recovering", "failed"],
   compliant: ["opened", "recovering", "failed"],
-  opened: ["settling", "recovering", "failed"],
+  opened: ["verifying", "recovering", "failed"],
+  // The gate between "an open transaction exists" and "we are about to move
+  // money". `settling` is reachable ONLY from here, so a control-flow bug in
+  // run.ts cannot skip verification — the same "unreachable by construction"
+  // argument the recovery states below make. Every settle attempt re-enters
+  // here, first pass and retry alike (via `retrying`), because the balances,
+  // quote validity and anchor status a gate would check can all change during a
+  // backoff. A refusal is `failed`, never `recovering`: nothing has moved yet.
+  verifying: ["settling", "failed"],
   settling: ["settled", "retrying", "recovering", "failed"],
   // A settle attempt failed BEFORE money moved, so going round again is safe.
-  // This is the only state that may re-enter `settling`.
-  retrying: ["settling", "recovering", "failed"],
+  // The retry re-enters through `verifying`, never straight into `settling`, so
+  // every attempt passes the gate.
+  retrying: ["verifying", "recovering", "failed"],
   settled: ["reconciled", "recovering", "failed"],
   reconciled: ["completed", "failed"],
   completed: [],

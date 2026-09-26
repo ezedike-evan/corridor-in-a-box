@@ -28,10 +28,12 @@ import { backoffMs, comply, open, quote, recover, reconcileUntil, settle } from 
 import {
   noopMetrics,
   silentLogger,
+  type AuditEntry,
   type AuditSink,
   type Logger,
   type Metrics,
 } from "./observability";
+import type { CheckResult, GateContext, PreSettleGate } from "./gate";
 
 export interface EngineDeps {
   resolver: RouteResolver;
@@ -53,6 +55,13 @@ export interface EngineDeps {
   audit?: AuditSink;
   /** Counter/timing sink. Defaults to a no-op. */
   metrics?: Metrics;
+  /** Pre-settle gate evaluated before every settle attempt. Mandatory unless unsafeSkipPreSettleGate is set. */
+  gate?: PreSettleGate;
+  /**
+   * Explicit escape hatch skipping pre-settle verification.
+   * When true, execute() bypasses gate evaluation while recording `gate.skipped` in the audit log and emitting a warning.
+   */
+  unsafeSkipPreSettleGate?: boolean;
 }
 
 export interface RunResult {
@@ -95,6 +104,16 @@ export async function execute(
     metrics.timing(`corridor.verb.${name}`, now() - begin, { corridor: corridor.id });
     return r;
   };
+
+  // --- configuration guard: pre-settle gate is mandatory by default.
+  // Fail closed before claiming idempotency key (no run row persisted) unless
+  // an explicit opt-out is provided.
+  if (!deps.gate && deps.unsafeSkipPreSettleGate !== true) {
+    return fail(
+      "ENGINE_MISCONFIGURED",
+      "pre-settle gate is required; supply deps.gate or explicitly opt out with deps.unsafeSkipPreSettleGate = true",
+    );
+  }
 
   // --- input guard: never let a malformed or non-positive amount reach the
   // chain. `isSettleableAmount` and not `isValidAmount`: the latter is a syntax
@@ -173,7 +192,10 @@ export async function execute(
     );
   }
 
-  const advance = async (to: CorridorState): Promise<Outcome<void>> => {
+  const advance = async (
+    to: CorridorState,
+    checks?: readonly CheckResult[],
+  ): Promise<Outcome<void>> => {
     if (!canTransition(run.state, to)) {
       return fail("SETTLEMENT_FAILED", `illegal transition ${run.state} -> ${to}`);
     }
@@ -182,18 +204,18 @@ export async function execute(
     run.version += 1;
     trail.push(to);
     await store.put(run);
-    await emitTransition(deps, run, from, now());
+    await emitTransition(deps, run, from, now(), undefined, checks);
     return ok(undefined);
   };
 
-  const die = async (e: CorridorError): Promise<Err> => {
+  const die = async (e: CorridorError, checks?: readonly CheckResult[]): Promise<Err> => {
     const from = run.state;
     run.lastError = `${e.code}: ${e.message}`;
     run.state = "failed";
     run.version += 1;
     trail.push("failed");
     await store.put(run);
-    await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`);
+    await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`, checks);
     return { ok: false, error: e };
   };
 
@@ -314,6 +336,71 @@ export async function execute(
       });
     }
 
+    // Every attempt re-verifies. `settling` is reachable only from `verifying`
+    // (see state.ts), so entering the gate here — from `opened` on the first
+    // pass and from `retrying` after a backoff — is what keeps a settle from
+    // ever being submitted without it, by construction rather than by care.
+    let gateChecks: CheckResult[] = [];
+    if (deps.gate) {
+      const gateCtx: GateContext = {
+        intent,
+        corridor,
+        quote: q.value,
+        opened: opened.value,
+        now: now(),
+        attempt,
+      };
+      const gateResult = await timed("verify", () => deps.gate!.evaluate(gateCtx));
+      gateChecks = gateResult.results;
+      for (const check of gateChecks) {
+        metrics.increment("corridor.gate.check", {
+          name: check.name,
+          passed: String(check.passed),
+          corridor: corridor.id,
+        });
+      }
+      {
+        const t = await advance("verifying", gateChecks);
+        if (!t.ok) return die(t.error);
+      }
+      if (!gateResult.passed) {
+        const failure = gateChecks.find((r) => !r.passed)!;
+        return die(
+          {
+            code: failure.code ?? "SETTLEMENT_FAILED",
+            message: failure.detail,
+            retryable: false,
+          },
+          gateChecks,
+        );
+      }
+    } else {
+      const skippedCheck: CheckResult = {
+        name: "gate.skipped",
+        passed: true,
+        detail: "unsafeSkipPreSettleGate",
+        durationMs: 0,
+      };
+      gateChecks = [skippedCheck];
+      (deps.logger ?? silentLogger).log(
+        "warn",
+        "pre-settle gate skipped via unsafeSkipPreSettleGate",
+        {
+          idempotencyKey: run.idempotencyKey,
+          corridor: corridor.id,
+          attempt,
+        },
+      );
+      metrics.increment("corridor.gate.check", {
+        name: skippedCheck.name,
+        passed: "true",
+        corridor: corridor.id,
+      });
+      {
+        const t = await advance("verifying", gateChecks);
+        if (!t.ok) return die(t.error);
+      }
+    }
     {
       const t = await advance("settling");
       if (!t.ok) return die(t.error);
@@ -392,8 +479,9 @@ async function emitTransition(
   from: CorridorState,
   at: number,
   error?: string,
+  checks?: readonly CheckResult[],
 ): Promise<void> {
-  const entry = {
+  const entry: AuditEntry = {
     idempotencyKey: run.idempotencyKey,
     corridorId: run.corridorId,
     from,
@@ -401,6 +489,7 @@ async function emitTransition(
     version: run.version,
     at,
     error,
+    ...(checks && checks.length > 0 ? { checks } : {}),
   };
   (deps.logger ?? silentLogger).log(error ? "error" : "info", "corridor.transition", entry);
   const metrics = deps.metrics ?? noopMetrics;

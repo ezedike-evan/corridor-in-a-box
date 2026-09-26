@@ -16,6 +16,7 @@ import {
   InMemoryAuditLog,
   InMemoryIdempotencyStore,
   createMockSubmitter,
+  defaultSep31Gate,
   execute,
 } from "@corridor/engine";
 import type { PaymentIntent } from "@corridor/types";
@@ -38,6 +39,7 @@ async function main(): Promise<void> {
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
     audit,
+    gate: defaultSep31Gate(),
   };
 
   const intent: PaymentIntent = {

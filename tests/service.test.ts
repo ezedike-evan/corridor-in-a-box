@@ -50,6 +50,7 @@ function deps(adapterOpts = {}): EngineDeps {
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
     sleep: async () => {},
+    unsafeSkipPreSettleGate: true,
   };
 }
 

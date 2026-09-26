@@ -137,7 +137,7 @@ exits non-zero unless the terminal state is `completed`. It prints the trail on
 both paths — the failing run is the one worth reading:
 
 ```
-trail: created -> quoted -> compliant -> opened -> settling -> retrying -> settling -> recovering -> refunded
+trail: created -> quoted -> compliant -> opened -> verifying -> settling -> retrying -> verifying -> settling -> recovering -> refunded
 
 ✗ SETTLEMENT_FAILED — settlement submit failed: tx_failed operations=[op_src_no_trust]
   terminal state: refunded
