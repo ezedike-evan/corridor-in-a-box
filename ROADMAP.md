@@ -57,8 +57,8 @@ system. Items marked ✅ are done.
   `examples/run-service.ts`), serving every corridor manifest with the same
   mainnet safety guard as `pnpm testnet`.
 - ✅ Nightly CI job re-running the live-anchor probe
-  (`tests/integration/sep31-live.test.ts`), inert until anchor secrets are
-  configured.
+  (`tests/integration/sep31-live.test.ts`), running against `testanchor.stellar.org`
+  by default; only the SEP-10/SEP-12 legs need `CORRIDOR_SIGNER_SECRET`.
 
 ## Phase 4 — Corridors
 
@@ -83,8 +83,7 @@ system. Items marked ✅ are done.
 - ⬜ SCF Tier-2 grant proposal — structure and milestones drafted in
   [docs/grant-proposal.md](./docs/grant-proposal.md); budget figures and
   submission still pending maintainer input.
-- ⬜ Corridor #1 live: fill `mx-example.corridor.yaml` endpoints from the real
-  `stellar.toml` (blocked — needs a verified live anchor domain, not a code
-  change).
+- ⬜ First payment on a VERIFIED corridor (ng-cowrie) — blocked on a KYC'd business
+  relationship.
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for good first issues.
