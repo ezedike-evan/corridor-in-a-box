@@ -36,6 +36,7 @@ working.
 ### Added — Gate check: balance covers amount, fee and minimum reserve (#151) (2026-09-25)
 
 Added `balanceCheck(inspector, signerPublicKey, opts?)` GateCheck (name `chain.balance`) in `@corridor/stellar`:
+
 - Minimum reserve = `(2 + subentry_count + num_sponsoring − num_sponsored) × base_reserve`, computed strictly with `@corridor/types` decimal money helpers, never floats.
 - Exposes `fee` from `StellarSettlementSubmitter` rather than duplicating `BASE_FEE`.
 - Refuses before signing unless bridge asset balance − selling liabilities ≥ amount, and XLM balance − selling liabilities − minimum reserve ≥ fee (plus amount when bridge asset is XLM).

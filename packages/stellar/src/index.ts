@@ -19,14 +19,7 @@ import {
   TransactionFailedError,
   xdr,
 } from "@stellar/stellar-sdk";
-import {
-  fail,
-  fromScaled,
-  ok,
-  STROOP_SCALE,
-  toScaled,
-  type Outcome,
-} from "@corridor/types";
+import { fail, fromScaled, ok, STROOP_SCALE, toScaled, type Outcome } from "@corridor/types";
 import type {
   CheckResult,
   GateCheck,
@@ -427,7 +420,11 @@ export class AccountInspector {
       };
       return ok(facts);
     } catch (err: unknown) {
-      const anyErr = err as { response?: { status?: number }; status?: number; message?: string };
+      const anyErr = err as {
+        response?: { status?: number };
+        status?: number;
+        message?: string;
+      };
       if (
         anyErr?.response?.status === 404 ||
         anyErr?.status === 404 ||
@@ -534,7 +531,11 @@ export function balanceCheck(
           };
         }
       } catch (err: unknown) {
-        const anyErr = err as { response?: { status?: number }; status?: number; message?: string };
+        const anyErr = err as {
+          response?: { status?: number };
+          status?: number;
+          message?: string;
+        };
         if (
           anyErr?.response?.status === 404 ||
           anyErr?.status === 404 ||
@@ -725,4 +726,3 @@ export function balanceCheck(
     },
   };
 }
-

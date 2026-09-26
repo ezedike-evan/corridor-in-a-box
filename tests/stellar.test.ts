@@ -394,11 +394,13 @@ describe("AccountInspector", () => {
 });
 
 describe("balanceCheck gate check (chain.balance)", () => {
-  function testContext(opts: {
-    bridgeAsset?: string;
-    assetIssuer?: string;
-    amount?: string;
-  } = {}): GateContext {
+  function testContext(
+    opts: {
+      bridgeAsset?: string;
+      assetIssuer?: string;
+      amount?: string;
+    } = {},
+  ): GateContext {
     const base = testCorridor();
     const bridge_asset = opts.bridgeAsset ?? "USDC";
     const amount = opts.amount ?? "100.0000000";
@@ -594,9 +596,7 @@ describe("balanceCheck gate check (chain.balance)", () => {
         subentry_count: 0,
         num_sponsoring: 0,
         num_sponsored: 0,
-        balances: [
-          { asset_type: "native", balance: "51.0000100", selling_liabilities: "0" },
-        ],
+        balances: [{ asset_type: "native", balance: "51.0000100", selling_liabilities: "0" }],
       };
       const check = balanceCheck(mockInspector(facts), "G1");
       const res = await check.run(testContext({ bridgeAsset: "XLM", amount: "50.0000000" }));
@@ -610,9 +610,7 @@ describe("balanceCheck gate check (chain.balance)", () => {
         subentry_count: 0,
         num_sponsoring: 0,
         num_sponsored: 0,
-        balances: [
-          { asset_type: "native", balance: "51.0000099", selling_liabilities: "0" },
-        ],
+        balances: [{ asset_type: "native", balance: "51.0000099", selling_liabilities: "0" }],
       };
       const check = balanceCheck(mockInspector(facts), "G1");
       const res = await check.run(testContext({ bridgeAsset: "XLM", amount: "50.0000000" }));
@@ -629,9 +627,7 @@ describe("balanceCheck gate check (chain.balance)", () => {
         subentry_count: 0,
         num_sponsoring: 0,
         num_sponsored: 0,
-        balances: [
-          { asset_type: "native", balance: "50.0000100", selling_liabilities: "0" },
-        ],
+        balances: [{ asset_type: "native", balance: "50.0000100", selling_liabilities: "0" }],
       };
       const check = balanceCheck(mockInspector(facts), "G1");
       const res = await check.run(testContext({ bridgeAsset: "XLM", amount: "50.0000000" }));
@@ -645,9 +641,7 @@ describe("balanceCheck gate check (chain.balance)", () => {
         subentry_count: 0,
         num_sponsoring: 0,
         num_sponsored: 0,
-        balances: [
-          { asset_type: "native", balance: "51.0000000", selling_liabilities: "0" },
-        ],
+        balances: [{ asset_type: "native", balance: "51.0000000", selling_liabilities: "0" }],
       };
       const check = balanceCheck(mockInspector(facts), "G1");
       const res = await check.run(testContext({ bridgeAsset: "XLM", amount: "50.0000000" }));
@@ -704,4 +698,3 @@ describe("balanceCheck gate check (chain.balance)", () => {
     });
   });
 });
-
