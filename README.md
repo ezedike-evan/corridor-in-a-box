@@ -12,9 +12,13 @@ corridor is a new `*.corridor.yaml` file — not a fork.
 **Live demo:** [corridor-in-a-box.vercel.app](https://corridor-in-a-box.vercel.app)
 — the corridor dashboard and a payment walkthrough. **The walkthrough is a
 simulation**: it drives a re-implementation of the state machine and never
-touches the Stellar network. No corridor in this repo has yet been confirmed
-against a live anchor, so every one of them renders `UNVERIFIED` or
-`NOT RUNNABLE` (see [Liveness](#liveness-has-three-states-and-green-has-to-be-earned)).
+touches the Stellar network. `ng-cowrie` is the one exception: its endpoints
+were probed against Cowrie's production API on 2026-08-11 — SEP-10 signed a
+challenge, SEP-12 answered, and SEP-31 `/info` returned a non-empty receive
+list — so it renders `VERIFIED`. That means endpoints were checked, not that
+money moved: Cowrie publishes no SEP-38 quote server, no payment has been
+attempted, and no business relationship is in place. Every other shipped
+manifest renders `UNVERIFIED` or `NOT RUNNABLE` (see [Liveness](#liveness-has-three-states-and-green-has-to-be-earned)).
 
 This repo is the **open half** of an open-core system. The proprietary half — the
 anchor health/conformance dataset and the route intelligence built on it — lives
@@ -119,9 +123,12 @@ type a URL into a YAML file. So `corridor plan` and the dashboard report:
 | `VERIFIED`     | Endpoints were checked against the anchor's published `stellar.toml` on a recorded date. |
 
 `VERIFIED` requires `dest.endpoints.endpoints_verified_at` — a date a human sets
-only after actually looking. **Every corridor in this repo is currently
-`UNVERIFIED` or `NOT RUNNABLE`**, which is the honest state of the project: no
-lane here has been confirmed against a live anchor yet.
+only after actually looking. `ng-cowrie` is `VERIFIED`: its endpoints were
+probed on 2026-08-11, and SEP-10, SEP-12, and SEP-31 answered. This does not
+mean money moved — Cowrie publishes no SEP-38 quote server, no payment has
+been attempted, and no business relationship is in place. Every other shipped
+manifest is currently `UNVERIFIED` or `NOT RUNNABLE`. Green has to be earned;
+here, `VERIFIED` means endpoints were checked, not that a payment was made.
 
 ## The anchor registry (on-chain)
 
