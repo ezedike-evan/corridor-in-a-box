@@ -71,6 +71,7 @@ describe("engine.execute", () => {
         "quoted",
         "compliant",
         "opened",
+        "verifying",
         "settling",
         "settled",
         "reconciled",
@@ -691,10 +692,12 @@ describe("state machine", () => {
     // test walking the graph found it. The two kinds of recovery are now
     // distinct so the double-spend is unreachable by construction.
     expect(canTransition("settling", "retrying")).toBe(true);
-    expect(canTransition("retrying", "settling")).toBe(true);
+    expect(canTransition("retrying", "verifying")).toBe(true);
+    expect(canTransition("verifying", "settling")).toBe(true);
 
     // `recovering` is terminal-bound and cannot get back to the chain.
     expect(canTransition("recovering", "settling")).toBe(false);
+    expect(canTransition("recovering", "verifying")).toBe(false);
     expect(canTransition("recovering", "refunded")).toBe(true);
     expect(canTransition("recovering", "held")).toBe(true);
 
@@ -791,6 +794,7 @@ describe("engine refund path", () => {
       "quoted",
       "compliant",
       "opened",
+      "verifying",
       "settling",
       "settled",
       "recovering",
@@ -891,5 +895,145 @@ describe("engine refund path", () => {
     const afterRecovering = h.trail().slice(h.trail().indexOf("recovering"));
     expect(afterRecovering).not.toContain("settling");
     expect(afterRecovering).not.toContain("retrying");
+  });
+
+  describe("pre-settle gate", () => {
+    it("fails with the gate check code and makes zero submit calls when gate fails", async () => {
+      let submitCalls = 0;
+      const baseSubmitter = createMockSubmitter();
+      const mockSubmitter: SettlementSubmitter = {
+        submit: async (req) => {
+          submitCalls++;
+          return baseSubmitter.submit(req);
+        },
+        refund: baseSubmitter.refund,
+      };
+
+      const customGate = {
+        async evaluate() {
+          return {
+            passed: false,
+            results: [
+              {
+                name: "test.check",
+                passed: false,
+                code: "PRESETTLE_INSUFFICIENT_FUNDS" as const,
+                detail: "destination account does not exist or has no trustline",
+                durationMs: 5,
+              },
+            ],
+          };
+        },
+      };
+
+      const d = deps();
+      d.submitter = mockSubmitter;
+      d.gate = customGate;
+
+      const r = await execute(intent("gate-fail"), corridor(), d);
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+        expect(r.error.message).toBe("destination account does not exist or has no trustline");
+      }
+
+      const run = await d.idempotency!.get("gate-fail");
+      expect(run?.state).toBe("failed");
+      expect(submitCalls).toBe(0);
+    });
+
+    it("re-evaluates gate after retrying and blocks on attempt 2", async () => {
+      let attemptsEvaluated = 0;
+      const customGate = {
+        async evaluate(ctx: { attempt: number }) {
+          attemptsEvaluated++;
+          if (ctx.attempt === 0) {
+            return {
+              passed: true,
+              results: [{ name: "pass.on.first", passed: true, detail: "ok", durationMs: 1 }],
+            };
+          }
+          return {
+            passed: false,
+            results: [
+              {
+                name: "fail.on.retry",
+                passed: false,
+                code: "ANCHOR_UNAVAILABLE" as const,
+                detail: "bridge asset disabled during retry",
+                durationMs: 1,
+              },
+            ],
+          };
+        },
+      };
+
+      // Mock submitter that fails on attempt 0 (retryable) so it re-enters settle loop
+      let submitCalls = 0;
+      const mockSubmitter: SettlementSubmitter = {
+        async submit() {
+          submitCalls++;
+          return fail("SETTLEMENT_FAILED", "temporary network error", { retryable: true });
+        },
+        async refund() {
+          return fail("REFUND_UNSUPPORTED", "no refund", { retryable: false });
+        },
+      };
+
+      const d = deps();
+      d.submitter = mockSubmitter;
+      d.gate = customGate;
+      d.sleep = async () => {};
+
+      const r = await execute(
+        intent("gate-retry"),
+        corridorWith({ max_retries: 2, timeout_seconds: 60 }),
+        d,
+      );
+
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error.code).toBe("ANCHOR_UNAVAILABLE");
+      }
+
+      expect(attemptsEvaluated).toBe(2);
+      expect(submitCalls).toBe(1); // attempt 0 submitted once and failed; attempt 1 blocked by gate before submit
+
+      const run = await d.idempotency!.get("gate-retry");
+      expect(run?.state).toBe("failed");
+    });
+
+    it("fails cleanly and never settles when gate evaluation throws", async () => {
+      let submitCalls = 0;
+      const baseSubmitter = createMockSubmitter();
+      const mockSubmitter: SettlementSubmitter = {
+        submit: async (req) => {
+          submitCalls++;
+          return baseSubmitter.submit(req);
+        },
+        refund: baseSubmitter.refund,
+      };
+
+      const throwingGate = {
+        async evaluate() {
+          throw new Error("unexpected gate crash");
+        },
+      };
+
+      const d = deps();
+      d.submitter = mockSubmitter;
+      d.gate = throwingGate;
+
+      const r = await execute(intent("gate-throw"), corridor(), d);
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error.code).toBe("SETTLEMENT_FAILED");
+        expect(r.error.message).toContain("unexpected gate crash");
+      }
+
+      expect(submitCalls).toBe(0);
+      const run = await d.idempotency!.get("gate-throw");
+      expect(run?.state).toBe("failed");
+    });
   });
 });

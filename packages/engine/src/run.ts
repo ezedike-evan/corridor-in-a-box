@@ -33,9 +33,12 @@ import {
   type Metrics,
 } from "./observability";
 
+import type { PreSettleGate } from "./gate";
+
 export interface EngineDeps {
   resolver: RouteResolver;
   submitter: SettlementSubmitter;
+  gate?: PreSettleGate;
   idempotency?: IdempotencyStore;
   now?: () => number;
   /** Injectable sleep so tests don't wait on real backoff/poll delays. */
@@ -337,6 +340,56 @@ export async function execute(
         message: `quote ${q.value.id} expired during retry`,
         retryable: false,
       });
+    }
+
+    {
+      const t = await advance("verifying");
+      if (!t.ok) return die(t.error);
+    }
+
+    if (deps.gate) {
+      const gateResult = await timed("verify", async () => {
+        try {
+          return await deps.gate!.evaluate({
+            intent,
+            corridor,
+            quote: q.value,
+            opened: opened.value,
+            now: now(),
+            attempt,
+          });
+        } catch (err) {
+          return {
+            passed: false,
+            results: [
+              {
+                name: "gate.evaluation",
+                passed: false,
+                code: "SETTLEMENT_FAILED" as const,
+                detail: (err as Error).message || String(err),
+                durationMs: 0,
+              },
+            ],
+          };
+        }
+      });
+
+      for (const res of gateResult.results) {
+        metrics.increment("corridor.gate.check", {
+          corridor: corridor.id,
+          check: res.name,
+          passed: String(res.passed),
+        });
+      }
+
+      if (!gateResult.passed) {
+        const firstFailure = gateResult.results.find((r) => !r.passed);
+        return die({
+          code: firstFailure?.code ?? "SETTLEMENT_FAILED",
+          message: firstFailure?.detail ?? "pre-settle gate failed",
+          retryable: false,
+        });
+      }
     }
 
     {
