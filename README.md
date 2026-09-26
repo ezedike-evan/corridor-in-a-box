@@ -55,18 +55,26 @@ packages/
   types/         Outcome<T> result type (no-throw) + Money/PaymentIntent
   manifest/      Zod schema for a corridor + loader  ← the abstraction lives here
   adapter-kit/   AnchorAdapter port + conformance probes + a mock adapter
-  sep31/         ONE generic adapter for any standards-compliant SEP-31 anchor
-                 (SEP-10 auth + SEP-12 KYC; crypto behind an injected signer)
-  stellar/       the ONLY chain-touching package: @stellar/stellar-sdk-backed
-                 settlement submitter + SEP-10 signer
+  probe/         conformance probes for corridor/anchor behavior
+  registry/      conformance registry client
+  attester/      attestation writer for the conformance registry
+  sep31/         ONE generic adapter for any standards-compliant SEP-31
+                 anchor (SEP-10 auth + SEP-12 KYC; crypto behind an injected signer)
+  stellar/       the only package on the money path that touches the chain;
+                 @stellar/stellar-sdk-backed settlement submitter + SEP-10 signer
   router/        RouteResolver seam — open interface + dumb static default
   engine/        corridor-agnostic orchestration of the five verbs, with a
                  persisted state machine, crash-resume, recovery, audit trail,
                  metrics hooks, and a durable Postgres idempotency store
-  service/       thin HTTP API over the engine (auth + rate limiting), zero deps
+  service/       thin HTTP API over the engine (auth + rate limiting),
+                 zero deps
   cli/           validate a manifest; print an offline runnability plan
-corridors/       the manifests — ALL corridor-specifics live here, nowhere else
-docs/            key management, "why not Anchor Platform", SEP coverage, operations, …
+corridors/       the manifests — ALL corridor-specifics live here,
+                 nowhere else
+contracts/       Soroban registry + attester contracts
+scripts/         reference-anchor.sh + assert-testnet-corridor.ts
+docs/            key management, "why not Anchor Platform", SEP coverage,
+                 operations, …
 examples/        runnable end-to-end demo
 ```
 
