@@ -43,7 +43,6 @@ Added `balanceCheck(inspector, signerPublicKey, opts?)` GateCheck (name `chain.b
 - Reports `PRESETTLE_INSUFFICIENT_FUNDS` with required vs available in `detail`.
 - Added `AccountInspector` read-only Horizon inspector and typed account facts in `@corridor/stellar`.
 
-
 ### Security — soroban-sdk 25 → 27 clears GHSA-x57h-xx53-v53w (2026-08-31)
 
 `contracts/Cargo.lock` pinned `stellar-xdr@25.0.0`, which carries a moderate

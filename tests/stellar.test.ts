@@ -323,6 +323,17 @@ describe("StellarSettlementSubmitter.fee", () => {
     });
     expect(sub.fee).toBe("0.00002");
   });
+
+  it("throws at construction on an invalid fee instead of falling back", () => {
+    expect(
+      () =>
+        new StellarSettlementSubmitter({
+          signerSecret: Keypair.random().secret(),
+          horizonUrl: "https://horizon-testnet.stellar.org",
+          fee: "not-a-number",
+        }),
+    ).toThrow(/invalid `fee`/);
+  });
 });
 
 describe("AccountInspector", () => {

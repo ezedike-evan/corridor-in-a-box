@@ -181,7 +181,13 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
     this.confirmTimeoutMs = opts.confirmTimeoutMs ?? 30_000;
     this.now = opts.now ?? (() => Date.now());
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-    this.fee = opts.fee ?? StellarSettlementSubmitter.fee;
+    const fee = opts.fee ?? StellarSettlementSubmitter.fee;
+    if (!toScaled(fee, STROOP_SCALE).ok) {
+      throw new Error(
+        `StellarSettlementSubmitter: invalid \`fee\` "${fee}" (expected an XLM decimal string)`,
+      );
+    }
+    this.fee = fee;
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -209,6 +215,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
       await this.withLock(async () => {
         const source = await this.server.loadAccount(this.signer.publicKey);
         const feeScaled = toScaled(this.fee, STROOP_SCALE);
+        // this.fee was validated in the constructor.
         const feeStroops = feeScaled.ok ? feeScaled.value.toString() : BASE_FEE;
         const builder = new TransactionBuilder(source, {
           fee: feeStroops,
