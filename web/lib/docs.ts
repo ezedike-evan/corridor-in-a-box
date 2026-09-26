@@ -29,9 +29,11 @@ anchor pair, and adding a new corridor is a new \`*.corridor.yaml\` file — not
    Corridor #2 is a YAML file, not a code change.
 2. **engine ↔ adapters** — the engine knows only the \`AnchorAdapter\` interface;
    every standards-compliant anchor shares one adapter.
-3. **router seam** — the open repo ships a \`RouteResolver\` interface plus a
-   trivial default. The health-/rate-weighted resolver is proprietary and
-   injected at runtime. That single seam is the entire open-core line.
+3. **router seam** — the open repo ships a \`RouteResolver\` interface plus two
+   resolvers: \`StaticRouteResolver\` (trust the manifest) and
+   \`RegistryRouteResolver\` (require a fresh on-chain attestation). The
+   proprietary health-/rate-weighted resolver is injected at runtime. That
+   single seam is the entire open-core line.
 `,
   },
   {
@@ -81,7 +83,7 @@ packages/
   adapter-kit/   AnchorAdapter port + conformance probes + mock adapter
   sep31/         ONE generic adapter (SEP-10 auth + SEP-12 KYC)
   stellar/       the ONLY chain-touching package: settlement submitter + SEP-10 signer
-  router/        RouteResolver seam — open interface + static default
+  router/        RouteResolver seam — open interface + two resolvers (Static + Registry)
   engine/        orchestration: state machine, crash-resume, recovery, audit, metrics
   service/       thin HTTP API over the engine (auth + rate limiting)
   cli/           validate a manifest; print an offline runnability plan
@@ -183,7 +185,7 @@ this engine talks to it.
 | Who runs it | An anchor | A remittance operator / PSP |
 | Role | Serve SEP endpoints | Orchestrate a payment end-to-end |
 | Owns the settle leg | No | Yes (native Stellar payment) |
-| Multi-anchor routing | No | Yes (RouteResolver seam) |
+| Multi-anchor routing | No | Seam only (\`RouteResolver\`); no multi-anchor resolver ships yet |
 | Idempotency / recovery | N/A | Core |
 `,
   },

@@ -59,7 +59,7 @@ packages/
                  (SEP-10 auth + SEP-12 KYC; crypto behind an injected signer)
   stellar/       the ONLY chain-touching package: @stellar/stellar-sdk-backed
                  settlement submitter + SEP-10 signer
-  router/        RouteResolver seam — open interface + dumb static default
+  router/        RouteResolver seam — open interface + two resolvers (Static + Registry)
   engine/        corridor-agnostic orchestration of the five verbs, with a
                  persisted state machine, crash-resume, recovery, audit trail,
                  metrics hooks, and a durable Postgres idempotency store
@@ -78,10 +78,11 @@ Three boundaries do the work:
 2. **engine ↔ adapters** — the engine knows only the `AnchorAdapter` interface.
    Standards-compliant anchors share one adapter; bespoke exchange/OTC desks
    implement the same interface and live in the private repo.
-3. **router seam** — the open repo ships the `RouteResolver` interface plus a
-   trivial "use the declared anchor" default. The real health-/rate-weighted
-   resolver is proprietary and injected at runtime. **That single seam is the
-   entire open-core line.**
+3. **router seam** — the open repo ships the `RouteResolver` interface plus two
+   resolvers: `StaticRouteResolver` (trust the manifest) and
+   `RegistryRouteResolver` (require a fresh on-chain attestation). The
+   proprietary health-/rate-weighted resolver is injected at runtime. **That
+   single seam is the entire open-core line.**
 
 ## Corridor sequencing
 

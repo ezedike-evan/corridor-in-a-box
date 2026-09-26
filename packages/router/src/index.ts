@@ -1,9 +1,10 @@
 // @corridor/router — the open-core line drawn in code.
 //
-// The interface and a dumb default ship here, in the open repo. The REAL resolver
-// — health-weighted, rate-aware, split-routing, fed by the anchor conformance
-// dataset — is proprietary and injected at runtime. Anyone can run the open
-// engine; only the operator supplies the routing intelligence.
+// The interface and two open resolvers ship here: StaticRouteResolver (trust the
+// manifest) and RegistryRouteResolver (require a fresh on-chain attestation). The
+// proprietary health-weighted, rate-aware resolver is injected at runtime.
+// Anyone can run the open engine; only the operator supplies the proprietary routing
+// intelligence.
 
 import type { Corridor } from "@corridor/manifest";
 import type { AnchorAdapter } from "@corridor/adapter-kit";
