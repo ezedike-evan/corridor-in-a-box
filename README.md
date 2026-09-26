@@ -102,6 +102,8 @@ liveness: ✗ NOT RUNNABLE — a required endpoint is missing.
 
 liveness warnings:
   ! dest has no SEP-31 transfer server — corridor cannot settle. NOT runnable.
+  ! fx.quote_source=sep38 but dest exposes no SEP-38 quote server — quotes will fail.
+  ! dest has no SEP-12 KYC server — assuming 1:1 delivery with no per-customer KYC.
 ```
 
 That warning _is_ the off-ramp scarcity, surfaced at build time instead of in
