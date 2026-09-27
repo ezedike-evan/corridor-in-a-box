@@ -583,6 +583,85 @@ describe("SEP-31 status mapping", () => {
       completeness: "partial",
     });
   });
+
+  // --- The anchor's own record of what it expects (#147) -------------------
+  //
+  // Read back off GET /transactions/:id so the opened transaction can be
+  // cross-checked against what we are about to send, before settling.
+
+  it("parses amount, deposit account and memo when the anchor reports them", async () => {
+    const r = await getTx({
+      status: "pending_sender",
+      amount_in: " 100.50 ",
+      amount_in_asset: REFUND_ASSET,
+      stellar_account_id: "GDEPOSIT",
+      stellar_memo: "aGVsbG8=",
+      stellar_memo_type: "HASH",
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.amountIn).toEqual({ asset: REFUND_ASSET, amount: "100.50" });
+    expect(r.value.depositAddress).toBe("GDEPOSIT");
+    expect(r.value.memo).toBe("aGVsbG8=");
+    expect(r.value.memoType).toBe("hash");
+  });
+
+  it("names the bridge asset on amountIn when the anchor names none", async () => {
+    const r = await getTx({ status: "pending_sender", amount_in: "100" });
+    expect(r.ok && r.value.amountIn).toEqual({ asset: "USDC", amount: "100" });
+  });
+
+  it("omits the fields when the anchor does not report them", async () => {
+    const r = await getTx({ status: "pending_sender" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toEqual({
+      status: "pending_sender",
+      settled: false,
+      terminalFailure: false,
+      awaitingInput: false,
+    });
+    for (const key of ["amountIn", "depositAddress", "memo", "memoType"]) {
+      expect(key in r.value).toBe(false);
+    }
+  });
+
+  it("omits each malformed field on its own and never guesses", async () => {
+    const r = await getTx({
+      status: "pending_sender",
+      // A number has already been through a float64 — refused, not laundered.
+      amount_in: 100.5,
+      amount_in_asset: REFUND_ASSET,
+      stellar_account_id: "GDEPOSIT",
+      stellar_memo: 12345,
+      stellar_memo_type: "base64",
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.amountIn).toBeUndefined();
+    expect(r.value.memo).toBeUndefined();
+    expect(r.value.memoType).toBeUndefined();
+    // A readable field survives its neighbours being malformed.
+    expect(r.value.depositAddress).toBe("GDEPOSIT");
+  });
+
+  it("rejects numeric and unparseable amounts and empty strings", async () => {
+    for (const amount_in of [100, 0, "abc", "1e5", "", null, {}]) {
+      const r = await getTx({
+        status: "completed",
+        amount_in,
+        stellar_account_id: "",
+        stellar_memo: "",
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      expect(r.value.amountIn).toBeUndefined();
+      expect(r.value.depositAddress).toBeUndefined();
+      expect(r.value.memo).toBeUndefined();
+      // Classification is decided independently and is untouched.
+      expect(r.value.settled).toBe(true);
+    }
+  });
 });
 
 describe("SEP-12 compliance", () => {
