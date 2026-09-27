@@ -11,7 +11,7 @@
 import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { ok, fail, type Outcome } from "@corridor/types";
+import { ok, fail, type Outcome, compareAmounts } from "@corridor/types";
 
 /** SEP endpoints an anchor exposes. Only home_domain is mandatory; the rest are
  *  discovered from its stellar.toml in practice, but may be pinned here. */
@@ -137,16 +137,35 @@ export const SettlementSchema = z.object({
   asset_issuer: z.string().min(1),
 });
 
-/** Per-corridor payment ceilings. Optional, but a lane with no ceiling accepts
+/** Per-corridor payment limits (floor and ceiling). Optional, but a lane with no ceiling accepts
  *  any positive amount the caller asks for — set one before real money. */
-export const LimitsSchema = z.object({
-  /** Largest single payment this corridor will accept, as a decimal string in
-   *  the source asset. Omit for no ceiling (dev/testnet only). */
-  max_amount: z
-    .string()
-    .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
-    .optional(),
-});
+export const LimitsSchema = z
+  .object({
+    /** Smallest single payment this corridor will accept, as a decimal string in
+     *  the source asset. Omit for no floor. */
+    min_amount: z
+      .string()
+      .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
+      .optional(),
+    /** Largest single payment this corridor will accept, as a decimal string in
+     *  the source asset. Omit for no ceiling (dev/testnet only). */
+    max_amount: z
+      .string()
+      .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
+      .optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.min_amount !== undefined && val.max_amount !== undefined) {
+      const cmp = compareAmounts(val.min_amount, val.max_amount);
+      if (cmp.ok && cmp.value === 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `min_amount (${val.min_amount}) must be <= max_amount (${val.max_amount})`,
+          path: ["min_amount"],
+        });
+      }
+    }
+  });
 
 /** How patiently this corridor polls the receiving anchor after settling. Both
  *  fields are optional: an unset field falls back to `EngineDeps`, then to the

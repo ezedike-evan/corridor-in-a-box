@@ -341,3 +341,58 @@ describe("recovery.reconcile", () => {
     expect(mk({ poll_seconds: 10, stall_polls: 0 })).toHaveLength(0);
   });
 });
+
+describe("limits", () => {
+  it("accepts valid min_amount without max_amount", () => {
+    const r = parseCorridor({ ...valid, limits: { min_amount: "10.50" } });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.limits?.min_amount).toBe("10.50");
+    }
+  });
+
+  it("rejects malformed min_amount", () => {
+    const r = parseCorridor({ ...valid, limits: { min_amount: "not-a-number" } });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("MANIFEST_INVALID");
+      expect(r.error.message).toContain("limits");
+    }
+  });
+
+  it("rejects min_amount > max_amount", () => {
+    const r = parseCorridor({
+      ...valid,
+      limits: { min_amount: "100.00", max_amount: "50.00" },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("MANIFEST_INVALID");
+      expect(r.error.message).toContain("min_amount");
+    }
+  });
+
+  it("accepts min_amount == max_amount", () => {
+    const r = parseCorridor({
+      ...valid,
+      limits: { min_amount: "50.00", max_amount: "50.00" },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.limits?.min_amount).toBe("50.00");
+      expect(r.value.limits?.max_amount).toBe("50.00");
+    }
+  });
+
+  it("accepts min_amount < max_amount", () => {
+    const r = parseCorridor({
+      ...valid,
+      limits: { min_amount: "10.00", max_amount: "50.00" },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.limits?.min_amount).toBe("10.00");
+      expect(r.value.limits?.max_amount).toBe("50.00");
+    }
+  });
+});

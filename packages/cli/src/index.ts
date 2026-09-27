@@ -50,6 +50,12 @@ function printPlan(c: Corridor): void {
   );
   line(`dest:     ${c.dest.name}  [${c.dest.asset}]  ${c.dest.endpoints.home_domain}`);
   line(`bridge:   ${c.settlement.bridge_asset} on ${c.settlement.network}`);
+  if (c.limits && (c.limits.min_amount !== undefined || c.limits.max_amount !== undefined)) {
+    const parts: string[] = [];
+    if (c.limits.min_amount !== undefined) parts.push(`min=${c.limits.min_amount}`);
+    if (c.limits.max_amount !== undefined) parts.push(`max=${c.limits.max_amount}`);
+    line(`limits:   ${parts.join(" ")}`);
+  }
   line(
     `recovery: retries=${c.recovery.max_retries}, timeout=${c.recovery.timeout_seconds}s, rollback=${c.recovery.rollback}`,
   );

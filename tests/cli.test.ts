@@ -8,7 +8,12 @@ import { describe, expect, it } from "vitest";
 // test a CLI's actual argv/exit-code/stdio contract.
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
+const TSX = fileURLToPath(
+  new URL(
+    process.platform === "win32" ? "../node_modules/.bin/tsx.cmd" : "../node_modules/.bin/tsx",
+    import.meta.url,
+  ),
+);
 const CLI = fileURLToPath(new URL("../packages/cli/src/index.ts", import.meta.url));
 
 function run(args: string[]) {
@@ -124,5 +129,11 @@ describe("corridor CLI", () => {
   it("plan: prints the status_note when present", () => {
     const r = run(["plan", "corridors/ng-cn.corridor.yaml"]);
     expect(r.stdout).toContain("PENDING");
+  });
+
+  it("plan: prints limits min and max when set", () => {
+    const r = run(["plan", "tests/fixtures/limits.corridor.yaml"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("limits:   min=10.00 max=500.00");
   });
 });
