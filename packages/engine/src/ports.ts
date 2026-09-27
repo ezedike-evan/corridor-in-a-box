@@ -25,6 +25,8 @@ export interface SettlementRequest {
   readonly memoType?: "text" | "hash" | "id";
   readonly amount: Money;
   readonly corridor: Corridor;
+  /** Epoch ms after which a firm quote expires and settlement must not land on-chain. */
+  readonly validUntil?: number;
 }
 
 export interface RefundRequest {

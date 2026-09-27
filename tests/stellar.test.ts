@@ -3,9 +3,11 @@ import {
   Account,
   Asset,
   BASE_FEE,
+  FeeBumpTransaction,
   Keypair,
   Networks,
   Operation,
+  Transaction,
   TransactionBuilder,
   TransactionFailedError,
 } from "@stellar/stellar-sdk";
@@ -145,7 +147,7 @@ function testRequest(): SettlementRequest {
 
 /** A minimal fake Horizon server: only the three methods submit() touches. */
 function fakeServer(opts: {
-  submitTransaction: () => Promise<unknown>;
+  submitTransaction: (tx?: Transaction | FeeBumpTransaction) => Promise<unknown>;
   lookupTransaction?: (hash: string) => Promise<{ successful: boolean; ledger_attr?: number }>;
 }) {
   const loadAccount = vi.fn(async (publicKey: string) => new Account(publicKey, "100"));
@@ -244,6 +246,71 @@ describe("StellarSettlementSubmitter.submit — ambiguous failure safety", () =>
       expect(r.error.retryable).toBe(false);
     }
     expect(server.submitTransaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("StellarSettlementSubmitter.submit — validUntil quote expiry timebounds", () => {
+  it("built tx maxTime equals floor(validUntil/1000) when that is sooner than the TTL", async () => {
+    let capturedTx: Transaction | FeeBumpTransaction | undefined;
+    const server = fakeServer({
+      submitTransaction: async (tx) => {
+        capturedTx = tx;
+        return { successful: true };
+      },
+      lookupTransaction: async () => ({ successful: true, ledger_attr: 1234 }),
+    });
+
+    const fakeNow = 1_000_000_000; // ms
+    const quoteExpiresAt = fakeNow + 15_000; // 15s in future (sooner than 60s TTL)
+    const sub = new StellarSettlementSubmitter({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+      now: () => fakeNow,
+    });
+
+    const req = {
+      ...testRequest(),
+      validUntil: quoteExpiresAt,
+    };
+
+    const res = await sub.submit(req);
+    expect(res.ok).toBe(true);
+    expect(capturedTx).toBeDefined();
+    if (capturedTx && "timeBounds" in capturedTx) {
+      expect(capturedTx.timeBounds?.maxTime).toBe(String(Math.floor(quoteExpiresAt / 1000)));
+    }
+  });
+
+  it("fails with QUOTE_EXPIRED and never calls submitTransaction when validUntil is in the past", async () => {
+    const server = fakeServer({
+      submitTransaction: async () => {
+        throw new Error("should not be called");
+      },
+    });
+
+    const fakeNow = 1_000_000_000; // ms
+    const quoteExpiresAt = fakeNow - 1_000; // 1s in the past
+    const sub = new StellarSettlementSubmitter({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+      now: () => fakeNow,
+    });
+
+    const req = {
+      ...testRequest(),
+      validUntil: quoteExpiresAt,
+    };
+
+    const res = await sub.submit(req);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe("QUOTE_EXPIRED");
+      expect(res.error.retryable).toBe(false);
+    }
+    expect(server.submitTransaction).not.toHaveBeenCalled();
+    expect(server.loadAccount).not.toHaveBeenCalled();
   });
 });
 

@@ -225,6 +225,13 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
   }
 
   async submit(req: SettlementRequest): Promise<Outcome<SettlementRef>> {
+    const now = this.now();
+    if (req.validUntil !== undefined && req.validUntil <= now) {
+      return fail("QUOTE_EXPIRED", `quote expired at ${req.validUntil} (now=${now})`, {
+        retryable: false,
+      });
+    }
+
     let hash: string | undefined;
     let submitAttempted = false;
     try {
@@ -237,6 +244,13 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
         const feeScaled = toScaled(this.fee, STROOP_SCALE);
         // this.fee was validated in the constructor.
         const feeStroops = feeScaled.ok ? feeScaled.value.toString() : BASE_FEE;
+        const nowSec = Math.floor(this.now() / 1000);
+        const ttlMaxTime = nowSec + req.corridor.fx.quote_ttl_seconds;
+        const maxTime =
+          req.validUntil !== undefined
+            ? Math.min(Math.floor(req.validUntil / 1000), ttlMaxTime)
+            : ttlMaxTime;
+
         const builder = new TransactionBuilder(source, {
           fee: feeStroops,
           networkPassphrase: passphrase,
@@ -245,7 +259,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
             Operation.payment({ destination: req.to, asset, amount: req.amount.amount }),
           )
           // Beat the firm-quote expiry: the tx must hit the ledger before the quote dies.
-          .setTimeout(req.corridor.fx.quote_ttl_seconds);
+          .setTimebounds(0, maxTime);
 
         if (req.memo) builder.addMemo(buildMemo(req.memo, req.memoType));
 

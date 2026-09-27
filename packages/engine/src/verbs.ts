@@ -83,6 +83,7 @@ export function buildSettlementRequest(
     memoType: opened.memoType,
     amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
     corridor,
+    validUntil: q.firm ? q.expiresAt : undefined,
   };
 }
 
