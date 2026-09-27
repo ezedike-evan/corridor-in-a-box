@@ -65,8 +65,8 @@ scripts/reference-anchor.sh down           # tear it all down
 #### `doctor` - check before you run, not after
 
 A corridor run against a sick stack does not fail fast. It reaches `settled`,
-polls for the whole of `recovery.timeout_seconds` (900s by default) and then
-fails with `SETTLEMENT_TIMEOUT`. Every one of those minutes was spent learning
+polls until stall detection triggers (around 20 seconds of unchanged statuses),
+and fails with `RECONCILE_STALLED`. That time was spent learning
 something that was knowable beforehand. Run `doctor` first:
 
 ```
@@ -90,18 +90,17 @@ or a `verify:corridor` run:
 ```
 
 The lag is reported as a **number of ledgers**, not a yes/no, because the
-interesting cases are the borderline ones. The default limit of 180 ledgers is
-the default `recovery.timeout_seconds` (900s) at testnet's ~5s close time: an
-observer further back than that cannot catch up to a fresh payment before the
-engine stops waiting for it. Set `CURSOR_LAG_FAIL_LEDGERS` if your corridor's
-timeout differs.
+interesting cases are the borderline ones. The default limit of 180 ledgers
+was originally based on a 900s timeout, but with stall detection the practical
+window is now ~20s: the cursor must be near the tip to catch a fresh payment
+before the engine stops waiting. Set `CURSOR_LAG_FAIL_LEDGERS` to adjust the limit.
 
 #### The observer cursor
 
 The one failure that will waste an afternoon: the platform's Stellar observer
 resumes from a **stale cursor**, never matches the payment your settle leg just
 made, and leaves the transaction at `pending_sender` until the engine reports
-`SETTLEMENT_TIMEOUT`. That looks like an engine bug and is not one.
+`RECONCILE_STALLED`. That looks like an engine bug and is not one.
 
 The cursor is not a config value — Anchor Platform keeps it in the platform DB
 (`stellar_payment_observer_page_token`, one row keyed `SINGLETON_ID`) and only
@@ -219,6 +218,15 @@ blocked on information (usually a SEP-12 customer record or a
 `PATCH /transactions/:id` correction), not that it was slow. Chase the party that
 owes the information, not the anchor's throughput. Any other status — including
 one the engine has never seen — means the anchor was working on it.
+
+#### Stalled, not slow
+
+If the run stops with `RECONCILE_STALLED` (mapped to HTTP 504 by the service),
+the engine saw ~20 seconds of identical statuses from the anchor and aborted. The
+message contains the status it was stuck at (e.g., `tx … stuck at status=pending_sender for 10 consecutive polls`).
+This failure is non-retryable. If `stellar_tx_hash` is set on the run, the bridge
+payment did go out to the anchor. Check the anchor's observer logs and its SEP-31
+status history for the transaction to see why it never progressed.
 
 ### `refunded`
 
