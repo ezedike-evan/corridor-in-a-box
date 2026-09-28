@@ -165,6 +165,43 @@ export const RecoverySchema = z.object({
   reconcile: ReconcileSchema.optional(),
 });
 
+/** True when the YYYY-MM-DD part names a real calendar day. `Date` alone is no help:
+ *  it rolls 2026-02-30 over to 2 March instead of rejecting it. */
+function isRealCalendarDate(value: string): boolean {
+  const [y, m, d] = value.slice(0, 10).split("-").map(Number) as [number, number, number];
+  const probe = new Date(Date.UTC(y, m - 1, d));
+  return (
+    probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d
+  );
+}
+
+/** Canary payment evidence proving this exact lane successfully moved money. */
+export const ProofSchema = z.object({
+  /** ISO date or timestamp on which the canary payment reached completed. */
+  canary_completed_at: z
+    .string()
+    .regex(
+      /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$/,
+      "expected an ISO date (YYYY-MM-DD) or timestamp",
+    )
+    .refine(isRealCalendarDate, "not a real calendar date"),
+  /** 64-hex Stellar transaction hash for the on-chain settlement leg. */
+  stellar_tx_hash: z
+    .string()
+    .regex(/^[0-9a-fA-F]{64}$/, "expected a 64-character hex transaction hash"),
+  /** Destination anchor's external transaction / order ID. */
+  anchor_transaction_id: z.string().min(1),
+  /** Amount delivered or transferred in the canary payment, as a decimal string. */
+  amount: z.string().regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount"),
+  /** Max validity age of the proof in days before becoming stale. Default 30. */
+  max_age_days: z.number().int().positive().default(30),
+  /** Optional canary max amount ceiling. */
+  canary_max_amount: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
+    .optional(),
+});
+
 export const CorridorSchema = z.object({
   id: z.string().min(1),
   /** Human note. Use it to record liveness, e.g. "pending: no RMB SEP-31 anchor". */
@@ -176,11 +213,13 @@ export const CorridorSchema = z.object({
   settlement: SettlementSchema,
   recovery: RecoverySchema,
   limits: LimitsSchema.optional(),
+  proof: ProofSchema.optional(),
 });
 
 export type Corridor = z.infer<typeof CorridorSchema>;
 export type AnchorConfig = z.infer<typeof AnchorSchema>;
 export type SourceAnchorConfig = z.infer<typeof SourceAnchorSchema>;
+export type Proof = z.infer<typeof ProofSchema>;
 
 /** Parse + validate a corridor manifest from an object already in memory. */
 export function parseCorridor(raw: unknown): Outcome<Corridor> {
