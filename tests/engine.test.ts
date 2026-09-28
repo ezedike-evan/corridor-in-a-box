@@ -198,6 +198,34 @@ describe("engine.execute", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("AMOUNT_INVALID");
   });
+
+  it("reuses an existing on-chain settlement without calling submit()", async () => {
+    let submitCalls = 0;
+    const existingRef = { stellarTxHash: "existing-tx-hash-123", ledger: 777 };
+    const submitter = createMockSubmitter({ existingRef });
+    const originalSubmit = submitter.submit;
+    submitter.submit = async (req) => {
+      submitCalls++;
+      return originalSubmit(req);
+    };
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      idempotency: new InMemoryIdempotencyStore(),
+      trustManifestWithoutAttestation: true,
+    };
+
+    const r = await execute(intent("existing-settle"), corridor(), d);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.state).toBe("completed");
+      expect(r.value.stellarTxHash).toBe("existing-tx-hash-123");
+    }
+    expect(submitCalls).toBe(0);
+  });
 });
 
 // Helper: build a corridor with custom recovery policy / timeout.

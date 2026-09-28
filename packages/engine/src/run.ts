@@ -23,7 +23,12 @@ import {
   type IdempotencyStore,
   type StoredRun,
 } from "./idempotency";
-import type { RefundRequest, SettlementSubmitter } from "./ports";
+import type {
+  RefundRequest,
+  SettlementRef,
+  SettlementRequest,
+  SettlementSubmitter,
+} from "./ports";
 import { backoffMs, comply, open, quote, recover, reconcileUntil, settle } from "./verbs";
 import {
   noopMetrics,
@@ -247,6 +252,9 @@ export async function execute(
   const opened = await timed("open", () => open(adapter, intent, q.value, corridor));
   if (!opened.ok) return die(opened.error);
   run.transactionId = opened.value.transactionId;
+  run.depositAddress = opened.value.depositAddress;
+  run.memo = opened.value.memo;
+  run.memoType = opened.value.memoType;
   {
     const t = await advance("opened");
     if (!t.ok) return die(t.error);
@@ -344,9 +352,32 @@ export async function execute(
       if (!t.ok) return die(t.error);
     }
 
-    const s = await timed("settle", () =>
-      settle(deps.submitter, opened.value, q.value, corridor),
-    );
+    let s: Outcome<SettlementRef>;
+    if (deps.submitter.findExisting) {
+      const req: SettlementRequest = {
+        to: opened.value.depositAddress,
+        memo: opened.value.memo,
+        memoType: opened.value.memoType,
+        amount: {
+          asset: corridor.settlement.bridge_asset,
+          amount: q.value.sourceAmount.amount,
+        },
+        corridor,
+      };
+      const existing = await timed("findExisting", () => deps.submitter.findExisting!(req));
+      if (!existing.ok) {
+        return finishFailure(existing.error);
+      }
+      if (existing.value) {
+        s = ok(existing.value);
+      } else {
+        s = await timed("settle", () =>
+          settle(deps.submitter, opened.value, q.value, corridor),
+        );
+      }
+    } else {
+      s = await timed("settle", () => settle(deps.submitter, opened.value, q.value, corridor));
+    }
     if (!s.ok) {
       const action = recover(corridor, s.error.retryable, attempt);
       if (action.kind === "retry") {
