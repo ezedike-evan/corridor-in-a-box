@@ -16,6 +16,11 @@ export {
   type QueryResult,
 } from "./idempotency-pg";
 export {
+  PostgresCorridorHealthStore,
+  type CorridorHealthStore,
+  type HealthState,
+} from "./health-pg";
+export {
   UnimplementedSubmitter,
   createMockSubmitter,
   type SettlementSubmitter,

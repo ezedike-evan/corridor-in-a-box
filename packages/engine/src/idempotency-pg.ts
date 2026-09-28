@@ -38,6 +38,17 @@ create table if not exists corridor_runs (
   last_error      text,
   owner           text,
   updated_at      timestamptz not null default now()
+);
+
+create table if not exists corridor_breakers (
+  corridor_id          text primary key,
+  consecutive_failures integer not null default 0,
+  state                text not null default 'up',
+  tripped_at           timestamptz,
+  last_error           text,
+  reset_by             text,
+  reset_reason         text,
+  updated_at           timestamptz not null default now()
 );`;
 
 /** Additive migrations for tables created by an earlier version. `add column if
