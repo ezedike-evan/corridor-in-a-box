@@ -47,6 +47,7 @@ export {
   type LogFields,
   type AuditSink,
   type AuditEntry,
+  type AuditDetail,
   type Metrics,
   type MetricTags,
 } from "./observability";

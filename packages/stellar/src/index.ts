@@ -19,7 +19,15 @@ import {
   TransactionFailedError,
   xdr,
 } from "@stellar/stellar-sdk";
-import { fail, fromScaled, ok, STROOP_SCALE, toScaled, type Outcome } from "@corridor/types";
+import {
+  compareAmounts,
+  fail,
+  fromScaled,
+  ok,
+  STROOP_SCALE,
+  toScaled,
+  type Outcome,
+} from "@corridor/types";
 import type {
   CheckResult,
   GateCheck,
@@ -125,7 +133,7 @@ export class StellarSep10Signer implements Sep10Signer {
  *  tests can pass a fake without pulling in a real Horizon connection. */
 type HorizonServerLike = Pick<
   Horizon.Server,
-  "loadAccount" | "submitTransaction" | "transactions"
+  "loadAccount" | "submitTransaction" | "transactions" | "operations"
 >;
 
 export interface StellarSubmitterOptions {
@@ -271,6 +279,52 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
     }
   }
 
+  async findExisting(req: SettlementRequest): Promise<Outcome<SettlementRef | undefined>> {
+    try {
+      const page = await this.server
+        .transactions()
+        .forAccount(this.signer.publicKey)
+        .order("desc")
+        .limit(200)
+        .call();
+      const matches: SettlementRef[] = [];
+      for (const tx of page.records) {
+        if (!tx.successful || !memoMatches(req, tx.memo ?? "", tx.memo_type ?? "")) continue;
+        const operations = await this.server.operations().forTransaction(tx.hash).call();
+        const paymentFound = operations.records.some((operation) => {
+          if (operation.type !== "payment" || operation.to !== req.to) return false;
+          const amount = compareAmounts(operation.amount, req.amount.amount);
+          if (!amount.ok || amount.value !== 0) return false;
+          if (req.amount.asset.toUpperCase() === "XLM") return operation.asset_type === "native";
+          return (
+            operation.asset_code === req.amount.asset &&
+            operation.asset_issuer === req.corridor.settlement.asset_issuer
+          );
+        });
+        if (paymentFound) matches.push({ stellarTxHash: tx.hash, ledger: tx.ledger_attr });
+      }
+      if (matches.length > 1) {
+        return fail(
+          "IDEMPOTENCY_CONFLICT",
+          "multiple matching Stellar payments found; resume requires operator review",
+        );
+      }
+      if (matches.length === 1) return ok(matches[0]);
+      if (page.records.length === 200) {
+        return fail(
+          "IDEMPOTENCY_CONFLICT",
+          "Stellar payment lookup reached Horizon's page limit without a conclusive match",
+        );
+      }
+      return ok(undefined);
+    } catch (cause) {
+      return fail("ANCHOR_UNAVAILABLE", "Stellar payment lookup failed", {
+        retryable: true,
+        cause,
+      });
+    }
+  }
+
   async refund(req: RefundRequest): Promise<Outcome<SettlementRef>> {
     return fail(
       "REFUND_UNSUPPORTED",
@@ -303,6 +357,18 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
       await this.sleep(1_000);
     }
   }
+}
+
+function memoMatches(
+  req: SettlementRequest,
+  storedMemo: string,
+  storedMemoType: string,
+): boolean {
+  if (!req.memo) return !storedMemo;
+  if (req.memoType === "hash") {
+    return storedMemoType === "hash" && storedMemo === Buffer.from(req.memo, "base64").toString("hex");
+  }
+  return storedMemoType === (req.memoType ?? "text") && storedMemo === req.memo;
 }
 
 /**

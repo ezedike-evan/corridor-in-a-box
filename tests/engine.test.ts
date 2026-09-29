@@ -13,6 +13,7 @@ import {
   type CorridorState,
   type EngineDeps,
   type SettlementSubmitter,
+  type StoredRun,
 } from "@corridor/engine";
 import type { TransactionStatus } from "@corridor/adapter-kit";
 import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
@@ -27,12 +28,20 @@ function corridor(): Corridor {
       endpoints: {
         home_domain: "d.example",
         transfer_server_sep31: "https://d.example/sep31",
+        endpoints_verified_at: "1970-01-01",
       },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery: { max_retries: 2 },
+    proof: {
+      canary_completed_at: "1970-01-01T00:00:00Z",
+      stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      anchor_transaction_id: "canary-test",
+      amount: "1",
+      max_age_days: 50000,
+    },
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;
@@ -198,6 +207,210 @@ describe("engine.execute", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("AMOUNT_INVALID");
   });
+
+  it("rejects an over-cap unproven payment before claiming the idempotency key", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const audit = new InMemoryAuditLog();
+    const c = { ...corridor(), proof: undefined };
+    const i = { ...intent("unproven-over-cap"), sourceAmount: { asset: "USDC", amount: "10.01" } };
+
+    const r = await execute(i, c, { ...deps(), idempotency: store, audit });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
+    expect(await store.get(i.idempotencyKey)).toBeUndefined();
+    expect(audit.details[0]).toMatchObject({
+      event: "verifying",
+      detail: { liveness: "verified", effectiveCap: "10" },
+    });
+  });
+
+  it("allows an unproven payment at the canary cap", async () => {
+    const c = { ...corridor(), proof: undefined };
+    const i = { ...intent("unproven-at-cap"), sourceAmount: { asset: "USDC", amount: "10" } };
+
+    const r = await execute(i, c, deps());
+
+    expect(r.ok).toBe(true);
+  });
+
+  it("applies only max_amount to a proven corridor", async () => {
+    const c = { ...corridor(), limits: { max_amount: "150" } };
+    const i = { ...intent("proven-over-canary"), sourceAmount: { asset: "USDC", amount: "100" } };
+
+    const r = await execute(i, c, { ...deps(), unprovenMaxAmount: "10" });
+
+    expect(r.ok).toBe(true);
+
+    const overMax = await execute(
+      { ...i, idempotencyKey: "proven-over-max", sourceAmount: { asset: "USDC", amount: "151" } },
+      c,
+      deps(),
+    );
+    expect(overMax.ok).toBe(false);
+    if (!overMax.ok) expect(overMax.error.code).toBe("AMOUNT_INVALID");
+  });
+
+  it("treats stale proof as unproven", async () => {
+    const c = {
+      ...corridor(),
+      proof: {
+        ...corridor().proof!,
+        canary_completed_at: "2020-01-01T00:00:00Z",
+        max_age_days: 1,
+        canary_max_amount: "5",
+      },
+    };
+    const i = { ...intent("stale-proof"), sourceAmount: { asset: "USDC", amount: "6" } };
+    const r = await execute(i, c, { ...deps(), now: () => Date.parse("2026-09-29T00:00:00Z") });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
+  });
+
+  it("refuses unverified public corridors before claiming the key", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const c = {
+      ...corridor(),
+      dest: {
+        ...corridor().dest,
+        endpoints: { ...corridor().dest.endpoints, endpoints_verified_at: undefined },
+      },
+    };
+    const i = intent("public-unverified");
+
+    const r = await execute(i, c, { ...deps(), idempotency: store });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
+    expect(await store.get(i.idempotencyKey)).toBeUndefined();
+  });
+});
+
+function resumableRun(state: CorridorState, key = "resume-state"): StoredRun {
+  return {
+    idempotencyKey: key,
+    corridorId: "test",
+    state,
+    version: 4,
+    transactionId: "tx_resume",
+    quoteId: "q_resume",
+    quoteExpiresAt: Date.now() + 60_000,
+    quoteFirm: true,
+    settlementAmount: "100.00",
+    depositAddress: "GMOCK000000000000000000000000000000000000000000000000",
+    memo: "mock-memo",
+    memoType: "text",
+    stellarTxHash: "mocktx_existing",
+  };
+}
+
+describe("engine crash resume states", () => {
+  it.each(["created", "quoted", "compliant"] as const)(
+    "%s is failed as stale before anything is sent",
+    async (state) => {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}`;
+      await store.put({ ...resumableRun(state, key), transactionId: undefined });
+      const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.message).toContain("RESUME_STALE");
+      expect((await store.get(key))?.state).toBe("failed");
+    },
+  );
+
+  it.each(["opened", "retrying"] as const)(
+    "%s settles after a lookup miss and a fresh compliance gate",
+    async (state) => {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}-miss`;
+      await store.put(resumableRun(state, key));
+      const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+    },
+  );
+
+  it.each(["opened", "retrying", "settling"] as const)(
+    "%s advances to settled when lookup proves the payment exists",
+    async (state) => {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}-hit`;
+      const submitter = createMockSubmitter();
+      const existingPayment = await submitter.submit({
+        to: "GMOCK000000000000000000000000000000000000000000000000",
+        memo: "mock-memo",
+        memoType: "text",
+        amount: { asset: "USDC", amount: "100.00" },
+        corridor: corridor(),
+      });
+      if (!existingPayment.ok) throw new Error("mock settlement did not succeed");
+      await store.put({ ...resumableRun(state, key), stellarTxHash: undefined });
+      const r = await execute(intent(key), corridor(), {
+        ...deps(),
+        idempotency: store,
+        submitter,
+      });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+      expect((await store.get(key))?.stellarTxHash).toBe(existingPayment.value.stellarTxHash);
+    },
+  );
+
+  it("keeps a settling miss conflicted for operator review", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const key = "resume-settling-miss";
+    await store.put(resumableRun("settling", key));
+    const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect((await store.get(key))?.state).toBe("settling");
+  });
+
+  it("reconciles a settled run and completes a reconciled run", async () => {
+    for (const state of ["settled", "reconciled"] as const) {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}`;
+      await store.put(resumableRun(state, key));
+      const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+    }
+  });
+
+  it.each(["recovering", "refund_pending"] as const)(
+    "%s continues watching until the receiving anchor reports refund information",
+    async (state) => {
+      const refundStatus = {
+        amountRefunded: { asset: "USDC", amount: "100.00" },
+        amountFee: { asset: "USDC", amount: "0" },
+        payments: [],
+        completeness: "full" as const,
+      };
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}`;
+      await store.put(resumableRun(state, key));
+      const r = await execute(intent(key), corridor(), {
+        ...deps({ refundStatus }),
+        idempotency: store,
+      });
+      expect(r.ok).toBe(false);
+      expect((await store.get(key))?.state).toBe("refunded");
+    },
+  );
+
+  it("routes a resumed reconcile failure through recovery.rollback", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const key = "resume-settled-refund";
+    await store.put(resumableRun("settled", key));
+    const r = await execute(intent(key), corridorWith({ max_retries: 0, rollback: "refund_sender" }), {
+      ...deps({ terminalFailure: true }),
+      idempotency: store,
+    });
+    expect(r.ok).toBe(false);
+    expect((await store.get(key))?.state).toBe("refunded");
+    expect((await store.get(key))?.refundId).toBeTruthy();
+  });
 });
 
 // Helper: build a corridor with custom recovery policy / timeout.
@@ -211,12 +424,20 @@ function corridorWith(recovery: Record<string, unknown>): Corridor {
       endpoints: {
         home_domain: "d.example",
         transfer_server_sep31: "https://d.example/sep31",
+        endpoints_verified_at: "1970-01-01",
       },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery,
+    proof: {
+      canary_completed_at: "1970-01-01T00:00:00Z",
+      stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      anchor_transaction_id: "canary-test",
+      amount: "1",
+      max_age_days: 50000,
+    },
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;
@@ -321,6 +542,112 @@ describe("engine recovery", () => {
       expect(r.error.message).toContain("first status=pending_sender");
       expect(r.error.message).toContain("last status=pending_receiver");
     }
+  });
+
+  it("does not poll-count-stall an external phase within its elapsed-time budget", async () => {
+    let pollCount = 0;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        pollCount += 1;
+        return {
+          ok: true as const,
+          value: {
+            status: pollCount <= 100 ? "pending_external" : "completed",
+            phase: pollCount <= 100 ? ("external" as const) : undefined,
+            settled: pollCount > 100,
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-external", {
+      now: () => 0,
+      sleep: async () => {},
+      deadlineMs: 1_000_000,
+      pollMs: 1_000,
+      stallThreshold: 10,
+      externalStallMs: 60_000,
+    });
+
+    expect(r.ok).toBe(true);
+    expect(pollCount).toBe(101);
+  });
+
+  it("poll-count-stalls an unchanged anchor phase after the configured threshold", async () => {
+    let pollCount = 0;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        pollCount += 1;
+        return {
+          ok: true as const,
+          value: {
+            status: "pending_stellar",
+            phase: "anchor" as const,
+            settled: false,
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-anchor", {
+      now: () => 0,
+      sleep: async () => {},
+      deadlineMs: 1_000_000,
+      pollMs: 1_000,
+      stallThreshold: 10,
+      externalStallMs: 60_000,
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("RECONCILE_STALLED");
+      expect(r.error.message).toContain("poll stall budget");
+    }
+    expect(pollCount).toBe(11);
+  });
+
+  it("backs off during external waits and resets the interval when status changes", async () => {
+    let pollCount = 0;
+    const delays: number[] = [];
+    const statuses = [
+      ["pending_external", "external"],
+      ["pending_external", "external"],
+      ["pending_receiver", "external"],
+      ["pending_stellar", "anchor"],
+      ["completed", undefined],
+    ] as const;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        const [status, phase] = statuses[pollCount++];
+        return {
+          ok: true as const,
+          value: {
+            status,
+            ...(phase ? { phase } : {}),
+            settled: status === "completed",
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-backoff", {
+      now: () => 0,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      deadlineMs: 1_000_000,
+      pollMs: 1_000,
+      stallThreshold: 10,
+    });
+
+    expect(r.ok).toBe(true);
+    expect(delays).toEqual([1_000, 2_000, 1_000, 1_000]);
   });
 
   it("SETTLEMENT_TIMEOUT records identical first and last status for a stalled observer", async () => {

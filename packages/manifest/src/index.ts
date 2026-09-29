@@ -101,7 +101,32 @@ export const LimitsSchema = z.object({
 export const RecoverySchema = z.object({
   max_retries: z.number().int().nonnegative().default(3),
   timeout_seconds: z.number().int().positive().default(900),
+  reconcile: z
+    .object({
+      external_stall_seconds: z.number().int().positive().default(21_600),
+    })
+    .default({}),
   rollback: z.enum(["refund_sender", "hold", "manual"]).default("refund_sender"),
+});
+
+/** Canary payment evidence proving this exact lane successfully moved money. */
+export const ProofSchema = z.object({
+  canary_completed_at: z
+    .string()
+    .regex(
+      /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$/,
+      "expected an ISO date or timestamp",
+    ),
+  stellar_tx_hash: z
+    .string()
+    .regex(/^[0-9a-fA-F]{64}$/, "expected a 64-character hex transaction hash"),
+  anchor_transaction_id: z.string().min(1),
+  amount: z.string().regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount"),
+  max_age_days: z.number().int().positive().default(30),
+  canary_max_amount: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
+    .optional(),
 });
 
 export const CorridorSchema = z.object({
@@ -115,10 +140,12 @@ export const CorridorSchema = z.object({
   settlement: SettlementSchema,
   recovery: RecoverySchema,
   limits: LimitsSchema.optional(),
+  proof: ProofSchema.optional(),
 });
 
 export type Corridor = z.infer<typeof CorridorSchema>;
 export type AnchorConfig = z.infer<typeof AnchorSchema>;
+export type Proof = z.infer<typeof ProofSchema>;
 
 /** Parse + validate a corridor manifest from an object already in memory. */
 export function parseCorridor(raw: unknown): Outcome<Corridor> {

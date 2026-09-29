@@ -30,6 +30,8 @@ export type CorridorErrorCode =
   | "RECONCILE_MISMATCH"
   | "RECONCILE_STALLED"
   | "IDEMPOTENCY_CONFLICT"
+  /** The requested payment exceeds the canary cap for an unproven corridor. */
+  | "CORRIDOR_UNPROVEN"
   /** our balance cannot cover amount + fee + reserve */
   | "PRESETTLE_INSUFFICIENT_FUNDS";
 

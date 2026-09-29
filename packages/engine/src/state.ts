@@ -23,11 +23,12 @@ const NEXT: Record<CorridorState, readonly CorridorState[]> = {
   created: ["quoted", "failed"],
   quoted: ["compliant", "recovering", "failed"],
   compliant: ["opened", "recovering", "failed"],
-  opened: ["settling", "recovering", "failed"],
+  // A successful settlement lookup is proof that money moved before the crash.
+  opened: ["settling", "settled", "recovering", "failed"],
   settling: ["settled", "retrying", "recovering", "failed"],
   // A settle attempt failed BEFORE money moved, so going round again is safe.
   // This is the only state that may re-enter `settling`.
-  retrying: ["settling", "recovering", "failed"],
+  retrying: ["settling", "settled", "recovering", "failed"],
   settled: ["reconciled", "recovering", "failed"],
   reconciled: ["completed", "failed"],
   completed: [],

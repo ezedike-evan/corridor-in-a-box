@@ -28,6 +28,7 @@ describe("manifest", () => {
       expect(r.value.fx.quote_ttl_seconds).toBe(60); // default applied
       expect(r.value.settlement.bridge_asset).toBe("USDC"); // default applied
       expect(r.value.recovery.rollback).toBe("refund_sender"); // default applied
+      expect(r.value.recovery.reconcile.external_stall_seconds).toBe(21_600);
     }
   });
 

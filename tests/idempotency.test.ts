@@ -172,10 +172,16 @@ function fakeDb(): Queryable & { table: Map<string, Record<string, unknown>> } {
         version: params[3] as number,
         transaction_id: params[4],
         quote_id: params[5],
-        stellar_tx_hash: params[6],
-        refund_id: params[7],
-        last_error: params[8],
-        owner: params[9],
+        quote_expires_at: params[6],
+        quote_firm: params[7],
+        settlement_amount: params[8],
+        deposit_address: params[9],
+        memo: params[10],
+        memo_type: params[11],
+        stellar_tx_hash: params[12],
+        refund_id: params[13],
+        last_error: params[14],
+        owner: params[15],
       };
       // create(): INSERT … ON CONFLICT DO NOTHING RETURNING — only the first
       // writer for a key lands a row and gets it back; a conflict returns [].
@@ -315,6 +321,20 @@ describe("refund state round-trips", () => {
     expect(seen[0]).toContain("refund_id");
     expect(seen.slice(1).join("\n")).toContain("add column if not exists refund_id");
   });
+
+  it("ships resume data columns in create DDL and additive migrations", async () => {
+    const seen: string[] = [];
+    await migrate({
+      async query(text: string) {
+        seen.push(text);
+        return { rows: [] };
+      },
+    });
+    for (const column of ["quote_expires_at", "quote_firm", "settlement_amount", "deposit_address"]) {
+      expect(seen[0]).toContain(column);
+      expect(seen.slice(1).join("\n")).toContain(`add column if not exists ${column}`);
+    }
+  });
 });
 
 describe("PostgresIdempotencyStore", () => {
@@ -333,6 +353,32 @@ describe("PostgresIdempotencyStore", () => {
     expect(got).toMatchObject({ idempotencyKey: "k", state: "settled", transactionId: "tx" });
     expect(got?.stellarTxHash).toBeUndefined();
     expect(got?.quoteId).toBeUndefined();
+  });
+
+  it("round-trips quote and opened transaction data", async () => {
+    const store = new PostgresIdempotencyStore(fakeDb());
+    await store.put({
+      idempotencyKey: "resume-data",
+      corridorId: "c",
+      state: "opened",
+      version: 2,
+      transactionId: "tx",
+      quoteId: "quote",
+      quoteExpiresAt: 1234,
+      quoteFirm: true,
+      settlementAmount: "10.00",
+      depositAddress: "GDEST",
+      memo: "memo",
+      memoType: "hash",
+    });
+    expect(await store.get("resume-data")).toMatchObject({
+      quoteExpiresAt: 1234,
+      quoteFirm: true,
+      settlementAmount: "10.00",
+      depositAddress: "GDEST",
+      memo: "memo",
+      memoType: "hash",
+    });
   });
 
   it("ignores a stale write with a lower version (optimistic concurrency)", async () => {
