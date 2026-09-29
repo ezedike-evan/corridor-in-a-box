@@ -7,6 +7,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — Parse legacy flat SEP-31 endpoints as protocol sep31 with deprecation warning (#180) (2026-09-29)
+
+- `dest.protocol` discriminated union supports `protocol: "sep31"` (requiring SEP-31 endpoints), `protocol: "sep6"` (requiring `transfer_server`), and `protocol: "custom:<name>"` (requiring `base_url`).
+- For backward compatibility with existing manifests and fixtures, manifests without `protocol` default to `protocol: "sep31"` at parse time.
+- Emits a deprecation warning in `warnings: string[]` on `parseCorridor` / `loadCorridor` outcomes for legacy manifests omitting `protocol`.
+- Manifests omitting `protocol` while providing `transfer_server` or `base_url` are rejected with guidance to set `protocol: sep6` or `protocol: custom:<name>`.
+- Exported `DestProtocol`, `Sep31Anchor`, `Sep6Anchor`, `CustomAnchor`, `AnchorConfig`, and `protocolOf(anchor)` helper from `@corridor/manifest`.
+- Narrowed `Sep31Adapter` constructor to fail clearly when supplied a non-sep31 destination.
+
 ### Maintenance — ESLint 10 landed
 
 - `eslint` 10 landed in [#37](https://github.com/ezedike-evan/corridor-in-a-box/pull/37).

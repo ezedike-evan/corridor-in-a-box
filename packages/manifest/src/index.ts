@@ -11,11 +11,15 @@
 import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { ok, fail, type Outcome } from "@corridor/types";
+import { fail, type Err, type Ok, type CorridorError } from "@corridor/types";
 
-/** SEP endpoints an anchor exposes. Only home_domain is mandatory; the rest are
- *  discovered from its stellar.toml in practice, but may be pinned here. */
-export const AnchorEndpointsSchema = z.object({
+const endpointsVerifiedAtSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "expected an ISO date, YYYY-MM-DD")
+  .optional();
+
+/** SEP-31 DIRECT_PAYMENT_SERVER endpoints schema. */
+export const Sep31EndpointsSchema = z.object({
   home_domain: z.string().min(1),
   /** SEP-31 DIRECT_PAYMENT_SERVER */
   transfer_server_sep31: z.string().url().optional(),
@@ -29,19 +33,84 @@ export const AnchorEndpointsSchema = z.object({
    * ISO date (YYYY-MM-DD) on which the URLs above were confirmed against this
    * anchor's PUBLISHED stellar.toml, or — for a self-hosted lane like the Anchor
    * Platform reference server — against a running instance.
-   *
-   * Presence of a URL proves nothing: a manifest can name an endpoint that has
-   * never existed. This field is the difference between "someone typed a URL"
-   * and "someone checked it", and it is what `liveness()` requires before it
-   * will report a corridor as verified. Leave it unset until you have actually
-   * looked. Never set it speculatively.
    */
-  endpoints_verified_at: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, "expected an ISO date, YYYY-MM-DD")
-    .optional(),
+  endpoints_verified_at: endpointsVerifiedAtSchema,
 });
 
+/** SEP-6 TRANSFER_SERVER endpoints schema. */
+export const Sep6EndpointsSchema = z.object({
+  home_domain: z.string().min(1),
+  /** SEP-6 TRANSFER_SERVER (required) */
+  transfer_server: z.string().url(),
+  /** SEP-10 WEB_AUTH_ENDPOINT */
+  web_auth: z.string().url().optional(),
+  /** SEP-12 KYC_SERVER */
+  kyc_server: z.string().url().optional(),
+  /** SEP-38 QUOTE_SERVER */
+  quote_server: z.string().url().optional(),
+  endpoints_verified_at: endpointsVerifiedAtSchema,
+});
+
+/** Bespoke API base URL endpoints schema. */
+export const CustomEndpointsSchema = z.object({
+  home_domain: z.string().min(1),
+  /** Custom API base URL (required) */
+  base_url: z.string().url(),
+  /** SEP-10 WEB_AUTH_ENDPOINT */
+  web_auth: z.string().url().optional(),
+  /** SEP-12 KYC_SERVER */
+  kyc_server: z.string().url().optional(),
+  /** SEP-38 QUOTE_SERVER */
+  quote_server: z.string().url().optional(),
+  /** Free-form extra configuration for custom adapters */
+  extra: z.record(z.string(), z.unknown()).optional(),
+  endpoints_verified_at: endpointsVerifiedAtSchema,
+});
+
+/** SEP endpoints an anchor exposes. Backward-compatible alias to Sep31EndpointsSchema. */
+export const AnchorEndpointsSchema = Sep31EndpointsSchema;
+
+export const Sep31AnchorSchema = z.object({
+  name: z.string().min(1),
+  asset: z.string().min(1),
+  protocol: z.literal("sep31"),
+  endpoints: Sep31EndpointsSchema,
+});
+
+export const Sep6AnchorSchema = z.object({
+  name: z.string().min(1),
+  asset: z.string().min(1),
+  protocol: z.literal("sep6"),
+  endpoints: Sep6EndpointsSchema,
+});
+
+export const CustomAnchorSchema = z.object({
+  name: z.string().min(1),
+  asset: z.string().min(1),
+  protocol: z
+    .string()
+    .regex(/^custom:[a-z0-9-]+$/, "expected protocol to match custom:[a-z0-9-]+") as z.ZodType<
+    `custom:${string}`,
+    z.ZodTypeDef,
+    string
+  >,
+  endpoints: CustomEndpointsSchema,
+});
+
+export type Sep31Anchor = z.infer<typeof Sep31AnchorSchema>;
+export type Sep6Anchor = z.infer<typeof Sep6AnchorSchema>;
+export type CustomAnchor = z.infer<typeof CustomAnchorSchema>;
+export type AnchorConfig = Sep31Anchor | Sep6Anchor | CustomAnchor;
+export type DestProtocol = AnchorConfig["protocol"];
+
+/** Returns the protocol declared by a destination anchor. */
+export function protocolOf(anchor: AnchorConfig): DestProtocol {
+  return anchor.protocol;
+}
+
+/**
+ * AnchorSchema for source anchors (source-side protocol negotiation is unversioned/thin).
+ */
 export const AnchorSchema = z.object({
   name: z.string().min(1),
   endpoints: AnchorEndpointsSchema,
@@ -49,6 +118,119 @@ export const AnchorSchema = z.object({
    *  Dest side: the off-chain payout asset, e.g. "iso4217:ARS". */
   asset: z.string().min(1),
 });
+
+export type SourceAnchorConfig = z.infer<typeof AnchorSchema>;
+
+/**
+ * Destination anchor schema with protocol discrimination and legacy fallback.
+ *
+ * Supported protocols:
+ * - `sep31`: Standard SEP-31 anchor, expects `endpoints.transfer_server_sep31`.
+ * - `sep6`: SEP-6 deposit/withdraw anchor, expects `endpoints.transfer_server`.
+ * - `custom:<name>`: Custom adapter, expects `endpoints.base_url`.
+ *
+ * Backward compatibility:
+ * When `protocol` is omitted on a destination anchor, it defaults to `"sep31"`
+ * if the endpoints shape is SEP-31 compatible (no `transfer_server` or `base_url` keys).
+ * A deprecation warning is emitted via `parseCorridor`/`loadCorridor` results.
+ * If `protocol` is omitted but `transfer_server` is present, the manifest is
+ * rejected with a message instructing the author to set `protocol: sep6`.
+ * If `protocol` is omitted but `base_url` is present, the manifest is
+ * rejected with a message instructing the author to set `protocol: custom:<name>`.
+ */
+export const DestAnchorSchema: z.ZodType<AnchorConfig, z.ZodTypeDef, unknown> = z.preprocess(
+  (val) => {
+    if (typeof val === "object" && val !== null) {
+      const raw = val as Record<string, unknown>;
+      if (raw.protocol === undefined) {
+        const endpoints =
+          raw.endpoints && typeof raw.endpoints === "object"
+            ? (raw.endpoints as Record<string, unknown>)
+            : undefined;
+        if (endpoints && "transfer_server" in endpoints) {
+          return {
+            ...raw,
+            protocol: "__missing_protocol_transfer_server__",
+          };
+        }
+        if (endpoints && "base_url" in endpoints) {
+          return {
+            ...raw,
+            protocol: "__missing_protocol_base_url__",
+          };
+        }
+        return { ...raw, protocol: "sep31" };
+      }
+    }
+    return val;
+  },
+  z.any().transform((val, ctx): AnchorConfig => {
+    if (typeof val !== "object" || val === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "expected dest to be an object",
+      });
+      return z.NEVER;
+    }
+    const raw = val as Record<string, unknown>;
+    if (raw.protocol === "__missing_protocol_transfer_server__") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["protocol"],
+        message:
+          "manifest dest specifies transfer_server with no protocol; set protocol: sep6",
+      });
+      return z.NEVER;
+    }
+    if (raw.protocol === "__missing_protocol_base_url__") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["protocol"],
+        message:
+          "manifest dest specifies base_url with no protocol; set protocol: custom:<name>",
+      });
+      return z.NEVER;
+    }
+    if (typeof raw.protocol !== "string") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["protocol"],
+        message: "missing required protocol",
+      });
+      return z.NEVER;
+    }
+    if (raw.protocol === "sep31") {
+      const res = Sep31AnchorSchema.safeParse(val);
+      if (!res.success) {
+        for (const issue of res.error.issues) ctx.addIssue(issue);
+        return z.NEVER;
+      }
+      return res.data;
+    }
+    if (raw.protocol === "sep6") {
+      const res = Sep6AnchorSchema.safeParse(val);
+      if (!res.success) {
+        for (const issue of res.error.issues) ctx.addIssue(issue);
+        return z.NEVER;
+      }
+      return res.data;
+    }
+    if (/^custom:[a-z0-9-]+$/.test(raw.protocol)) {
+      const res = CustomAnchorSchema.safeParse(val);
+      if (!res.success) {
+        for (const issue of res.error.issues) ctx.addIssue(issue);
+        return z.NEVER;
+      }
+      return res.data;
+    }
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["protocol"],
+      message: `invalid protocol: ${raw.protocol}; must be "sep31", "sep6", or match custom:[a-z0-9-]+`,
+    });
+    return z.NEVER;
+  }),
+);
 
 export const FxSchema = z.object({
   /** The conversion path, in order. e.g. ["NGN","USDC","ARS"]. >= 2 hops. */
@@ -109,7 +291,7 @@ export const CorridorSchema = z.object({
   /** Human note. Use it to record liveness, e.g. "pending: no RMB SEP-31 anchor". */
   status_note: z.string().optional(),
   source: AnchorSchema,
-  dest: AnchorSchema,
+  dest: DestAnchorSchema,
   fx: FxSchema,
   compliance: ComplianceSchema,
   settlement: SettlementSchema,
@@ -118,19 +300,32 @@ export const CorridorSchema = z.object({
 });
 
 export type Corridor = z.infer<typeof CorridorSchema>;
-export type AnchorConfig = z.infer<typeof AnchorSchema>;
+
+export type ParseCorridorOk = Ok<Corridor> & { readonly warnings: string[] };
+export type ParseCorridorOutcome = ParseCorridorOk | Err<CorridorError>;
 
 /** Parse + validate a corridor manifest from an object already in memory. */
-export function parseCorridor(raw: unknown): Outcome<Corridor> {
+export function parseCorridor(raw: unknown): ParseCorridorOutcome {
+  const warnings: string[] = [];
+  if (typeof raw === "object" && raw !== null && "dest" in raw) {
+    const dest = (raw as Record<string, unknown>).dest;
+    if (typeof dest === "object" && dest !== null && !("protocol" in dest)) {
+      warnings.push(
+        "dest anchor specifies no protocol; defaulting to 'sep31'. " +
+          "Explicitly set dest.protocol: 'sep31' as unversioned endpoint manifests are deprecated.",
+      );
+    }
+  }
+
   const parsed = CorridorSchema.safeParse(raw);
   if (!parsed.success) {
     return fail("MANIFEST_INVALID", formatZodError(parsed.error), { cause: parsed.error });
   }
-  return ok(parsed.data);
+  return { ok: true, value: parsed.data, warnings };
 }
 
 /** Read + validate a *.corridor.yaml file from disk. */
-export function loadCorridor(path: string): Outcome<Corridor> {
+export function loadCorridor(path: string): ParseCorridorOutcome {
   let raw: unknown;
   try {
     raw = parseYaml(readFileSync(path, "utf8"));
@@ -139,6 +334,9 @@ export function loadCorridor(path: string): Outcome<Corridor> {
   }
   return parseCorridor(raw);
 }
+
+export const parseCorridorWithWarnings = parseCorridor;
+export const loadCorridorWithWarnings = loadCorridor;
 
 function formatZodError(e: z.ZodError): string {
   return e.issues.map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`).join("; ");

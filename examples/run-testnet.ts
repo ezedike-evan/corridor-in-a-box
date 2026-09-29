@@ -79,7 +79,11 @@ async function main(): Promise<void> {
     process.exit(3);
   }
 
-  if (!corridor.dest.endpoints.transfer_server_sep31) {
+  if (
+    corridor.dest.protocol !== "sep31" ||
+    !("transfer_server_sep31" in corridor.dest.endpoints) ||
+    !corridor.dest.endpoints.transfer_server_sep31
+  ) {
     console.error(
       `✗ corridor "${corridor.id}" has no dest SEP-31 transfer server — not runnable. ` +
         `Fill dest.endpoints from the anchor's stellar.toml first (see 'pnpm cli plan').`,
@@ -187,7 +191,9 @@ async function main(): Promise<void> {
   console.log(`\nrunning corridor "${corridor.id}" on ${corridor.settlement.network}`);
   console.log(`signer:     ${signer.publicKey}`);
   console.log(`horizon:    ${horizonUrl}`);
-  console.log(`anchor:     ${corridor.dest.endpoints.transfer_server_sep31}`);
+  console.log(
+    `anchor:     ${"transfer_server_sep31" in corridor.dest.endpoints ? corridor.dest.endpoints.transfer_server_sep31 : ""}`,
+  );
   console.log(
     `intent:     ${intent.idempotencyKey} (${intent.sourceAmount.amount} ${intent.sourceAmount.asset})\n`,
   );

@@ -8,11 +8,16 @@ import { describe, expect, it } from "vitest";
 // test a CLI's actual argv/exit-code/stdio contract.
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
+const TSX =
+  process.platform === "win32"
+    ? fileURLToPath(new URL("../node_modules/tsx/dist/cli.mjs", import.meta.url))
+    : fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
 const CLI = fileURLToPath(new URL("../packages/cli/src/index.ts", import.meta.url));
 
 function run(args: string[]) {
-  return spawnSync(TSX, [CLI, ...args], { cwd: REPO_ROOT, encoding: "utf8" });
+  return process.platform === "win32"
+    ? spawnSync(process.execPath, [TSX, CLI, ...args], { cwd: REPO_ROOT, encoding: "utf8" })
+    : spawnSync(TSX, [CLI, ...args], { cwd: REPO_ROOT, encoding: "utf8" });
 }
 
 describe("corridor CLI", () => {

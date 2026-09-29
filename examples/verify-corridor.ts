@@ -88,6 +88,7 @@ function pinToReferenceAnchor(corridor: Corridor): Corridor {
     ...corridor,
     dest: {
       ...corridor.dest,
+      protocol: "sep31",
       endpoints: {
         ...corridor.dest.endpoints,
         home_domain: host,
