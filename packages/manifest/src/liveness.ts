@@ -48,8 +48,12 @@ export function liveness(c: Corridor): Liveness {
   const warnings: string[] = [];
   const endpoints = c.dest.endpoints;
   const verifiedAt = endpoints.endpoints_verified_at;
+  const transferServerSep31 =
+    "transfer_server_sep31" in endpoints ? endpoints.transfer_server_sep31 : undefined;
+  const quoteServer = "quote_server" in endpoints ? endpoints.quote_server : undefined;
+  const kycServer = "kyc_server" in endpoints ? endpoints.kyc_server : undefined;
 
-  if (!endpoints.transfer_server_sep31) {
+  if (!transferServerSep31) {
     warnings.push(
       "dest has no SEP-31 transfer server — corridor cannot settle. NOT runnable.",
     );
@@ -61,18 +65,18 @@ export function liveness(c: Corridor): Liveness {
     );
   }
 
-  if (c.fx.quote_source === "sep38" && !endpoints.quote_server) {
+  if (c.fx.quote_source === "sep38" && !quoteServer) {
     warnings.push(
       "fx.quote_source=sep38 but dest exposes no SEP-38 quote server — quotes will fail.",
     );
   }
-  if (!endpoints.kyc_server) {
+  if (!kycServer) {
     warnings.push(
       "dest has no SEP-12 KYC server — assuming 1:1 delivery with no per-customer KYC.",
     );
   }
 
-  const state: LivenessState = !endpoints.transfer_server_sep31
+  const state: LivenessState = !transferServerSep31
     ? "not-runnable"
     : verifiedAt
       ? "verified"
