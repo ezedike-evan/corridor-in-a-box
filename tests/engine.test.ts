@@ -13,6 +13,7 @@ import {
   type CorridorState,
   type EngineDeps,
   type SettlementSubmitter,
+  type StoredRun,
 } from "@corridor/engine";
 import type { TransactionStatus } from "@corridor/adapter-kit";
 import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
@@ -283,6 +284,132 @@ describe("engine.execute", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
     expect(await store.get(i.idempotencyKey)).toBeUndefined();
+  });
+});
+
+function resumableRun(state: CorridorState, key = "resume-state"): StoredRun {
+  return {
+    idempotencyKey: key,
+    corridorId: "test",
+    state,
+    version: 4,
+    transactionId: "tx_resume",
+    quoteId: "q_resume",
+    quoteExpiresAt: Date.now() + 60_000,
+    quoteFirm: true,
+    settlementAmount: "100.00",
+    depositAddress: "GMOCK000000000000000000000000000000000000000000000000",
+    memo: "mock-memo",
+    memoType: "text",
+    stellarTxHash: "mocktx_existing",
+  };
+}
+
+describe("engine crash resume states", () => {
+  it.each(["created", "quoted", "compliant"] as const)(
+    "%s is failed as stale before anything is sent",
+    async (state) => {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}`;
+      await store.put({ ...resumableRun(state, key), transactionId: undefined });
+      const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.message).toContain("RESUME_STALE");
+      expect((await store.get(key))?.state).toBe("failed");
+    },
+  );
+
+  it.each(["opened", "retrying"] as const)(
+    "%s settles after a lookup miss and a fresh compliance gate",
+    async (state) => {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}-miss`;
+      await store.put(resumableRun(state, key));
+      const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+    },
+  );
+
+  it.each(["opened", "retrying", "settling"] as const)(
+    "%s advances to settled when lookup proves the payment exists",
+    async (state) => {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}-hit`;
+      const submitter = createMockSubmitter();
+      const existingPayment = await submitter.submit({
+        to: "GMOCK000000000000000000000000000000000000000000000000",
+        memo: "mock-memo",
+        memoType: "text",
+        amount: { asset: "USDC", amount: "100.00" },
+        corridor: corridor(),
+      });
+      if (!existingPayment.ok) throw new Error("mock settlement did not succeed");
+      await store.put({ ...resumableRun(state, key), stellarTxHash: undefined });
+      const r = await execute(intent(key), corridor(), {
+        ...deps(),
+        idempotency: store,
+        submitter,
+      });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+      expect((await store.get(key))?.stellarTxHash).toBe(existingPayment.value.stellarTxHash);
+    },
+  );
+
+  it("keeps a settling miss conflicted for operator review", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const key = "resume-settling-miss";
+    await store.put(resumableRun("settling", key));
+    const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect((await store.get(key))?.state).toBe("settling");
+  });
+
+  it("reconciles a settled run and completes a reconciled run", async () => {
+    for (const state of ["settled", "reconciled"] as const) {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}`;
+      await store.put(resumableRun(state, key));
+      const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+    }
+  });
+
+  it.each(["recovering", "refund_pending"] as const)(
+    "%s continues watching until the receiving anchor reports refund information",
+    async (state) => {
+      const refundStatus = {
+        amountRefunded: { asset: "USDC", amount: "100.00" },
+        amountFee: { asset: "USDC", amount: "0" },
+        payments: [],
+        completeness: "full" as const,
+      };
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}`;
+      await store.put(resumableRun(state, key));
+      const r = await execute(intent(key), corridor(), {
+        ...deps({ refundStatus }),
+        idempotency: store,
+      });
+      expect(r.ok).toBe(false);
+      expect((await store.get(key))?.state).toBe("refunded");
+    },
+  );
+
+  it("routes a resumed reconcile failure through recovery.rollback", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const key = "resume-settled-refund";
+    await store.put(resumableRun("settled", key));
+    const r = await execute(intent(key), corridorWith({ max_retries: 0, rollback: "refund_sender" }), {
+      ...deps({ terminalFailure: true }),
+      idempotency: store,
+    });
+    expect(r.ok).toBe(false);
+    expect((await store.get(key))?.state).toBe("refunded");
+    expect((await store.get(key))?.refundId).toBeTruthy();
   });
 });
 

@@ -30,6 +30,12 @@ create table if not exists corridor_runs (
   version         integer not null,
   transaction_id  text,
   quote_id        text,
+  quote_expires_at bigint,
+  quote_firm      boolean,
+  settlement_amount text,
+  deposit_address text,
+  memo            text,
+  memo_type       text,
   stellar_tx_hash text,
   refund_id       text,
   last_error      text,
@@ -47,6 +53,12 @@ const ALTER_TABLE_SQL = [
   // must pick this up on migrate(), or every resumed run there would still have
   // no record of a refund it already requested.
   `alter table corridor_runs add column if not exists refund_id text;`,
+  `alter table corridor_runs add column if not exists quote_expires_at bigint;`,
+  `alter table corridor_runs add column if not exists quote_firm boolean;`,
+  `alter table corridor_runs add column if not exists settlement_amount text;`,
+  `alter table corridor_runs add column if not exists deposit_address text;`,
+  `alter table corridor_runs add column if not exists memo text;`,
+  `alter table corridor_runs add column if not exists memo_type text;`,
 ];
 
 export async function migrate(db: Queryable): Promise<void> {
@@ -61,6 +73,12 @@ interface Row {
   version: number;
   transaction_id: string | null;
   quote_id: string | null;
+  quote_expires_at: number | string | null;
+  quote_firm: boolean | null;
+  settlement_amount: string | null;
+  deposit_address: string | null;
+  memo: string | null;
+  memo_type: "text" | "hash" | "id" | null;
   stellar_tx_hash: string | null;
   refund_id: string | null;
   last_error: string | null;
@@ -75,6 +93,13 @@ function toRun(r: Row): StoredRun {
     version: r.version,
     transactionId: r.transaction_id ?? undefined,
     quoteId: r.quote_id ?? undefined,
+    quoteExpiresAt:
+      r.quote_expires_at == null ? undefined : Number(r.quote_expires_at),
+    quoteFirm: r.quote_firm ?? undefined,
+    settlementAmount: r.settlement_amount ?? undefined,
+    depositAddress: r.deposit_address ?? undefined,
+    memo: r.memo ?? undefined,
+    memoType: r.memo_type ?? undefined,
     stellarTxHash: r.stellar_tx_hash ?? undefined,
     refundId: r.refund_id ?? undefined,
     lastError: r.last_error ?? undefined,
@@ -96,9 +121,11 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
   async create(run: StoredRun): Promise<boolean> {
     const res = await this.db.query<{ idempotency_key: string }>(
       `insert into corridor_runs
-         (idempotency_key, corridor_id, state, version, transaction_id,
-          quote_id, stellar_tx_hash, refund_id, last_error, owner, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+        (idempotency_key, corridor_id, state, version, transaction_id,
+         quote_id, quote_expires_at, quote_firm, settlement_amount,
+         deposit_address, memo, memo_type, stellar_tx_hash, refund_id,
+         last_error, owner, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now())
        on conflict (idempotency_key) do nothing
        returning idempotency_key`,
       [
@@ -108,6 +135,12 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
         run.version,
         run.transactionId ?? null,
         run.quoteId ?? null,
+        run.quoteExpiresAt ?? null,
+        run.quoteFirm ?? null,
+        run.settlementAmount ?? null,
+        run.depositAddress ?? null,
+        run.memo ?? null,
+        run.memoType ?? null,
         run.stellarTxHash ?? null,
         run.refundId ?? null,
         run.lastError ?? null,
@@ -119,8 +152,10 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
 
   async get(key: string): Promise<StoredRun | undefined> {
     const res = await this.db.query<Row>(
-      `select idempotency_key, corridor_id, state, version, transaction_id,
-              quote_id, stellar_tx_hash, refund_id, last_error, owner
+            `select idempotency_key, corridor_id, state, version, transaction_id,
+              quote_id, quote_expires_at, quote_firm, settlement_amount,
+              deposit_address, memo, memo_type, stellar_tx_hash, refund_id,
+              last_error, owner
          from corridor_runs where idempotency_key = $1`,
       [key],
     );
@@ -147,14 +182,22 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
   async put(run: StoredRun): Promise<void> {
     await this.db.query(
       `insert into corridor_runs
-         (idempotency_key, corridor_id, state, version, transaction_id,
-          quote_id, stellar_tx_hash, refund_id, last_error, owner, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+        (idempotency_key, corridor_id, state, version, transaction_id,
+         quote_id, quote_expires_at, quote_firm, settlement_amount,
+         deposit_address, memo, memo_type, stellar_tx_hash, refund_id,
+         last_error, owner, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now())
        on conflict (idempotency_key) do update set
          state           = excluded.state,
          version         = excluded.version,
          transaction_id  = excluded.transaction_id,
          quote_id        = excluded.quote_id,
+         quote_expires_at = excluded.quote_expires_at,
+         quote_firm      = excluded.quote_firm,
+         settlement_amount = excluded.settlement_amount,
+         deposit_address = excluded.deposit_address,
+         memo            = excluded.memo,
+         memo_type       = excluded.memo_type,
          stellar_tx_hash = excluded.stellar_tx_hash,
          refund_id       = coalesce(corridor_runs.refund_id, excluded.refund_id),
          last_error      = excluded.last_error,
@@ -167,6 +210,12 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
         run.version,
         run.transactionId ?? null,
         run.quoteId ?? null,
+        run.quoteExpiresAt ?? null,
+        run.quoteFirm ?? null,
+        run.settlementAmount ?? null,
+        run.depositAddress ?? null,
+        run.memo ?? null,
+        run.memoType ?? null,
         run.stellarTxHash ?? null,
         run.refundId ?? null,
         run.lastError ?? null,

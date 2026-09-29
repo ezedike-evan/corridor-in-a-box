@@ -109,6 +109,9 @@ function trackingSubmitter(inner: SettlementSubmitter): {
       if (r.ok) hashes.push(r.value.stellarTxHash);
       return r;
     },
+    ...(inner.findExisting
+      ? { findExisting: (req: Parameters<NonNullable<SettlementSubmitter["findExisting"]>>[0]) => inner.findExisting!(req) }
+      : {}),
     async refund(req) {
       return inner.refund(req);
     },
@@ -154,28 +157,25 @@ describe.skipIf(!hasAnchor)("crash-resume (live anchor, in-memory store)", () =>
     expect(txHash).toBeTruthy();
     expect(hashes).toHaveLength(1);
 
-    // Simulate crash: wind the stored run back to "settled".
-    // InMemoryIdempotencyStore.put() is the public write path.
-    const existing = await store.get(ikey);
-    expect(existing).toBeDefined();
-    await store.put({
-      ...existing!,
-      state: "settled",
-      transactionId: txId,
-      stellarTxHash: txHash,
-      // One version lower so the resume advance() is valid
-      version: existing!.version - 1,
-    });
+    for (const resumeState of ["opened", "settling"] as const) {
+      const existing = await store.get(ikey);
+      expect(existing).toBeDefined();
+      await store.put({
+        ...existing!,
+        state: resumeState,
+        transactionId: txId,
+        stellarTxHash: resumeState === "settling" ? undefined : txHash,
+        // The next evidence-backed transition must carry a larger version.
+        version: existing!.version - 1,
+      });
 
-    // Second execute() with same key: must resume, never re-settle
-    const secondRun = await execute(intent, c, { resolver, submitter, idempotency: store });
-
-    expect(secondRun.ok).toBe(true);
-    if (secondRun.ok) {
-      expect(secondRun.value.state).toBe("completed");
-      // THE critical assertion
-      expect(hashes).toHaveLength(1);
-      expect(secondRun.value.stellarTxHash).toBe(txHash);
+      const resumed = await execute(intent, c, { resolver, submitter, idempotency: store });
+      expect(resumed.ok).toBe(true);
+      if (resumed.ok) {
+        expect(resumed.value.state).toBe("completed");
+        expect(hashes).toHaveLength(1);
+        expect(resumed.value.stellarTxHash).toBe(txHash);
+      }
     }
   }, 300_000);
 });

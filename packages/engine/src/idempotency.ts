@@ -16,6 +16,12 @@ export interface StoredRun {
   version: number;
   transactionId?: string;
   quoteId?: string;
+  quoteExpiresAt?: number;
+  quoteFirm?: boolean;
+  settlementAmount?: string;
+  depositAddress?: string;
+  memo?: string;
+  memoType?: "text" | "hash" | "id";
   stellarTxHash?: string;
   /**
    * Identifier of a refund already requested for this run — the refund leg's
