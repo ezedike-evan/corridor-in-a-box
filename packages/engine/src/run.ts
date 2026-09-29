@@ -5,7 +5,7 @@
 // specific fact arrives via the validated manifest, every anchor-specific fact via
 // the injected RouteResolver/adapters. Add a corridor = add a manifest.
 
-import type { Corridor } from "@corridor/manifest";
+import { liveness, type Corridor, type LivenessState } from "@corridor/manifest";
 import {
   compareAmounts,
   fail,
@@ -53,6 +53,8 @@ export interface EngineDeps {
   audit?: AuditSink;
   /** Counter/timing sink. Defaults to a no-op. */
   metrics?: Metrics;
+  /** Maximum payment amount while a corridor has no fresh canary proof. Defaults to "10". */
+  unprovenMaxAmount?: string;
   /**
    * Explicit opt-in allowing manifest-trusted routes on a public network without
    * on-chain attestation.
@@ -116,9 +118,31 @@ export async function execute(
       `sourceAmount "${intent.sourceAmount.amount}" is not a positive decimal amount`,
     );
   }
+  const verificationAt = now();
+  const live = liveness(corridor, new Date(verificationAt));
+  const unproven = live.state !== "proven";
+  const canaryCap = corridor.proof?.canary_max_amount ?? deps.unprovenMaxAmount ?? "10";
   // Per-corridor ceiling. A manifest that declares max_amount caps any single
-  // payment on that lane; without one there is no upper bound at all.
+  // payment on that lane, including on a proven corridor.
   const max = corridor.limits?.max_amount;
+  let effectiveCap = unproven ? canaryCap : max;
+  if (unproven && max) {
+    const compared = compareAmounts(max, canaryCap);
+    if (!compared.ok) return compared;
+    effectiveCap = compared.value <= 0 ? max : canaryCap;
+  }
+  await emitVerification(deps, intent, corridor, verificationAt, live.state, effectiveCap);
+
+  if (
+    corridor.settlement.network === "public" &&
+    (live.state === "unverified" || live.state === "not-runnable")
+  ) {
+    return fail(
+      "CORRIDOR_UNPROVEN",
+      `corridor ${corridor.id} is ${live.state} on the public network and cannot accept payments`,
+    );
+  }
+
   if (max) {
     const cmp = compareAmounts(intent.sourceAmount.amount, max);
     if (!cmp.ok) return cmp;
@@ -126,6 +150,16 @@ export async function execute(
       return fail(
         "AMOUNT_INVALID",
         `sourceAmount "${intent.sourceAmount.amount}" exceeds corridor ${corridor.id} max_amount ${max}`,
+      );
+    }
+  }
+  if (unproven && effectiveCap) {
+    const cmp = compareAmounts(intent.sourceAmount.amount, effectiveCap);
+    if (!cmp.ok) return cmp;
+    if (cmp.value > 0) {
+      return fail(
+        "CORRIDOR_UNPROVEN",
+        `sourceAmount "${intent.sourceAmount.amount}" exceeds corridor ${corridor.id} unproven canary cap ${effectiveCap}`,
       );
     }
   }
@@ -396,6 +430,26 @@ export async function execute(
   }
   metrics.timing("corridor.duration", now() - startedAt, { corridor: corridor.id });
   return ok(toResult(run, trail));
+}
+
+async function emitVerification(
+  deps: EngineDeps,
+  intent: PaymentIntent,
+  corridor: Corridor,
+  at: number,
+  state: LivenessState,
+  effectiveCap?: string,
+): Promise<void> {
+  const detail = { liveness: state, effectiveCap };
+  const entry = {
+    event: "verifying" as const,
+    idempotencyKey: intent.idempotencyKey,
+    corridorId: corridor.id,
+    at,
+    detail,
+  };
+  (deps.logger ?? silentLogger).log("info", "corridor.verifying", entry);
+  await deps.audit?.recordDetail?.(entry);
 }
 
 type Err = { ok: false; error: CorridorError };

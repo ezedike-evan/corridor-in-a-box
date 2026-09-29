@@ -20,9 +20,9 @@
 // starts. Earning `verified` requires setting `endpoints_verified_at` on the
 // dest anchor, which a human does only after actually checking.
 
-import type { Corridor } from "./index";
+import type { Corridor, Proof } from "./index";
 
-export type LivenessState = "verified" | "unverified" | "not-runnable";
+export type LivenessState = "proven" | "verified" | "unverified" | "not-runnable";
 
 export interface Liveness {
   readonly state: LivenessState;
@@ -33,18 +33,20 @@ export interface Liveness {
   readonly runnable: boolean;
   /** ISO date the dest endpoints were last confirmed, when known. */
   readonly verifiedAt?: string;
+  readonly proof?: Proof;
   readonly warnings: readonly string[];
 }
 
 /** Human-readable label for each state. Shared so the CLI and the web app can
  *  never drift into describing the same corridor differently. */
 export const LIVENESS_LABEL: Record<LivenessState, string> = {
+  proven: "proven",
   verified: "verified",
   unverified: "unverified",
   "not-runnable": "not runnable",
 };
 
-export function liveness(c: Corridor): Liveness {
+export function liveness(c: Corridor, now: Date = new Date()): Liveness {
   const warnings: string[] = [];
   const endpoints = c.dest.endpoints;
   const verifiedAt = endpoints.endpoints_verified_at;
@@ -72,11 +74,32 @@ export function liveness(c: Corridor): Liveness {
     );
   }
 
-  const state: LivenessState = !endpoints.transfer_server_sep31
+  let state: LivenessState = !endpoints.transfer_server_sep31
     ? "not-runnable"
     : verifiedAt
       ? "verified"
       : "unverified";
 
-  return { state, runnable: state === "verified", verifiedAt, warnings };
+  const proof = c.proof;
+  if (state === "verified" && proof) {
+    const completedAt = new Date(proof.canary_completed_at).getTime();
+    const maxAgeMs = (proof.max_age_days ?? 30) * 24 * 60 * 60 * 1000;
+    const ageMs = now.getTime() - completedAt;
+
+    if (!Number.isNaN(completedAt) && ageMs >= 0 && ageMs <= maxAgeMs) {
+      state = "proven";
+    } else {
+      warnings.push(
+        `proof is stale — canary payment completed at ${proof.canary_completed_at} is older than ${proof.max_age_days ?? 30} days.`,
+      );
+    }
+  }
+
+  return {
+    state,
+    runnable: state === "verified" || state === "proven",
+    verifiedAt,
+    proof,
+    warnings,
+  };
 }

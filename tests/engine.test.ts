@@ -27,12 +27,20 @@ function corridor(): Corridor {
       endpoints: {
         home_domain: "d.example",
         transfer_server_sep31: "https://d.example/sep31",
+        endpoints_verified_at: "1970-01-01",
       },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery: { max_retries: 2 },
+    proof: {
+      canary_completed_at: "1970-01-01T00:00:00Z",
+      stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      anchor_transaction_id: "canary-test",
+      amount: "1",
+      max_age_days: 50000,
+    },
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;
@@ -198,6 +206,84 @@ describe("engine.execute", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("AMOUNT_INVALID");
   });
+
+  it("rejects an over-cap unproven payment before claiming the idempotency key", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const audit = new InMemoryAuditLog();
+    const c = { ...corridor(), proof: undefined };
+    const i = { ...intent("unproven-over-cap"), sourceAmount: { asset: "USDC", amount: "10.01" } };
+
+    const r = await execute(i, c, { ...deps(), idempotency: store, audit });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
+    expect(await store.get(i.idempotencyKey)).toBeUndefined();
+    expect(audit.details[0]).toMatchObject({
+      event: "verifying",
+      detail: { liveness: "verified", effectiveCap: "10" },
+    });
+  });
+
+  it("allows an unproven payment at the canary cap", async () => {
+    const c = { ...corridor(), proof: undefined };
+    const i = { ...intent("unproven-at-cap"), sourceAmount: { asset: "USDC", amount: "10" } };
+
+    const r = await execute(i, c, deps());
+
+    expect(r.ok).toBe(true);
+  });
+
+  it("applies only max_amount to a proven corridor", async () => {
+    const c = { ...corridor(), limits: { max_amount: "150" } };
+    const i = { ...intent("proven-over-canary"), sourceAmount: { asset: "USDC", amount: "100" } };
+
+    const r = await execute(i, c, { ...deps(), unprovenMaxAmount: "10" });
+
+    expect(r.ok).toBe(true);
+
+    const overMax = await execute(
+      { ...i, idempotencyKey: "proven-over-max", sourceAmount: { asset: "USDC", amount: "151" } },
+      c,
+      deps(),
+    );
+    expect(overMax.ok).toBe(false);
+    if (!overMax.ok) expect(overMax.error.code).toBe("AMOUNT_INVALID");
+  });
+
+  it("treats stale proof as unproven", async () => {
+    const c = {
+      ...corridor(),
+      proof: {
+        ...corridor().proof!,
+        canary_completed_at: "2020-01-01T00:00:00Z",
+        max_age_days: 1,
+        canary_max_amount: "5",
+      },
+    };
+    const i = { ...intent("stale-proof"), sourceAmount: { asset: "USDC", amount: "6" } };
+    const r = await execute(i, c, { ...deps(), now: () => Date.parse("2026-09-29T00:00:00Z") });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
+  });
+
+  it("refuses unverified public corridors before claiming the key", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const c = {
+      ...corridor(),
+      dest: {
+        ...corridor().dest,
+        endpoints: { ...corridor().dest.endpoints, endpoints_verified_at: undefined },
+      },
+    };
+    const i = intent("public-unverified");
+
+    const r = await execute(i, c, { ...deps(), idempotency: store });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
+    expect(await store.get(i.idempotencyKey)).toBeUndefined();
+  });
 });
 
 // Helper: build a corridor with custom recovery policy / timeout.
@@ -211,12 +297,20 @@ function corridorWith(recovery: Record<string, unknown>): Corridor {
       endpoints: {
         home_domain: "d.example",
         transfer_server_sep31: "https://d.example/sep31",
+        endpoints_verified_at: "1970-01-01",
       },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery,
+    proof: {
+      canary_completed_at: "1970-01-01T00:00:00Z",
+      stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      anchor_transaction_id: "canary-test",
+      amount: "1",
+      max_age_days: 50000,
+    },
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;
