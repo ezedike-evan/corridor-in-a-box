@@ -214,13 +214,20 @@ describe("SEP-31 status mapping", () => {
   it("classifies the Anchor Platform's in-flight statuses as in-flight", () => {
     for (const pending of [
       "pending_sender",
-      "pending_receiver",
-      "pending_external",
       "pending_anchor",
       "pending_stellar",
     ]) {
       expect(mapSep31Status(pending)).toEqual({
         status: pending,
+        settled: false,
+        terminalFailure: false,
+        awaitingInput: false,
+      });
+    }
+    for (const pending of ["pending_receiver", "pending_external"]) {
+      expect(mapSep31Status(pending)).toEqual({
+        status: pending,
+        phase: "external",
         settled: false,
         terminalFailure: false,
         awaitingInput: false,

@@ -21,7 +21,12 @@ export interface Corridor {
   fx: { path: string[]; quote_source: "sep38" | "external"; who_holds_risk: string; quote_ttl_seconds: number };
   compliance: { source_jurisdiction: string; dest_jurisdiction: string };
   settlement: { bridge_asset: string; network: "public" | "testnet"; asset_issuer: string };
-  recovery: { max_retries: number; timeout_seconds: number; rollback: string };
+  recovery: {
+    max_retries: number;
+    timeout_seconds: number;
+    rollback: string;
+    reconcile?: { external_stall_seconds?: number };
+  };
 }
 
 export const corridors: Corridor[] = [
@@ -153,6 +158,15 @@ export function liveness(c: Corridor): Liveness {
   }
   if (!endpoints.kyc_server) {
     warnings.push("dest has no SEP-12 KYC server — assuming 1:1 delivery with no per-customer KYC.");
+  }
+  const externalStallSeconds = c.recovery.reconcile?.external_stall_seconds ?? 21_600;
+  if (c.recovery.timeout_seconds <= externalStallSeconds) {
+    warnings.push(
+      `recovery.timeout_seconds (${c.recovery.timeout_seconds}s) does not exceed ` +
+        `recovery.reconcile.external_stall_seconds (${externalStallSeconds}s); the corridor ` +
+        `timeout will end pending_external/pending_receiver waits first. Raise timeout_seconds ` +
+        `for corridors that need the full external stall budget.`,
+    );
   }
 
   const state: LivenessState = !endpoints.transfer_server_sep31

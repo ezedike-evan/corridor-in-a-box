@@ -101,6 +101,11 @@ export const LimitsSchema = z.object({
 export const RecoverySchema = z.object({
   max_retries: z.number().int().nonnegative().default(3),
   timeout_seconds: z.number().int().positive().default(900),
+  reconcile: z
+    .object({
+      external_stall_seconds: z.number().int().positive().default(21_600),
+    })
+    .default({}),
   rollback: z.enum(["refund_sender", "hold", "manual"]).default("refund_sender"),
 });
 

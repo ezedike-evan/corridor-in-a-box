@@ -74,6 +74,16 @@ export function liveness(c: Corridor, now: Date = new Date()): Liveness {
     );
   }
 
+  const externalStallSeconds = c.recovery.reconcile.external_stall_seconds;
+  if (c.recovery.timeout_seconds <= externalStallSeconds) {
+    warnings.push(
+      `recovery.timeout_seconds (${c.recovery.timeout_seconds}s) does not exceed ` +
+        `recovery.reconcile.external_stall_seconds (${externalStallSeconds}s); the corridor ` +
+        `timeout will end pending_external/pending_receiver waits first. Raise timeout_seconds ` +
+        `for corridors that need the full external stall budget.`,
+    );
+  }
+
   let state: LivenessState = !endpoints.transfer_server_sep31
     ? "not-runnable"
     : verifiedAt

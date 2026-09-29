@@ -417,6 +417,112 @@ describe("engine recovery", () => {
     }
   });
 
+  it("does not poll-count-stall an external phase within its elapsed-time budget", async () => {
+    let pollCount = 0;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        pollCount += 1;
+        return {
+          ok: true as const,
+          value: {
+            status: pollCount <= 100 ? "pending_external" : "completed",
+            phase: pollCount <= 100 ? ("external" as const) : undefined,
+            settled: pollCount > 100,
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-external", {
+      now: () => 0,
+      sleep: async () => {},
+      deadlineMs: 1_000_000,
+      pollMs: 1_000,
+      stallThreshold: 10,
+      externalStallMs: 60_000,
+    });
+
+    expect(r.ok).toBe(true);
+    expect(pollCount).toBe(101);
+  });
+
+  it("poll-count-stalls an unchanged anchor phase after the configured threshold", async () => {
+    let pollCount = 0;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        pollCount += 1;
+        return {
+          ok: true as const,
+          value: {
+            status: "pending_stellar",
+            phase: "anchor" as const,
+            settled: false,
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-anchor", {
+      now: () => 0,
+      sleep: async () => {},
+      deadlineMs: 1_000_000,
+      pollMs: 1_000,
+      stallThreshold: 10,
+      externalStallMs: 60_000,
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("RECONCILE_STALLED");
+      expect(r.error.message).toContain("poll stall budget");
+    }
+    expect(pollCount).toBe(11);
+  });
+
+  it("backs off during external waits and resets the interval when status changes", async () => {
+    let pollCount = 0;
+    const delays: number[] = [];
+    const statuses = [
+      ["pending_external", "external"],
+      ["pending_external", "external"],
+      ["pending_receiver", "external"],
+      ["pending_stellar", "anchor"],
+      ["completed", undefined],
+    ] as const;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        const [status, phase] = statuses[pollCount++];
+        return {
+          ok: true as const,
+          value: {
+            status,
+            ...(phase ? { phase } : {}),
+            settled: status === "completed",
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-backoff", {
+      now: () => 0,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      deadlineMs: 1_000_000,
+      pollMs: 1_000,
+      stallThreshold: 10,
+    });
+
+    expect(r.ok).toBe(true);
+    expect(delays).toEqual([1_000, 2_000, 1_000, 1_000]);
+  });
+
   it("SETTLEMENT_TIMEOUT records identical first and last status for a stalled observer", async () => {
     let clock = 0;
     const adapter = createMockAdapter({ settled: false }); // returns pending_receiver
