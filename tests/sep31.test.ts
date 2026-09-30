@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
-import { Sep31Adapter, mapSep31Status, parseRefunds, type Sep10Signer } from "@corridor/sep31";
+import {
+  Sep31Adapter,
+  mapSep31Status,
+  openedTxCheck,
+  parseRefunds,
+  type ReportedTransactionFields,
+  type Sep10Signer,
+} from "@corridor/sep31";
 import type { PaymentIntent } from "@corridor/types";
+import type { GateContext } from "@corridor/engine";
+import type { TransactionStatus } from "@corridor/adapter-kit";
 
 const PASSPHRASE = "Test SDF Network ; September 2015";
 
@@ -534,5 +543,139 @@ describe("refund initiation (deliberately unsupported)", () => {
     }
     // Fail-closed means CLOSED: no bespoke HTTP call dressed up as SEP-31.
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("openedTxCheck gate check (anchor.tx.match)", () => {
+  const DEST = "GDEPOSIT";
+
+  function gateCtx(): GateContext {
+    return {
+      intent,
+      corridor: corridor({ transfer_server_sep31: "https://d.example/sep31" }),
+      quote: {
+        id: "q1",
+        sourceAmount: { asset: "USDC", amount: "10" },
+        destAmount: { asset: "iso4217:ARS", amount: "10000" },
+        price: "1000",
+        expiresAt: Date.now() + 60_000,
+        firm: true,
+      },
+      opened: {
+        transactionId: "tx-1",
+        depositAddress: DEST,
+        memo: "memo-abc-123",
+        memoType: "text",
+      },
+      now: Date.now(),
+      attempt: 1,
+    };
+  }
+
+  type Reported = TransactionStatus & ReportedTransactionFields;
+  function adapterReporting(status: Reported) {
+    return { getTransaction: async () => ({ ok: true as const, value: status }) };
+  }
+
+  const matching: Reported = {
+    status: "pending_sender",
+    settled: false,
+    amount: "10",
+    asset: "USDC",
+    depositAddress: DEST,
+    memo: "memo-abc-123",
+    memoType: "text",
+  };
+
+  it("has the name 'anchor.tx.match'", () => {
+    expect(openedTxCheck(adapterReporting(matching)).name).toBe("anchor.tx.match");
+  });
+
+  it("passes on an exact match", async () => {
+    const result = await openedTxCheck(adapterReporting(matching)).run(gateCtx());
+    expect(result.passed).toBe(true);
+    expect(result.detail).toContain("matches on every field");
+  });
+
+  it('passes when the anchor writes "10.00" for our "10"', async () => {
+    const result = await openedTxCheck(adapterReporting({ ...matching, amount: "10.00" })).run(
+      gateCtx(),
+    );
+    expect(result.passed).toBe(true);
+  });
+
+  it("fails on status pending_receiver", async () => {
+    const result = await openedTxCheck(
+      adapterReporting({ ...matching, status: "pending_receiver" }),
+    ).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_TX_MISMATCH");
+    expect(result.detail).toContain("pending_receiver");
+  });
+
+  it("fails on a different deposit account", async () => {
+    const result = await openedTxCheck(
+      adapterReporting({ ...matching, depositAddress: "GOTHER" }),
+    ).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_TX_MISMATCH");
+    expect(result.detail).toContain("depositAddress");
+  });
+
+  it("fails on a wrong memo without ever logging the full memo", async () => {
+    const result = await openedTxCheck(
+      adapterReporting({ ...matching, memo: "memo-zzz-999" }),
+    ).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_TX_MISMATCH");
+    expect(result.detail).toContain("memo");
+    // Only the type and a 6-char prefix appear — never either full memo.
+    expect(result.detail).not.toContain("memo-abc-123");
+    expect(result.detail).not.toContain("memo-zzz-999");
+  });
+
+  it("fails on a wrong memo type", async () => {
+    const result = await openedTxCheck(
+      adapterReporting({ ...matching, memoType: "hash" }),
+    ).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.detail).toContain("memoType");
+  });
+
+  it("fails on a wrong amount", async () => {
+    const result = await openedTxCheck(adapterReporting({ ...matching, amount: "11" })).run(
+      gateCtx(),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.detail).toContain("amount");
+  });
+
+  it("records an omitted field as unverified without failing", async () => {
+    const { amount: _a, ...rest } = matching;
+    const result = await openedTxCheck(adapterReporting(rest as Reported)).run(gateCtx());
+    expect(result.passed).toBe(true);
+    expect(result.detail).toContain("unverified: amount");
+  });
+
+  it("strict: true fails when a field is omitted", async () => {
+    const { memo: _m, ...rest } = matching;
+    const result = await openedTxCheck(adapterReporting(rest as Reported), {
+      strict: true,
+    }).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_TX_MISMATCH");
+    expect(result.detail).toContain("did not report memo");
+  });
+
+  it("fails closed when the re-read itself fails", async () => {
+    const adapter = {
+      getTransaction: async () => ({
+        ok: false as const,
+        error: { code: "ANCHOR_UNAVAILABLE" as const, message: "boom", retryable: true },
+      }),
+    };
+    const result = await openedTxCheck(adapter).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("SETTLEMENT_FAILED");
   });
 });

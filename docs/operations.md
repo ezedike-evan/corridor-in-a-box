@@ -245,11 +245,11 @@ the chain. Verify the belief before closing the run:
   payments (the same check "Crash mid-flight" below prescribes for `settling`)
   before declaring the sender whole.
 
-If an anchor-driven refund path ever lands (a refund-wait state between
-`recovering` and `refunded`), a second, legitimate way into this state appears —
-one where a payment **did** go out and the anchor returned it, hash set. The
-run's trail tells the two apart — and `refund_id`, described below, records
-which refund it was.
+The state machine defines `refund_pending` (between `recovering` and `refunded`)
+but no transition enters it yet — the engine does not call `requestRefund`. When
+a producer lands, a payment that did go out and was returned by the anchor will
+enter `refund_pending` with `stellar_tx_hash` set. The run's trail tells the
+two apart — and `refund_id`, described below, records which refund it was.
 
 ### `refund_id` on the run
 

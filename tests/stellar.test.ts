@@ -12,6 +12,7 @@ import {
 import {
   AccountInspector,
   balanceCheck,
+  destinationCheck,
   LocalKeypairSigner,
   StellarSep10Signer,
   StellarSettlementSubmitter,
@@ -707,5 +708,128 @@ describe("balanceCheck gate check (chain.balance)", () => {
       expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
       expect(res.detail).toContain("minimum reserve 3");
     });
+  });
+});
+
+describe("destinationCheck gate check (chain.destination)", () => {
+  const SIGNER = Keypair.random().publicKey();
+  const DEST = Keypair.random().publicKey();
+
+  function destContext(
+    opts: { bridgeAsset?: string; destination?: string } = {},
+  ): GateContext {
+    const base = testCorridor();
+    const bridge_asset = opts.bridgeAsset ?? "USDC";
+    return {
+      intent: {
+        idempotencyKey: "test-key-1",
+        corridorId: "test",
+        sender: { id: "sender-1" },
+        recipient: { id: "recip-1" },
+        sourceAmount: { asset: bridge_asset, amount: "100" },
+      },
+      corridor: {
+        ...base,
+        settlement: { ...base.settlement, bridge_asset },
+      },
+      quote: {
+        id: "q-test-1",
+        sourceAmount: { asset: bridge_asset, amount: "100" },
+        destAmount: { asset: "iso4217:ARS", amount: "10000" },
+        price: "100",
+        expiresAt: Date.now() + 60_000,
+        firm: true,
+      },
+      opened: {
+        transactionId: "tx-1",
+        depositAddress: opts.destination ?? DEST,
+        memo: "memo123",
+        memoType: "text",
+      },
+      now: Date.now(),
+      attempt: 1,
+    };
+  }
+
+  function destFacts(balances: AccountFacts["balances"], id: string = DEST): AccountFacts {
+    return { id, subentry_count: 0, num_sponsoring: 0, num_sponsored: 0, balances };
+  }
+
+  function mockInspector(facts: AccountFacts | undefined) {
+    return { account: async () => ({ ok: true as const, value: facts }) };
+  }
+
+  const usdcTrustline = (is_authorized: boolean) => ({
+    asset_type: "credit_alphanum4",
+    asset_code: "USDC",
+    asset_issuer: ISSUER,
+    balance: "0.0000000",
+    is_authorized,
+  });
+
+  it("has the name 'chain.destination'", () => {
+    expect(destinationCheck(mockInspector(undefined), SIGNER).name).toBe("chain.destination");
+  });
+
+  it("fails when the destination account does not exist", async () => {
+    const result = await destinationCheck(mockInspector(undefined), SIGNER).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("exists");
+  });
+
+  it("fails when the destination has no trustline for the bridge asset", async () => {
+    const facts = destFacts([{ asset_type: "native", balance: "10.0000000" }]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("no USDC trustline");
+  });
+
+  it("fails when the trustline exists but is not authorized", async () => {
+    const facts = destFacts([usdcTrustline(false)]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("not authorized");
+  });
+
+  it("fails a self-payment before ever touching Horizon", async () => {
+    const inspector = {
+      account: async () => {
+        throw new Error("must not be called for a self-payment");
+      },
+    };
+    const result = await destinationCheck(inspector, SIGNER).run(
+      destContext({ destination: SIGNER }),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("self-payment");
+  });
+
+  it("fails an operator-denylisted destination", async () => {
+    const facts = destFacts([usdcTrustline(true)]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER, {
+      denylist: (g) => g === DEST,
+    }).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("denylist");
+  });
+
+  it("passes native XLM with no trustline", async () => {
+    const facts = destFacts([{ asset_type: "native", balance: "10.0000000" }]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(
+      destContext({ bridgeAsset: "XLM" }),
+    );
+    expect(result.passed).toBe(true);
+    expect(result.detail).toContain("no trustline");
+  });
+
+  it("passes an existing destination with an authorized trustline", async () => {
+    const facts = destFacts([usdcTrustline(true)]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(destContext());
+    expect(result.passed).toBe(true);
   });
 });

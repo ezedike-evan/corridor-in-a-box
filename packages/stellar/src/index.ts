@@ -733,3 +733,169 @@ export function balanceCheck(
     },
   };
 }
+
+export interface DestinationCheckOptions {
+  /**
+   * Operator-supplied flagged-account hook. Deliberately a predicate, not a
+   * list: the operator decides where their denylist lives (config, DB, a
+   * sanctions feed) and this check never hard-codes or scrapes one.
+   */
+  readonly denylist?: (g: string) => boolean;
+}
+
+/**
+ * Gate check: the destination account must be able to receive the bridge
+ * asset BEFORE we build, sign and submit (#150). Without it, a missing
+ * account, absent trustline, or de-authorized trustline is only discovered
+ * as a Horizon rejection after signing — and `describe()` is how the
+ * operator finds out.
+ *
+ * Sub-checks, each named in the refusal detail:
+ * 1. `exists` — the account is on-chain.
+ * 2. `self-payment` — the destination is not our own signing account.
+ * 3. `denylist` — the operator's flagged-account hook does not match.
+ * 4. `trustline` — for a non-native bridge asset, a trustline for
+ *    `bridge_asset`/`asset_issuer` exists and `is_authorized` is true.
+ *    Native XLM needs no trustline, so it skips this sub-check.
+ *
+ * Refusal returns `PRESETTLE_DESTINATION_UNSAFE`.
+ */
+export function destinationCheck(
+  inspector: AccountInspectorLike,
+  signerPublicKey: string,
+  opts: DestinationCheckOptions = {},
+): GateCheck {
+  const NAME = "chain.destination";
+  return {
+    name: NAME,
+    async run(ctx: GateContext): Promise<CheckResult> {
+      const start = Date.now();
+      const done = (partial: Omit<CheckResult, "name" | "durationMs">): CheckResult => ({
+        name: NAME,
+        durationMs: Date.now() - start,
+        ...partial,
+      });
+      const destination = ctx.opened.depositAddress;
+
+      if (destination === signerPublicKey) {
+        return done({
+          passed: false,
+          code: "PRESETTLE_DESTINATION_UNSAFE",
+          detail: `self-payment: destination equals our signing account`,
+        });
+      }
+      if (opts.denylist?.(destination)) {
+        return done({
+          passed: false,
+          code: "PRESETTLE_DESTINATION_UNSAFE",
+          detail: `denylist: destination is operator-flagged`,
+        });
+      }
+
+      let facts: AccountFacts | undefined;
+      try {
+        if ("account" in inspector && typeof inspector.account === "function") {
+          const outcome = await inspector.account(destination);
+          if (!outcome.ok) {
+            return done({
+              passed: false,
+              code: "SETTLEMENT_FAILED",
+              detail: `failed to inspect destination: ${outcome.error.message}`,
+            });
+          }
+          facts = outcome.value;
+        } else if ("loadAccount" in inspector && typeof inspector.loadAccount === "function") {
+          const res = (await inspector.loadAccount(destination)) as HorizonAccountResponseLike;
+          facts = {
+            id: res.id ?? destination,
+            subentry_count: res.subentry_count ?? 0,
+            num_sponsoring: res.num_sponsoring ?? 0,
+            num_sponsored: res.num_sponsored ?? 0,
+            balances: (res.balances ?? []).map((b) => ({
+              asset_type: b.asset_type,
+              asset_code: b.asset_code,
+              asset_issuer: b.asset_issuer,
+              balance: b.balance,
+              selling_liabilities: b.selling_liabilities ?? "0",
+              buying_liabilities: b.buying_liabilities ?? "0",
+              is_authorized: b.is_authorized ?? true,
+            })),
+            flags: res.flags,
+          };
+        } else {
+          return done({
+            passed: false,
+            code: "SETTLEMENT_FAILED",
+            detail: "invalid AccountInspector instance",
+          });
+        }
+      } catch (err: unknown) {
+        const anyErr = err as {
+          response?: { status?: number };
+          status?: number;
+          message?: string;
+        };
+        if (
+          anyErr?.response?.status === 404 ||
+          anyErr?.status === 404 ||
+          /not found/i.test(anyErr?.message ?? "")
+        ) {
+          facts = undefined;
+        } else {
+          return done({
+            passed: false,
+            code: "SETTLEMENT_FAILED",
+            detail: `failed to inspect destination: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+      }
+
+      if (!facts) {
+        return done({
+          passed: false,
+          code: "PRESETTLE_DESTINATION_UNSAFE",
+          detail: `exists: destination account is not on-chain`,
+        });
+      }
+
+      const bridgeAssetCode = ctx.corridor.settlement.bridge_asset;
+      const isXlmBridge =
+        bridgeAssetCode.toUpperCase() === "XLM" || bridgeAssetCode.toLowerCase() === "native";
+      if (isXlmBridge) {
+        return done({
+          passed: true,
+          detail: "destination exists; native bridge asset needs no trustline",
+        });
+      }
+
+      const bridgeAssetIssuer = ctx.corridor.settlement.asset_issuer;
+      const trustline = facts.balances.find((b) => {
+        if (b.asset_type === "native") return false;
+        if (b.asset_code?.toUpperCase() !== bridgeAssetCode.toUpperCase()) return false;
+        if (bridgeAssetIssuer && b.asset_issuer && b.asset_issuer !== bridgeAssetIssuer) {
+          return false;
+        }
+        return true;
+      });
+      if (!trustline) {
+        return done({
+          passed: false,
+          code: "PRESETTLE_DESTINATION_UNSAFE",
+          detail: `trustline: destination has no ${bridgeAssetCode} trustline`,
+        });
+      }
+      if (trustline.is_authorized === false) {
+        return done({
+          passed: false,
+          code: "PRESETTLE_DESTINATION_UNSAFE",
+          detail: `trustline: destination's ${bridgeAssetCode} trustline is not authorized`,
+        });
+      }
+
+      return done({
+        passed: true,
+        detail: `destination exists with an authorized ${bridgeAssetCode} trustline`,
+      });
+    },
+  };
+}

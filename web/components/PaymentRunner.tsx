@@ -13,6 +13,7 @@ const ALL_STATES: CorridorState[] = [
   "quoted",
   "compliant",
   "opened",
+  "verifying",
   "settling",
   "settled",
   "reconciled",
