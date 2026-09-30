@@ -60,6 +60,25 @@ export async function open(
   return adapter.openTransaction(intent, q, corridor);
 }
 
+/**
+ * The exact settlement request `settle()` submits, factored out (#148) so the
+ * `anchor.tx.match` gate check verifies the very request that will be built —
+ * not a parallel reconstruction that could drift from it.
+ */
+export function buildSettlementRequest(
+  opened: OpenTransaction,
+  q: Quote,
+  corridor: Corridor,
+): SettlementRequest {
+  return {
+    to: opened.depositAddress,
+    memo: opened.memo,
+    memoType: opened.memoType,
+    amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
+    corridor,
+  };
+}
+
 // 3b. SETTLE — the native on-chain payment of the bridge asset to the anchor.
 export async function settle(
   submitter: SettlementSubmitter,
@@ -67,14 +86,7 @@ export async function settle(
   q: Quote,
   corridor: Corridor,
 ): Promise<Outcome<SettlementRef>> {
-  const req: SettlementRequest = {
-    to: opened.depositAddress,
-    memo: opened.memo,
-    memoType: opened.memoType,
-    amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
-    corridor,
-  };
-  return submitter.submit(req);
+  return submitter.submit(buildSettlementRequest(opened, q, corridor));
 }
 
 // 4. RECONCILE — match the on-chain leg against the anchor's view of the payout.

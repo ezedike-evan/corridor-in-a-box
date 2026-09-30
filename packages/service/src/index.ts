@@ -105,6 +105,10 @@ const STATUS_BY_CODE: Record<CorridorErrorCode, number> = {
   RECONCILE_STALLED: 504,
   IDEMPOTENCY_CONFLICT: 409,
   PRESETTLE_INSUFFICIENT_FUNDS: 422,
+  // The destination cannot receive the asset - not retryable as-is.
+  PRESETTLE_DESTINATION_UNSAFE: 422,
+  // The anchor is no longer expecting exactly this payment - re-open.
+  PRESETTLE_TX_MISMATCH: 409,
 };
 
 /** Token-bucket rate limiter, keyed per client. In-memory; swap for Redis at scale. */

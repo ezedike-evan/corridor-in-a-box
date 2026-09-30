@@ -16,6 +16,7 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type { RouteResolver } from "@corridor/router";
+import type { GateContext, PreSettleGate } from "./gate";
 import { canTransition, isTerminal, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
@@ -45,6 +46,7 @@ import {
 export interface EngineDeps {
   resolver: RouteResolver;
   submitter: SettlementSubmitter;
+  gate?: PreSettleGate;
   idempotency?: IdempotencyStore;
   now?: () => number;
   /** Injectable sleep so tests don't wait on real backoff/poll delays. */
@@ -356,6 +358,49 @@ export async function execute(
         message: `quote ${q.value.id} expired during retry`,
         retryable: false,
       });
+    }
+
+    {
+      const t = await advance("verifying");
+      if (!t.ok) return die(t.error);
+    }
+
+    if (deps.gate) {
+      const gateContext: GateContext = {
+        intent,
+        corridor,
+        quote: q.value,
+        opened: opened.value,
+        now: now(),
+        attempt,
+      };
+
+      let gateResult;
+      try {
+        gateResult = await timed("verify", () => deps.gate!.evaluate(gateContext));
+      } catch (e) {
+        return die({
+          code: "SETTLEMENT_FAILED",
+          message: e instanceof Error ? e.message : String(e),
+          retryable: false,
+        });
+      }
+
+      for (const check of gateResult.results) {
+        metrics.increment("corridor.gate.check", {
+          name: check.name,
+          passed: String(check.passed),
+        });
+      }
+
+      if (!gateResult.passed) {
+        const firstFailure = gateResult.results.find((r) => !r.passed);
+        return die({
+          code: firstFailure?.code ?? "SETTLEMENT_FAILED",
+          message: firstFailure?.detail ?? "pre-settle gate failed",
+          retryable: false,
+        });
+      }
     }
 
     {

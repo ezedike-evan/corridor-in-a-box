@@ -28,6 +28,7 @@ export {
   comply,
   open,
   settle,
+  buildSettlementRequest,
   reconcile,
   reconcileUntil,
   anchorTerminalStatus,
