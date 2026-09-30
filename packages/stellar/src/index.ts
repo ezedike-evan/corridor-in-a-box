@@ -250,7 +250,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
         const tx = builder.build();
         // Computed before submission: the one thing that lets us check "did
         // this actually land" if submitTransaction's own response is lost.
-        hash = tx.hash().toString("hex");
+        hash = Buffer.from(tx.hash()).toString("hex");
         await attachSignature(tx, this.signer);
 
         submitAttempted = true;

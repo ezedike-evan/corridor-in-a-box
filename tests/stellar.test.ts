@@ -59,7 +59,9 @@ describe("StellarSep10Signer", () => {
     const signed = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET);
     expect(signed.signatures.length).toBe(1);
     // the attached signature must verify against the signer's key over the tx hash
-    expect(kp.verify(signed.hash(), Buffer.from(signed.signatures[0].signature()))).toBe(true);
+    expect(
+      kp.verify(signed.hash(), Buffer.from(signed.signatures[0].signature.toBytes())),
+    ).toBe(true);
   });
 
   it("works through the ExternalSigner port (KMS-style)", async () => {
@@ -72,7 +74,9 @@ describe("StellarSep10Signer", () => {
     const signer = new StellarSep10Signer(external);
     const signedXdr = await signer.signChallenge(challengeXdr(kp), Networks.TESTNET);
     const signed = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET);
-    expect(kp.verify(signed.hash(), Buffer.from(signed.signatures[0].signature()))).toBe(true);
+    expect(
+      kp.verify(signed.hash(), Buffer.from(signed.signatures[0].signature.toBytes())),
+    ).toBe(true);
   });
 });
 
