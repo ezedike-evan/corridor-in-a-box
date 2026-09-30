@@ -14,6 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   then `EngineDeps.reconcilePollMs` / `stallThreshold`, then 2s / 10 polls; it
   applies to resumed runs too. `liveness()` warns when
   `poll_seconds x stall_polls` is not below `timeout_seconds`.
+### Added — `source.protocol` declares how the sending side is reached (#182)
+
+`source` now takes an optional `protocol`: `prefunded` (default; the operator
+already holds the bridge asset, needs only `name`/`asset`), `sep6` (requires
+`endpoints.transfer_server`), `sep24` (requires `endpoints.transfer_server_sep24`
+and `endpoints.web_auth`), or `custom:<id>` (requires `endpoints.base_url`).
+Schema only; the engine does not act on it yet. Manifests that omit `protocol`
+parse as `prefunded`, so existing corridors are unchanged. `corridor plan` now
+prints the source protocol.
 
 ### Maintenance — ESLint 10 landed
 
