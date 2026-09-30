@@ -40,11 +40,12 @@ export interface EngineDeps {
   now?: () => number;
   /** Injectable sleep so tests don't wait on real backoff/poll delays. */
   sleep?: (ms: number) => Promise<void>;
-  /** Delay between reconcile polls (ms). Defaults to 2s. */
+  /** Delay between reconcile polls (ms). Defaults to 2s. Overridden by `recovery.reconcile.poll_seconds` in the manifest. */
   reconcilePollMs?: number;
   /**
    * Consecutive polls with the same status before bailing with
-   * `RECONCILE_STALLED`. Defaults to 10. Set to `0` to disable.
+   * `RECONCILE_STALLED`. Defaults to 10. Set to `0` to disable. Overridden by
+   * `recovery.reconcile.stall_polls` in the manifest.
    */
   stallThreshold?: number;
   /** Structured logger. Defaults to a silent logger. */
@@ -93,8 +94,11 @@ export async function execute(
   const store = deps.idempotency ?? new InMemoryIdempotencyStore();
   const now = deps.now ?? (() => Date.now());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const pollMs = deps.reconcilePollMs ?? 2_000;
-  const stallThreshold = deps.stallThreshold ?? 10;
+  // Manifest value wins, then EngineDeps, then the engine default.
+  const rc = corridor.recovery.reconcile;
+  const pollMs =
+    rc?.poll_seconds !== undefined ? rc.poll_seconds * 1000 : (deps.reconcilePollMs ?? 2_000);
+  const stallThreshold = rc?.stall_polls ?? deps.stallThreshold ?? 10;
   const metrics = deps.metrics ?? noopMetrics;
   const startedAt = now();
 
