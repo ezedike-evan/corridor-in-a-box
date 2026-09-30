@@ -16,6 +16,28 @@ function run(args: string[]) {
 }
 
 describe("corridor CLI", () => {
+  it("requires held state for run listing", () => {
+    const r = run(["runs", "list", "--state", "completed"]);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("corridor runs list --state held");
+  });
+
+  it("requires an outcome and note to resolve a run", () => {
+    const r = run(["resolve", "some-key"]);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("--outcome");
+  });
+
+  it("requires DATABASE_URL for run listing", () => {
+    const r = spawnSync(TSX, [CLI, "runs", "list", "--state", "held"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: { ...process.env, DATABASE_URL: "" },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("DATABASE_URL is required");
+  });
+
   it("prints usage and exits 2 with no args", () => {
     const r = run([]);
     expect(r.status).toBe(2);
