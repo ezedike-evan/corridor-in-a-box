@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
 import { createMockAdapter } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
@@ -9,12 +9,14 @@ import {
   hasRequestedRefund,
   canTransition,
   createMockSubmitter,
+  StellarPaymentStrategy,
   execute,
   reconcileUntil,
   type CorridorState,
   type EngineDeps,
   type PreSettleGate,
   type SettlementSubmitter,
+  type SettlementStrategy,
 } from "@corridor/engine";
 import type { TransactionStatus } from "@corridor/adapter-kit";
 import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
@@ -1345,5 +1347,106 @@ describe("Quote fee and settlement amount validation", () => {
     expect(settledEntry).toBeDefined();
     expect(settledEntry?.quoteFee).toEqual({ asset: "USDC", amount: "0.50" });
     expect(settledEntry?.networkFee).toBe("100");
+  });
+});
+
+describe("SettlementStrategy", () => {
+  // Helper: run a full payment through execute() with custom deps override.
+  async function run(depsOverride: Partial<EngineDeps> = {}) {
+    return execute(intent("strategy-test"), corridor(), {
+      ...deps(),
+      ...depsOverride,
+      idempotency: new InMemoryIdempotencyStore(),
+    });
+  }
+
+  it("StellarPaymentStrategy produces the same settling -> settled transition as the legacy submitter", async () => {
+    const submitter = createMockSubmitter();
+    const r = await run({
+      strategies: [new StellarPaymentStrategy(submitter)],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.state).toBe("completed");
+      expect(r.value.trail).toContain("settling");
+      expect(r.value.trail).toContain("settled");
+      expect(r.value.stellarTxHash).toMatch(/^mocktx/);
+    }
+  });
+
+  it("strategy selected by kind: engine dispatches to the matching strategy", async () => {
+    // Spy to verify the correct strategy's settle() was called.
+    const spySettle = vi.fn().mockResolvedValue(
+      ok({
+        stellarTxHash: "spy000000000000000000000000000000000000000000000000000000000001",
+        ledger: 1,
+      }),
+    );
+    const strategy: SettlementStrategy = {
+      kind: "stellar_payment",
+      settle: spySettle,
+    };
+
+    const r = await run({ strategies: [strategy] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.state).toBe("completed");
+    expect(spySettle).toHaveBeenCalledOnce();
+    // Context should carry the opened tx, quote, and corridor.
+    const ctx = spySettle.mock.calls[0][0];
+    expect(ctx).toHaveProperty("opened");
+    expect(ctx).toHaveProperty("quote");
+    expect(ctx).toHaveProperty("corridor");
+  });
+
+  it("unknown kind fails closed and never calls the submitter", async () => {
+    const submitter = createMockSubmitter();
+    const submitSpy = vi.spyOn(submitter, "submit");
+
+    // Create an adapter that returns a deposit instruction kind not in our
+    // strategies list, simulating a future kind from issue #183.
+    const mockAdapter = createMockAdapter();
+    const originalOpen = mockAdapter.openTransaction.bind(mockAdapter);
+    mockAdapter.openTransaction = async (intent, quote, corridor) => {
+      const r = await originalOpen(intent, quote, corridor);
+      if (!r.ok) return r;
+      // Inject a `kind` field onto the opened tx to simulate claimable_balance.
+      return ok({ ...r.value, kind: "claimable_balance" });
+    };
+
+    const resolver = new StaticRouteResolver(() => mockAdapter, {
+      trustManifestWithoutAttestation: true,
+    });
+
+    // Only register a stellar_payment strategy — no match for claimable_balance.
+    const r = await run({
+      resolver,
+      submitter,
+      strategies: [new StellarPaymentStrategy(submitter)],
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_FAILED");
+      // The error message must name the unrecognised kind.
+      expect(r.error.message).toMatch(/claimable_balance/);
+    }
+    // The underlying submitter must not have been called — no money moved.
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("settling -> settled transitions are unchanged when using strategies", async () => {
+    const audit = new InMemoryAuditLog();
+    const r = await run({
+      strategies: [new StellarPaymentStrategy(createMockSubmitter())],
+    });
+    void audit;
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const trail = r.value.trail;
+      const settlingIdx = trail.indexOf("settling");
+      const settledIdx = trail.indexOf("settled");
+      expect(settlingIdx).toBeGreaterThan(-1);
+      expect(settledIdx).toBe(settlingIdx + 1);
+    }
   });
 });
