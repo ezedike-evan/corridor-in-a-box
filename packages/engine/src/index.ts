@@ -19,6 +19,7 @@ export {
   UnimplementedSubmitter,
   createMockSubmitter,
   type SettlementSubmitter,
+  type ChainVerifier,
   type SettlementRef,
   type SettlementRequest,
   type RefundRequest,

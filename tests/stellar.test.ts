@@ -13,6 +13,8 @@ import {
   AccountInspector,
   balanceCheck,
   destinationCheck,
+  createChainVerifier,
+  verifySettlementFacts,
   LocalKeypairSigner,
   StellarSep10Signer,
   StellarSettlementSubmitter,
@@ -20,6 +22,7 @@ import {
   type AccountInspectorServerLike,
   type ExternalSigner,
   type HorizonPaymentRecordLike,
+  type SettlementFacts,
 } from "@corridor/stellar";
 import type { GateContext, RefundRequest, SettlementRequest } from "@corridor/engine";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
@@ -1079,5 +1082,129 @@ describe("destinationCheck gate check (chain.destination)", () => {
     const facts = destFacts([usdcTrustline(true)]);
     const result = await destinationCheck(mockInspector(facts), SIGNER).run(destContext());
     expect(result.passed).toBe(true);
+  });
+});
+
+describe("settlement on-chain verification", () => {
+  const DEST = Keypair.random().publicKey();
+  const HASH_B64 = Buffer.alloc(32, 7).toString("base64");
+
+  function req(over: Partial<SettlementRequest> = {}): SettlementRequest {
+    return {
+      to: DEST,
+      amount: { asset: "USDC", amount: "10" },
+      corridor: testCorridor(),
+      memo: "abc",
+      memoType: "text",
+      ...over,
+    };
+  }
+  function facts(over: Partial<SettlementFacts> = {}, op: Record<string, unknown> = {}) {
+    return {
+      hash: "h",
+      successful: true,
+      memo: "abc",
+      memoType: "text",
+      operations: [
+        {
+          type: "payment",
+          to: DEST,
+          amount: "10.0000000",
+          asset_type: "credit_alphanum4",
+          asset_code: "USDC",
+          asset_issuer: ISSUER,
+          ...op,
+        },
+      ],
+      ...over,
+    } as SettlementFacts;
+  }
+
+  it("accepts a matching payment (Horizon 7-decimal amount equals request)", () => {
+    expect(verifySettlementFacts(facts(), req()).ok).toBe(true);
+  });
+
+  it("accepts matching hash and id memos and native XLM", () => {
+    expect(
+      verifySettlementFacts(
+        facts({ memo: HASH_B64, memoType: "hash" }),
+        req({ memo: HASH_B64, memoType: "hash" }),
+      ).ok,
+    ).toBe(true);
+    expect(
+      verifySettlementFacts(
+        facts({ memo: "42", memoType: "id" }),
+        req({ memo: "42", memoType: "id" }),
+      ).ok,
+    ).toBe(true);
+    const xlm = testCorridor();
+    const native = { ...xlm, settlement: { ...xlm.settlement, bridge_asset: "XLM" } };
+    expect(
+      verifySettlementFacts(
+        facts({}, { asset_type: "native", asset_code: undefined, asset_issuer: undefined }),
+        req({ corridor: native }),
+      ).ok,
+    ).toBe(true);
+  });
+
+  const cases: [string, SettlementFacts, SettlementRequest, string][] = [
+    ["destination", facts({}, { to: Keypair.random().publicKey() }), req(), "destination"],
+    ["amount", facts({}, { amount: "9.9999999" }), req(), "amount"],
+    ["memo", facts({ memo: "zzz" }), req(), "memo"],
+    [
+      "memo type",
+      facts({ memo: "42", memoType: "id" }),
+      req({ memo: "42", memoType: "text" }),
+      "memo type",
+    ],
+    ["asset code", facts({}, { asset_code: "EURC" }), req(), "asset"],
+    [
+      "asset issuer",
+      facts({}, { asset_issuer: Keypair.random().publicKey() }),
+      req(),
+      "asset",
+    ],
+    ["native instead of USDC", facts({}, { asset_type: "native" }), req(), "asset"],
+    ["failed tx", facts({ successful: false }), req(), "failed on-chain"],
+    [
+      "extra operation",
+      facts({ operations: [facts().operations[0]!, facts().operations[0]!] }),
+      req(),
+      "operation count",
+    ],
+    ["not a payment", facts({}, { type: "create_account" }), req(), "operation type"],
+    ["unexpected memo", facts(), req({ memo: undefined }), "memo type"],
+  ];
+  it.each(cases)("rejects a wrong %s with RECONCILE_MISMATCH", (_n, f, r, needle) => {
+    const out = verifySettlementFacts(f, r);
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.error.code).toBe("RECONCILE_MISMATCH");
+      expect(out.error.retryable).toBe(false);
+      expect(out.error.message).toContain(needle);
+    }
+  });
+
+  it("AccountInspector.settlementFacts reads tx + ops and feeds the verifier", async () => {
+    const server = {
+      loadAccount: async () => ({}),
+      transactions: () => ({
+        transaction: () => ({
+          call: async () => ({ successful: true, memo: "abc", memo_type: "text" }),
+        }),
+      }),
+      operations: () => ({
+        forTransaction: () => ({
+          limit: () => ({ call: async () => ({ records: facts().operations }) }),
+        }),
+      }),
+    } as unknown as Horizon.Server;
+    const verify = createChainVerifier(new AccountInspector({ horizonServer: server }));
+    expect((await verify({ stellarTxHash: "h" }, req())).ok).toBe(true);
+    const bad = await verify(
+      { stellarTxHash: "h" },
+      req({ to: Keypair.random().publicKey() }),
+    );
+    expect(bad.ok).toBe(false);
   });
 });

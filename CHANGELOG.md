@@ -7,6 +7,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — verify the settle payment on-chain before reconcile
+
+- New optional `EngineDeps.chainVerifier`. After `settled` (and on resume from
+  `settled`) the engine re-checks the payment; a mismatch is a non-retryable
+  `RECONCILE_MISMATCH` routed through the manifest's `hold` / `refund_sender`
+  policy. `@corridor/stellar` provides `createChainVerifier(new AccountInspector(...))`,
+  `AccountInspector.settlementFacts(hash)` and `verifySettlementFacts()` (one
+  payment op; destination, amount, asset and memo/memo type must match).
+- Runs now record the `settlement` request so a resumed run can re-verify;
+  Postgres stores add a nullable `settlement` column (added by `migrate()`).
+
 ### Fixed — operations.md §1 step 4 described output a reader could never see (closes #129)
 
 `docs/operations.md` step 4 instructed readers to run

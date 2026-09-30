@@ -1347,3 +1347,82 @@ describe("Quote fee and settlement amount validation", () => {
     expect(settledEntry?.networkFee).toBe("100");
   });
 });
+
+describe("engine chain verifier", () => {
+  it("passes the settlement request and continues to completed when the verifier accepts", async () => {
+    const h = refundHarness();
+    const seen: { to: string; amount: string; hash: string }[] = [];
+    const r = await execute(
+      intent("cv-ok"),
+      corridorWith({ max_retries: 0, timeout_seconds: 60, rollback: "hold" }),
+      {
+        ...h.deps,
+        chainVerifier: async (ref, req) => {
+          seen.push({ to: req.to, amount: req.amount.amount, hash: ref.stellarTxHash });
+          return ok(undefined);
+        },
+      },
+    );
+    expect(r.ok).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.amount).toBe("100.00");
+    expect(h.trail()).toContain("reconciled");
+  });
+
+  it("ends held under the hold policy when the verifier fails after settled", async () => {
+    const h = refundHarness();
+    const r = await execute(
+      intent("cv-bad"),
+      corridorWith({ max_retries: 0, timeout_seconds: 60, rollback: "hold" }),
+      {
+        ...h.deps,
+        chainVerifier: async () =>
+          fail("RECONCILE_MISMATCH", "amount expected 100.00, on-chain 1", {
+            retryable: false,
+          }),
+      },
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("RECONCILE_MISMATCH");
+    expect((await h.store.get("cv-bad"))?.state).toBe("held");
+    expect(h.trail()).toEqual([
+      "quoted",
+      "compliant",
+      "opened",
+      "verifying",
+      "settling",
+      "settled",
+      "recovering",
+      "held",
+    ]);
+    expect(h.trail()).not.toContain("reconciled");
+  });
+
+  it("re-verifies on resume from settled and holds on mismatch", async () => {
+    const h = refundHarness();
+    await h.store.put({
+      idempotencyKey: "cv-resume",
+      corridorId: "test",
+      state: "settled",
+      version: 5,
+      transactionId: "tx_1",
+      stellarTxHash: "mocktx1",
+      settlement: { to: "GDEST", amount: { asset: "USDC", amount: "100.00" } },
+    });
+    let got: string | undefined;
+    const r = await execute(
+      intent("cv-resume"),
+      corridorWith({ max_retries: 0, timeout_seconds: 60, rollback: "hold" }),
+      {
+        ...h.deps,
+        chainVerifier: async (_ref, req) => {
+          got = req.to;
+          return fail("RECONCILE_MISMATCH", "destination differs", { retryable: false });
+        },
+      },
+    );
+    expect(got).toBe("GDEST");
+    expect(r.ok).toBe(false);
+    expect((await h.store.get("cv-resume"))?.state).toBe("held");
+  });
+});

@@ -37,6 +37,7 @@ create table if not exists corridor_runs (
   refund_id       text,
   last_error      text,
   owner           text,
+  settlement      text,
   updated_at      timestamptz not null default now()
 );`;
 
@@ -55,6 +56,8 @@ const ALTER_TABLE_SQL = [
   `alter table corridor_runs add column if not exists deposit_address text;`,
   `alter table corridor_runs add column if not exists memo text;`,
   `alter table corridor_runs add column if not exists memo_type text;`,
+  // JSON of what the settle leg was asked to pay, so a resumed run can re-verify it on-chain.
+  `alter table corridor_runs add column if not exists settlement text;`,
 ];
 
 export async function migrate(db: Queryable): Promise<void> {
@@ -76,6 +79,7 @@ interface Row {
   refund_id: string | null;
   last_error: string | null;
   owner: string | null;
+  settlement: string | null;
 }
 
 function toRun(r: Row): StoredRun {
@@ -93,6 +97,7 @@ function toRun(r: Row): StoredRun {
     refundId: r.refund_id ?? undefined,
     lastError: r.last_error ?? undefined,
     owner: r.owner ?? undefined,
+    settlement: r.settlement ? JSON.parse(r.settlement) : undefined,
   };
 }
 
@@ -112,8 +117,8 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
       `insert into corridor_runs
          (idempotency_key, corridor_id, state, version, transaction_id,
           quote_id, stellar_tx_hash, deposit_address, memo, memo_type,
-          refund_id, last_error, owner, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+          refund_id, last_error, owner, settlement, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
        on conflict (idempotency_key) do nothing
        returning idempotency_key`,
       [
@@ -130,6 +135,7 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
         run.refundId ?? null,
         run.lastError ?? null,
         run.owner ?? null,
+        run.settlement ? JSON.stringify(run.settlement) : null,
       ],
     );
     return res.rows.length > 0;
@@ -139,7 +145,7 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
     const res = await this.db.query<Row>(
       `select idempotency_key, corridor_id, state, version, transaction_id,
               quote_id, stellar_tx_hash, deposit_address, memo, memo_type,
-              refund_id, last_error, owner
+              refund_id, last_error, owner, settlement
          from corridor_runs where idempotency_key = $1`,
       [key],
     );
@@ -168,8 +174,8 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
       `insert into corridor_runs
          (idempotency_key, corridor_id, state, version, transaction_id,
           quote_id, stellar_tx_hash, deposit_address, memo, memo_type,
-          refund_id, last_error, owner, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+          refund_id, last_error, owner, settlement, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
        on conflict (idempotency_key) do update set
          state           = excluded.state,
          version         = excluded.version,
@@ -181,6 +187,7 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
          memo_type       = excluded.memo_type,
          refund_id       = coalesce(corridor_runs.refund_id, excluded.refund_id),
          last_error      = excluded.last_error,
+         settlement      = coalesce(corridor_runs.settlement, excluded.settlement),
          updated_at      = now()
        where corridor_runs.version < excluded.version`,
       [
@@ -197,6 +204,7 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
         run.refundId ?? null,
         run.lastError ?? null,
         run.owner ?? null,
+        run.settlement ? JSON.stringify(run.settlement) : null,
       ],
     );
   }

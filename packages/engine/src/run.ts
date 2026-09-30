@@ -26,6 +26,7 @@ import {
   type StoredRun,
 } from "./idempotency";
 import type {
+  ChainVerifier,
   RefundRequest,
   SettlementRef,
   SettlementRequest,
@@ -55,6 +56,14 @@ export interface EngineDeps {
   resolver: RouteResolver;
   submitter: SettlementSubmitter;
   gate?: PreSettleGate;
+  /**
+   * Optional independent check that the settle transaction really paid what
+   * was requested. Runs once after `settled` (and again on resume from
+   * `settled`), before the run may become `reconciled`. A failure is treated
+   * like any post-settle failure: money moved, so it goes to the manifest's
+   * `hold` / `refund_sender` path rather than `failed`.
+   */
+  chainVerifier?: ChainVerifier;
   idempotency?: IdempotencyStore;
   now?: () => number;
   /** Injectable sleep so tests don't wait on real backoff/poll delays. */
@@ -474,6 +483,13 @@ export async function execute(
       return finishFailure(s.error);
     }
     run.stellarTxHash = s.value.stellarTxHash;
+    const settleReq = settlementRequestFor(opened.value, q.value, corridor);
+    run.settlement = {
+      to: settleReq.to,
+      memo: settleReq.memo,
+      memoType: settleReq.memoType,
+      amount: settleReq.amount,
+    };
     {
       const t = await advance("settled", {
         quoteFee: q.value.fee,
@@ -481,6 +497,10 @@ export async function execute(
       });
       if (!t.ok) return die(t.error);
     }
+
+    // Verify our own payment on-chain before trusting the anchor's word on it.
+    const v = await timed("verify", () => verifyOnChain(deps, s.value, settleReq));
+    if (!v.ok) return finishFailure(v.error);
 
     // Poll until the anchor confirms payout or we hit the corridor timeout.
     // reconcileUntil returns a non-retryable error, so we never re-settle here.
@@ -514,6 +534,33 @@ export async function execute(
 }
 
 type Err = { ok: false; error: CorridorError };
+
+function settlementRequestFor(
+  opened: { depositAddress: string; memo?: string; memoType?: "text" | "hash" | "id" },
+  q: { sourceAmount: { amount: string } },
+  corridor: Corridor,
+): SettlementRequest {
+  return {
+    to: opened.depositAddress,
+    memo: opened.memo,
+    memoType: opened.memoType,
+    amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
+    corridor,
+  };
+}
+
+/** Run the optional chain verifier; a no-op success when none is configured. */
+async function verifyOnChain(
+  deps: EngineDeps,
+  ref: SettlementRef,
+  req: SettlementRequest,
+): Promise<Outcome<void>> {
+  if (!deps.chainVerifier) return ok(undefined);
+  const r = await deps.chainVerifier(ref, req);
+  if (r.ok) return r;
+  // Never retry: the payment is already on the chain, resubmitting would double it.
+  return fail(r.error.code, r.error.message, { retryable: false, cause: r.error.cause });
+}
 
 function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
   return {
@@ -595,6 +642,31 @@ async function resumeRun(
         "RECONCILE_MISMATCH",
         `resumed run ${run.idempotencyKey} has no transactionId`,
       );
+    }
+    if (deps.chainVerifier) {
+      const saved = run.settlement;
+      if (!saved || !run.stellarTxHash) {
+        // Written before the request was recorded: nothing to compare against.
+        (deps.logger ?? silentLogger).log("warn", "corridor.verify.skipped", {
+          idempotencyKey: run.idempotencyKey,
+          reason: "run has no recorded settlement request",
+        });
+      } else {
+        const v = await verifyOnChain(
+          deps,
+          { stellarTxHash: run.stellarTxHash },
+          { ...saved, corridor },
+        );
+        if (!v.ok) {
+          // Money moved and the chain disagrees: park for a human, do not fail.
+          const rec = await advance("recovering");
+          if (!rec.ok) return rec;
+          run.lastError = `${v.error.code}: ${v.error.message}`;
+          const held = await advance("held");
+          if (!held.ok) return held;
+          return { ok: false, error: v.error };
+        }
+      }
     }
     const route = await deps.resolver.resolve(intent, corridor);
     const r = await reconcileUntil(route.receiving, run.transactionId, {

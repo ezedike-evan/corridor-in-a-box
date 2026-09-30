@@ -31,6 +31,7 @@ import {
   type Outcome,
 } from "@corridor/types";
 import type {
+  ChainVerifier,
   CheckResult,
   GateCheck,
   GateContext,
@@ -507,6 +508,26 @@ export interface HorizonAccountResponseLike {
   readonly flags?: AccountFacts["flags"];
 }
 
+/** One operation of a settled transaction, as read back from Horizon. */
+export interface SettlementOperationFacts {
+  readonly type: string;
+  readonly to?: string;
+  readonly amount?: string;
+  readonly asset_type?: string;
+  readonly asset_code?: string;
+  readonly asset_issuer?: string;
+}
+
+/** What Horizon says a settlement transaction contains. */
+export interface SettlementFacts {
+  readonly hash: string;
+  readonly successful: boolean;
+  /** Horizon's representation: text as-is, id as decimal string, hash as base64. */
+  readonly memo?: string;
+  readonly memoType: string;
+  readonly operations: readonly SettlementOperationFacts[];
+}
+
 export interface HorizonPaymentTxLike {
   readonly memo?: string;
   readonly memo_type?: string;
@@ -535,7 +556,7 @@ export interface HorizonPaymentRecordLike {
 }
 
 export type AccountInspectorServerLike = Pick<Horizon.Server, "loadAccount"> &
-  Partial<Pick<Horizon.Server, "payments" | "transactions">>;
+  Partial<Pick<Horizon.Server, "payments" | "transactions" | "operations">>;
 
 export interface AccountInspectorOptions {
   readonly horizonUrl?: string;
@@ -686,6 +707,47 @@ export class AccountInspector {
     }
   }
 
+  /** Read a transaction's operations, memo and memo type back from Horizon. */
+  async settlementFacts(hash: string): Promise<Outcome<SettlementFacts>> {
+    const server = this.server;
+    if (!server.transactions || !server.operations) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        "Horizon server does not expose transactions/operations",
+      );
+    }
+    try {
+      const tx = (await server.transactions().transaction(hash).call()) as {
+        successful: boolean;
+        memo?: string;
+        memo_type?: string;
+      };
+      const ops = (await server.operations().forTransaction(hash).limit(200).call()) as {
+        records: SettlementOperationFacts[];
+      };
+      return ok<SettlementFacts>({
+        hash,
+        successful: tx.successful,
+        memo: tx.memo,
+        memoType: tx.memo_type ?? "none",
+        operations: ops.records.map((o) => ({
+          type: o.type,
+          to: o.to,
+          amount: o.amount,
+          asset_type: o.asset_type,
+          asset_code: o.asset_code,
+          asset_issuer: o.asset_issuer,
+        })),
+      });
+    } catch (err: unknown) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        `failed to read tx ${hash} from Horizon: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err, retryable: true },
+      );
+    }
+  }
+
   async baseReserve(): Promise<Outcome<string>> {
     return ok(this.defaultBaseReserve);
   }
@@ -693,6 +755,84 @@ export class AccountInspector {
   async baseFee(): Promise<Outcome<string>> {
     return ok(this.defaultBaseFee);
   }
+}
+
+function mismatch(
+  field: string,
+  expected: string,
+  actual: string | undefined,
+): Outcome<never> {
+  return fail(
+    "RECONCILE_MISMATCH",
+    `settlement tx does not match request: ${field} expected ${expected}, on-chain ${actual ?? "(none)"}`,
+    { retryable: false },
+  );
+}
+
+/**
+ * Assert a transaction contains exactly one operation and that it is a payment
+ * matching the request's destination, amount, asset and memo. Pure: no I/O.
+ */
+export function verifySettlementFacts(
+  facts: SettlementFacts,
+  req: SettlementRequest,
+): Outcome<void> {
+  if (!facts.successful) {
+    return fail("RECONCILE_MISMATCH", `settlement tx ${facts.hash} failed on-chain`, {
+      retryable: false,
+    });
+  }
+  if (facts.operations.length !== 1) {
+    return mismatch("operation count", "1", String(facts.operations.length));
+  }
+  const op = facts.operations[0] as SettlementOperationFacts;
+  if (op.type !== "payment") return mismatch("operation type", "payment", op.type);
+  if (op.to !== req.to) return mismatch("destination", req.to, op.to);
+
+  const cmp = compareAmounts(req.amount.amount, op.amount ?? "");
+  if (!cmp.ok || cmp.value !== 0) return mismatch("amount", req.amount.amount, op.amount);
+
+  const code = req.corridor.settlement.bridge_asset;
+  if (code.toUpperCase() === "XLM") {
+    if (op.asset_type !== "native") {
+      return mismatch("asset", "XLM (native)", `${op.asset_code ?? op.asset_type}`);
+    }
+  } else {
+    const issuer = req.corridor.settlement.asset_issuer;
+    if (op.asset_type === "native" || op.asset_code !== code || op.asset_issuer !== issuer) {
+      return mismatch(
+        "asset",
+        `${code}:${issuer}`,
+        op.asset_type === "native" ? "XLM (native)" : `${op.asset_code}:${op.asset_issuer}`,
+      );
+    }
+  }
+
+  // Memo: compare in one canonical form per type. A hash memo is base64 on both
+  // sides but may differ in padding/alphabet, so re-encode the request's memo.
+  const expectedType = req.memo ? (req.memoType ?? "text") : "none";
+  if (facts.memoType !== expectedType)
+    return mismatch("memo type", expectedType, facts.memoType);
+  if (req.memo) {
+    const expected =
+      expectedType === "hash" ? Buffer.from(req.memo, "base64").toString("base64") : req.memo;
+    if (facts.memo !== expected) return mismatch("memo", expected, facts.memo);
+  }
+  return ok(undefined);
+}
+
+/**
+ * Build the `EngineDeps.chainVerifier`: re-reads the settlement transaction
+ * from Horizon and asserts it paid what the run asked for.
+ */
+export function createChainVerifier(inspector: {
+  settlementFacts(hash: string): Promise<Outcome<SettlementFacts>>;
+}): ChainVerifier {
+  return async (ref, req) => {
+    const facts = await inspector.settlementFacts(ref.stellarTxHash);
+    if (!facts.ok) return facts;
+    return verifySettlementFacts(facts.value, req);
+  };
 }
 
 export type AccountInspectorLike =
