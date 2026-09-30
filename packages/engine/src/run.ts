@@ -30,11 +30,13 @@ import type {
   RefundRequest,
   SettlementRef,
   SettlementRequest,
+  SettlementStrategy,
   SettlementSubmitter,
 } from "./ports";
 import {
   anchorTerminalStatus,
   backoffMs,
+  buildSettlementRequest,
   comply,
   open,
   quote,
@@ -45,6 +47,7 @@ import {
   settleQuoteProblem,
 } from "./verbs";
 import type { TransactionStatus } from "@corridor/adapter-kit";
+import { defaultStrategies } from "./ports";
 import {
   noopMetrics,
   silentLogger,
@@ -66,6 +69,17 @@ export interface EngineDeps {
    * `hold` / `refund_sender` path rather than `failed`.
    */
   chainVerifier?: ChainVerifier;
+  /**
+   * Explicit list of settlement strategies. When omitted, the engine derives
+   * `[new StellarPaymentStrategy(deps.submitter)]` so all existing callers
+   * keep working with no changes.
+   *
+   * Provide this when you need to handle settlement kinds beyond
+   * `"stellar_payment"` (e.g. after issue #183 lands). The engine dispatches
+   * to the first strategy whose `kind` matches the deposit instructions kind
+   * returned by the receiving anchor.
+   */
+  strategies?: readonly SettlementStrategy[];
   idempotency?: IdempotencyStore;
   now?: () => number;
   /** Injectable sleep so tests don't wait on real backoff/poll delays. */
@@ -507,18 +521,10 @@ export async function execute(
       if (!t.ok) return die(t.error);
     }
 
+    const strategies = deps.strategies ?? defaultStrategies(deps.submitter);
     let s: Outcome<SettlementRef>;
     if (deps.submitter.findExisting) {
-      const req: SettlementRequest = {
-        to: opened.value.depositAddress,
-        memo: opened.value.memo,
-        memoType: opened.value.memoType,
-        amount: {
-          asset: corridor.settlement.bridge_asset,
-          amount: q.value.sourceAmount.amount,
-        },
-        corridor,
-      };
+      const req = buildSettlementRequest(opened.value, q.value, corridor);
       const existing = await timed("findExisting", () => deps.submitter.findExisting!(req));
       if (!existing.ok) {
         return finishFailure(existing.error);
@@ -526,12 +532,10 @@ export async function execute(
       if (existing.value) {
         s = ok(existing.value);
       } else {
-        s = await timed("settle", () =>
-          settle(deps.submitter, opened.value, q.value, corridor),
-        );
+        s = await timed("settle", () => settle(strategies, opened.value, q.value, corridor));
       }
     } else {
-      s = await timed("settle", () => settle(deps.submitter, opened.value, q.value, corridor));
+      s = await timed("settle", () => settle(strategies, opened.value, q.value, corridor));
     }
     if (!s.ok) {
       const action = recover(corridor, s.error.retryable, attempt);

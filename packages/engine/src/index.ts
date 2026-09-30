@@ -23,11 +23,16 @@ export {
 export {
   UnimplementedSubmitter,
   createMockSubmitter,
+  StellarPaymentStrategy,
+  defaultStrategies,
   type SettlementSubmitter,
   type ChainVerifier,
   type SettlementRef,
   type SettlementRequest,
   type RefundRequest,
+  type SettlementStrategy,
+  type SettlementStrategyContext,
+  type DepositInstructionsKind,
 } from "./ports";
 export {
   quote,
