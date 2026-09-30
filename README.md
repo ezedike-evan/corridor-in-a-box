@@ -263,8 +263,10 @@ CORRIDOR_SIGNER_SECRET=S… pnpm verify:corridor
 It exits non-zero unless the run's terminal state is `completed`, printing the
 full trail and the last error either way, so it can gate CI or a release. Before
 opening a payment it runs `reference-anchor.sh doctor` — a run against a sick
-stack does not fail fast, it polls for the whole of `recovery.timeout_seconds`
-and then reports `SETTLEMENT_TIMEOUT`.
+stack ends in `RECONCILE_STALLED` after 10 identical consecutive polls (~20 s
+with the default `stallThreshold=10` and `reconcilePollMs=2000`).
+`SETTLEMENT_TIMEOUT` only fires when the anchor's status keeps _changing_ but
+never reaches a terminal state within `recovery.timeout_seconds`.
 
 The signer must be a **testnet** account holding the corridor's bridge asset
 (`USDC` from the issuer the anchor quotes) with a trustline for it. The runner
