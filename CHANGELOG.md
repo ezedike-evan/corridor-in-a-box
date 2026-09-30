@@ -7,6 +7,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — `fx.quote_source: external` path (#190)
+
+- `ExternalQuoteProvider` and `EngineDeps.externalQuote`: operators inject a
+  pricing function for corridors with no SEP-38 server. Quotes are `firm: false`;
+  no SEP-38 call is made. `external` + `who_holds_risk: receiving_anchor` is
+  refused before `open` unless the adapter reports `native` quotes.
+- Minimal shim for #187/#189: `AdapterCapabilities` and `AnchorAdapter.capabilities()`
+  (implemented by `Sep31Adapter` and the mock, which takes `capabilities` overrides)
+  and the `QuoteProvider` interface. `capabilities()` is now required on
+  `AnchorAdapter`, a breaking change for out-of-tree adapters.
+
 ### Changed — anchor-side terminal failure after settle enters `refund_pending`
 
 - Under `rollback: refund_sender`, when money has moved and the anchor reports a
