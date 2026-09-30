@@ -58,6 +58,7 @@ Added 9 dedicated pre-settle gate and circuit breaker error codes to `CorridorEr
 - `CORRIDOR_HALTED` — per-corridor circuit breaker is open
 
 Added helper `isPreSettleCode(code): boolean` in `@corridor/types` and mapped the error codes in `@corridor/service` HTTP router.
+
 ### Changed — attester rejections carry a typed contract error code (2026-09-24)
 
 `AnchorAttester.attest` turned an attester-contract revert into a message such
