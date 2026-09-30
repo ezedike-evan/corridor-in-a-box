@@ -1,7 +1,8 @@
 # Contributing to corridor-in-a-box
 
-Thanks for your interest. This is the **open half** of an open-core system: a
-manifest-driven engine for Stellar SEP-31 cross-border corridors. Contributions
+Thanks for your interest. This is the open, runnable manifest-driven engine for
+Stellar SEP-31 cross-border corridors, with a `RouteResolver` extension seam.
+Contributions
 that keep corridors as _configuration, not code_ are exactly what we want.
 
 ## Ground rules
@@ -9,8 +10,9 @@ that keep corridors as _configuration, not code_ are exactly what we want.
 - A new corridor is a new `*.corridor.yaml` file — **not** a fork of the engine.
   If you find yourself adding a string like `"NGN"` or a bank name to
   `packages/engine`, stop: that fact belongs in a manifest.
-- Anything that depends on the proprietary route-intelligence dataset belongs
-  behind the `RouteResolver` seam (`packages/router`), not in this repo.
+- `packages/router` is the public `RouteResolver` interface and default
+  implementation. Any future proprietary route-intelligence logic or dataset
+  should be implemented outside this repo; none is included today.
 - Money is never a JavaScript `number`. Use the string-based `Money` type and the
   helpers in `@corridor/types`.
 - Every fallible operation returns `Outcome<T>` — we do not throw across module
@@ -52,14 +54,10 @@ under ~72 characters and explain the _why_ in the body.
 
 ## Good first issues
 
-- Add a `*.corridor.yaml` for a live SEP-31 receive-side anchor (fill `dest.endpoints`
-  from its `stellar.toml`) and a `plan` test asserting it reports runnable.
-- Extend the conformance suite in `packages/adapter-kit` with more probes.
-- Run the env-gated integration test against the Anchor Platform reference server
-  and capture the trail in the README (see `tests/integration/` and
-  [docs/operations.md](./docs/operations.md)).
-- Widen the SEP-31 status mapping in `packages/sep31` as you hit real anchors that
-  report statuses we don't yet classify (see `mapSep31Status`).
+- Add `*.corridor.yaml` manifests for live SEP-24 / SEP-6 anchors and add corresponding `plan` verification tests.
+- Extend the conformance suite in `packages/adapter-kit` with additional probes for anchor SEP conformance.
+- Add and expand conformance and integration test coverage across corridor lifecycle states and error paths.
+- Widen the SEP-31 status mapping in `packages/sep31` as you hit real anchors that report statuses we don't yet classify (see `mapSep31Status`).
 
 ## Keeping docs in sync
 
