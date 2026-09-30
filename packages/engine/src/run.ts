@@ -24,7 +24,16 @@ import {
   type StoredRun,
 } from "./idempotency";
 import type { RefundRequest, SettlementSubmitter } from "./ports";
-import { backoffMs, comply, open, quote, recover, reconcileUntil, settle } from "./verbs";
+import {
+  anchorTerminalStatus,
+  backoffMs,
+  comply,
+  open,
+  quote,
+  recover,
+  reconcileUntil,
+  settle,
+} from "./verbs";
 import {
   noopMetrics,
   silentLogger,
@@ -270,6 +279,16 @@ export async function execute(
   const refundAndStop = async (e: CorridorError): Promise<Err> => {
     const back = await advance("recovering");
     if (!back.ok) return die(back.error);
+    // Money moved and the anchor itself reports a terminal failure: it is
+    // already refunding (SEP-31 `refunds`), so we wait for its report instead of
+    // asking the chain to reverse a payment it cannot reverse. Watching the
+    // anchor from here is a separate step; this only parks the run correctly.
+    if (run.stellarTxHash && anchorTerminalStatus(e)) {
+      run.lastError = `${e.code}: ${e.message}`;
+      const pending = await advance("refund_pending");
+      if (!pending.ok) return die(pending.error);
+      return { ok: false, error: e };
+    }
     // Only reverse the chain if a payment actually went out. If settlement never
     // succeeded, there is nothing on-chain to undo — the sending anchor returns
     // the sender's funds off-chain — so we just record the refunded state.

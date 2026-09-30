@@ -185,7 +185,9 @@ export async function reconcileUntil(
       return fail(
         "RECONCILE_MISMATCH",
         `tx ${transactionId} terminally failed at anchor (status=${s.value.status})`,
-        { retryable: false },
+        // The full terminal status rides along so the engine can read `status`
+        // and `refunds` without a second poll. See `anchorTerminalStatus`.
+        { retryable: false, cause: s.value },
       );
     }
     if (threshold > 0 && sameCount >= threshold) {
@@ -210,6 +212,21 @@ export async function reconcileUntil(
     }
     await opts.sleep(opts.pollMs);
   }
+}
+
+/**
+ * The anchor's terminal `TransactionStatus`, when `reconcileUntil` failed because
+ * the anchor reported a terminal non-success state (carried on the error's
+ * `cause`). Undefined for every other failure (timeout, stall, transport).
+ */
+export function anchorTerminalStatus(e: { cause?: unknown }): TransactionStatus | undefined {
+  const c = e.cause as Partial<TransactionStatus> | undefined;
+  return c &&
+    typeof c === "object" &&
+    c.terminalFailure === true &&
+    typeof c.status === "string"
+    ? (c as TransactionStatus)
+    : undefined;
 }
 
 /** Exponential backoff with a cap, used between settlement retries. */

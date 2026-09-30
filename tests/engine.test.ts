@@ -501,7 +501,9 @@ describe("engine recovery", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("RECONCILE_MISMATCH");
     expect(polls).toBe(1); // bailed on the first status, did not poll to timeout
-    expect(refunded).toHaveLength(1); // and reversed the on-chain payment
+    // The anchor already reports the failure, so the run waits for its refund
+    // report (refund_pending) rather than asking the chain to reverse.
+    expect(refunded).toHaveLength(0);
   });
 
   it("escalates a REFUND_UNSUPPORTED refund to held (fail-closed refund path)", async () => {
@@ -891,5 +893,74 @@ describe("engine refund path", () => {
     const afterRecovering = h.trail().slice(h.trail().indexOf("recovering"));
     expect(afterRecovering).not.toContain("settling");
     expect(afterRecovering).not.toContain("retrying");
+  });
+});
+
+describe("refund_pending producer", () => {
+  it("parks in refund_pending, without calling submitter.refund, when the anchor errors after settle", async () => {
+    const h = refundHarness();
+    const d: EngineDeps = {
+      ...h.deps,
+      resolver: new StaticRouteResolver(() => createMockAdapter({ terminalFailure: true }), {
+        trustManifestWithoutAttestation: true,
+      }),
+    };
+    const r = await execute(
+      intent("rp-1"),
+      corridorWith({ max_retries: 0, timeout_seconds: 3600, rollback: "refund_sender" }),
+      d,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("RECONCILE_MISMATCH");
+    expect((await h.store.get("rp-1"))?.state).toBe("refund_pending");
+    expect(h.trail()).toEqual([
+      "quoted",
+      "compliant",
+      "opened",
+      "settling",
+      "settled",
+      "recovering",
+      "refund_pending",
+    ]);
+    expect(h.refundCalls).toHaveLength(0);
+    expect((await h.store.get("rp-1"))?.refundId).toBeUndefined();
+  });
+
+  it("does not treat a reconcile timeout as an anchor refund: still reverses via the submitter", async () => {
+    const h = refundHarness({ settled: false });
+    await execute(
+      intent("rp-2"),
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" }),
+      h.deps,
+    );
+    expect((await h.store.get("rp-2"))?.state).toBe("refunded");
+    expect(h.refundCalls).toHaveLength(1);
+  });
+
+  it("no-hash path (settle never succeeded) still ends refunded without touching the chain", async () => {
+    const h = refundHarness({ failSubmit: true });
+    await execute(
+      intent("rp-3"),
+      corridorWith({ max_retries: 0, timeout_seconds: 60, rollback: "refund_sender" }),
+      h.deps,
+    );
+    expect((await h.store.get("rp-3"))?.state).toBe("refunded");
+    expect(h.refundCalls).toHaveLength(0);
+  });
+
+  it("hold policy is unchanged: anchor error after settle ends held", async () => {
+    const h = refundHarness();
+    const d: EngineDeps = {
+      ...h.deps,
+      resolver: new StaticRouteResolver(() => createMockAdapter({ terminalFailure: true }), {
+        trustManifestWithoutAttestation: true,
+      }),
+    };
+    await execute(
+      intent("rp-4"),
+      corridorWith({ max_retries: 0, timeout_seconds: 3600, rollback: "hold" }),
+      d,
+    );
+    expect((await h.store.get("rp-4"))?.state).toBe("held");
   });
 });

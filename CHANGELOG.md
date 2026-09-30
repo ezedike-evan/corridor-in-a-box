@@ -7,6 +7,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Changed — anchor-side terminal failure after settle enters `refund_pending`
+
+- Under `rollback: refund_sender`, when money has moved and the anchor reports a
+  terminal failure, the run now goes `recovering -> refund_pending` and waits for
+  the anchor's refund report instead of calling `submitter.refund` (which the real
+  submitter always refuses). `reconcileUntil` now carries the terminal
+  `TransactionStatus` on the error's `cause` (`anchorTerminalStatus()`). Timeouts,
+  stalls, the no-hash path and the `hold` / `manual` policies are unchanged.
+
 ### Maintenance — ESLint 10 landed
 
 - `eslint` 10 landed in [#37](https://github.com/ezedike-evan/corridor-in-a-box/pull/37).

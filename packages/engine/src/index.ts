@@ -30,6 +30,7 @@ export {
   settle,
   reconcile,
   reconcileUntil,
+  anchorTerminalStatus,
   backoffMs,
   recover,
   type RecoveryAction,
