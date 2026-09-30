@@ -15,6 +15,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   submitter always refuses). `reconcileUntil` now carries the terminal
   `TransactionStatus` on the error's `cause` (`anchorTerminalStatus()`). Timeouts,
   stalls, the no-hash path and the `hold` / `manual` policies are unchanged.
+
 ### Added — per-corridor reconcile cadence
 
 - Manifests can set `recovery.reconcile: { poll_seconds?, stall_polls? }`
