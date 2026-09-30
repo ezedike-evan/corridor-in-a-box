@@ -33,7 +33,9 @@ export type CorridorErrorCode =
   /** our balance cannot cover amount + fee + reserve */
   | "PRESETTLE_INSUFFICIENT_FUNDS"
   /** destination missing, untrusted/unauthorized for the asset, self, or flagged */
-  | "PRESETTLE_DESTINATION_UNSAFE";
+  | "PRESETTLE_DESTINATION_UNSAFE"
+  /** anchor's open transaction no longer matches what we are about to send */
+  | "PRESETTLE_TX_MISMATCH";
 
 /**
  * Returns true if the error code is a pre-settle gate check refusal.

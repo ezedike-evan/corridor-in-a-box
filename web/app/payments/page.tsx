@@ -16,8 +16,8 @@ export default async function PaymentsPage({
         <h1 className="text-3xl font-bold tracking-tight">Run a payment</h1>
         <p className="mt-1 max-w-2xl text-secondary-text">
           Drive a payment through the engine and watch it walk the state machine. This runs a
-          faithful simulation; point it at a live <code>@corridor/service</code> to move real
-          testnet money.
+          simulation of the engine&apos;s state machine (a re-implementation; it can drift). Set{" "}
+          <code>CORRIDOR_SERVICE_URL</code> to drive a real <code>@corridor/service</code>.
         </p>
       </div>
       <PaymentRunner initialCorridor={corridor} />
