@@ -7,6 +7,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — `AccountInspector` reads live reserve/fee and our payment history (2026-09-30)
+
+`AccountInspector` in `@corridor/stellar` is now the one read-only Horizon
+seam every chain-facing check reuses
+([#149](https://github.com/ezedike-evan/corridor-in-a-box/issues/149)):
+
+- `baseReserve()` and `baseFee()` read the latest ledger (stroops converted
+  with BigInt, never floats) instead of returning constants. The
+  `baseReserve`/`baseFee` constructor options still pin a value.
+- New `paymentsFrom(source, { to?, sinceLedger? })` returns our outgoing
+  payments, newest first, each joined with its transaction's memo and memo type.
+  It reads at most `maxPages` pages and reports `truncated` when it stopped
+  early, so a duplicate-send check can tell "not found" from "didn't look".
+- The constructor takes a narrowed, structural `InspectorHorizonLike` fake;
+  a real `Horizon.Server` satisfies it without a cast.
+- A trustline whose authorization Horizon doesn't report now reads as
+  `is_authorized: false` (was `true`). Only a 404 / `NotFoundError` means
+  "account does not exist"; an error whose message merely says "not found"
+  is now a retryable failure.
+
 ### Maintenance — ESLint 10 landed
 
 - `eslint` 10 landed in [#37](https://github.com/ezedike-evan/corridor-in-a-box/pull/37).
