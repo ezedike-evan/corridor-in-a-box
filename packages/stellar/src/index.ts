@@ -1,7 +1,9 @@
-// @corridor/stellar — the only package on the money path that touches the chain; probe/registry/attester read and write the conformance registry, never move funds. It wraps
-// @stellar/stellar-sdk to (a) sign SEP-10 challenges and (b) submit the native
-// settle-leg payment. Everything else in the monorepo stays SDK-free; swap
-// createMockSubmitter() for StellarSettlementSubmitter to move real money.
+// @corridor/stellar — the only package on the money path that touches the
+// chain; probe/registry/attester read and write the conformance registry, never
+// move funds. It wraps @stellar/stellar-sdk to (a) sign SEP-10 challenges and
+// (b) submit the native settle-leg payment. The rest of the money path stays
+// SDK-free; swap createMockSubmitter() for StellarSettlementSubmitter to move
+// real money.
 //
 // SEP-31 settlement is a single NATIVE payment of the bridge asset to the
 // receiving anchor's deposit address — no smart contract involved.
