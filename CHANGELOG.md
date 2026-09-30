@@ -14,6 +14,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   then `EngineDeps.reconcilePollMs` / `stallThreshold`, then 2s / 10 polls; it
   applies to resumed runs too. `liveness()` warns when
   `poll_seconds x stall_polls` is not below `timeout_seconds`.
+
 ### Added — `source.protocol` declares how the sending side is reached (#182)
 
 `source` now takes an optional `protocol`: `prefunded` (default; the operator
