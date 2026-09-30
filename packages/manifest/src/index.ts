@@ -148,10 +148,21 @@ export const LimitsSchema = z.object({
     .optional(),
 });
 
+/** How patiently this corridor polls the receiving anchor after settling. Both
+ *  fields are optional: an unset field falls back to `EngineDeps`, then to the
+ *  engine default (2s poll, stall after 10 identical polls). */
+export const ReconcileSchema = z.object({
+  /** Seconds between reconcile polls. */
+  poll_seconds: z.number().int().positive().optional(),
+  /** Consecutive identical-status polls before `RECONCILE_STALLED`. 0 disables. */
+  stall_polls: z.number().int().nonnegative().optional(),
+});
+
 export const RecoverySchema = z.object({
   max_retries: z.number().int().nonnegative().default(3),
   timeout_seconds: z.number().int().positive().default(900),
   rollback: z.enum(["refund_sender", "hold", "manual"]).default("refund_sender"),
+  reconcile: ReconcileSchema.optional(),
 });
 
 export const CorridorSchema = z.object({

@@ -66,7 +66,9 @@ scripts/reference-anchor.sh down           # tear it all down
 
 A corridor run against a sick stack does not fail fast. It reaches `settled`,
 polls for the whole of `recovery.timeout_seconds` (900s by default) and then
-fails with `SETTLEMENT_TIMEOUT`. Every one of those minutes was spent learning
+fails with `SETTLEMENT_TIMEOUT`. (A corridor can tune its own patience with
+`recovery.reconcile: { poll_seconds, stall_polls }`; unset fields fall back to
+`EngineDeps.reconcilePollMs` / `stallThreshold`, then 2s / 10 polls.) Every one of those minutes was spent learning
 something that was knowable beforehand. Run `doctor` first:
 
 ```

@@ -15,6 +15,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   submitter always refuses). `reconcileUntil` now carries the terminal
   `TransactionStatus` on the error's `cause` (`anchorTerminalStatus()`). Timeouts,
   stalls, the no-hash path and the `hold` / `manual` policies are unchanged.
+### Added — per-corridor reconcile cadence
+
+- Manifests can set `recovery.reconcile: { poll_seconds?, stall_polls? }`
+  (`stall_polls: 0` disables stall detection). Resolution order is manifest,
+  then `EngineDeps.reconcilePollMs` / `stallThreshold`, then 2s / 10 polls; it
+  applies to resumed runs too. `liveness()` warns when
+  `poll_seconds x stall_polls` is not below `timeout_seconds`.
 
 ### Added — `source.protocol` declares how the sending side is reached (#182)
 

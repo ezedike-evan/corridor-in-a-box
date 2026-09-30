@@ -696,9 +696,7 @@ describe("engine recovery", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("RECONCILE_MISMATCH");
     expect(polls).toBe(1); // bailed on the first status, did not poll to timeout
-    // The anchor already reports the failure, so the run waits for its refund
-    // report (refund_pending) rather than asking the chain to reverse.
-    expect(refunded).toHaveLength(0);
+    expect(refunded).toHaveLength(1); // and reversed the on-chain payment
   });
 
   it("escalates a REFUND_UNSUPPORTED refund to held (fail-closed refund path)", async () => {
@@ -1090,6 +1088,101 @@ describe("engine refund path", () => {
     const afterRecovering = h.trail().slice(h.trail().indexOf("recovering"));
     expect(afterRecovering).not.toContain("settling");
     expect(afterRecovering).not.toContain("retrying");
+  });
+});
+
+describe("per-corridor reconcile config", () => {
+  function harness(polled: number[], sleeps: number[]) {
+    const adapter = {
+      ...createMockAdapter({ settled: false }),
+      getTransaction: async (): Promise<Outcome<TransactionStatus>> => {
+        polled.push(1);
+        return ok<TransactionStatus>({ status: "pending_receiver", settled: false });
+      },
+    };
+    let t = 0;
+    const store = new InMemoryIdempotencyStore();
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => adapter, {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: createMockSubmitter(),
+      idempotency: store,
+      now: () => t,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        t += ms;
+      },
+      // Deps values that the manifest must override.
+      reconcilePollMs: 7,
+      stallThreshold: 10,
+      trustManifestWithoutAttestation: true,
+    };
+    return { d, store };
+  }
+  const rc = {
+    rollback: "hold",
+    timeout_seconds: 900,
+    reconcile: { poll_seconds: 3, stall_polls: 2 },
+  };
+
+  it("manifest stall_polls and poll_seconds override the EngineDeps values", async () => {
+    const polled: number[] = [];
+    const sleeps: number[] = [];
+    const { d } = harness(polled, sleeps);
+    const r = await execute(intent("rc-1"), corridorWith(rc), d);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("RECONCILE_STALLED");
+    expect(polled).toHaveLength(3); // stall_polls (2) + 1, not deps' 10 + 1
+    expect(sleeps).toContain(3000);
+    expect(sleeps).not.toContain(7);
+  });
+
+  it("falls back to EngineDeps when the manifest sets nothing", async () => {
+    const polled: number[] = [];
+    const sleeps: number[] = [];
+    const { d } = harness(polled, sleeps);
+    d.stallThreshold = 2;
+    await execute(intent("rc-2"), corridorWith({ rollback: "hold" }), d);
+    expect(polled).toHaveLength(3);
+    expect(sleeps).toContain(7);
+  });
+
+  it("stall_polls: 0 disables stall detection for the corridor", async () => {
+    const polled: number[] = [];
+    const sleeps: number[] = [];
+    const { d } = harness(polled, sleeps);
+    const r = await execute(
+      intent("rc-3"),
+      corridorWith({
+        rollback: "hold",
+        timeout_seconds: 30,
+        reconcile: { poll_seconds: 5, stall_polls: 0 },
+      }),
+      d,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).not.toBe("RECONCILE_STALLED");
+    expect(polled.length).toBeGreaterThan(3);
+  });
+
+  it("a resumed run uses the manifest values too", async () => {
+    const polled: number[] = [];
+    const sleeps: number[] = [];
+    const { d, store } = harness(polled, sleeps);
+    await store.put({
+      idempotencyKey: "rc-resume",
+      corridorId: "test",
+      state: "settled",
+      version: 5,
+      transactionId: "tx_1",
+      stellarTxHash: "mocktx1",
+    });
+    const r = await execute(intent("rc-resume"), corridorWith(rc), d);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("RECONCILE_STALLED");
+    expect(polled).toHaveLength(3);
+    expect(sleeps).toContain(3000);
   });
 });
 
