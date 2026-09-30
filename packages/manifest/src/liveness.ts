@@ -72,6 +72,19 @@ export function liveness(c: Corridor): Liveness {
     );
   }
 
+  const rc = c.recovery.reconcile;
+  if (
+    rc?.poll_seconds !== undefined &&
+    rc.stall_polls !== undefined &&
+    rc.stall_polls > 0 &&
+    rc.poll_seconds * rc.stall_polls >= c.recovery.timeout_seconds
+  ) {
+    warnings.push(
+      `recovery.reconcile: poll_seconds (${rc.poll_seconds}) x stall_polls (${rc.stall_polls}) ` +
+        `is not below timeout_seconds (${c.recovery.timeout_seconds}) — the stall check can never fire.`,
+    );
+  }
+
   const state: LivenessState = !endpoints.transfer_server_sep31
     ? "not-runnable"
     : verifiedAt

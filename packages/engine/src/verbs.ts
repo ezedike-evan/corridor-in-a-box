@@ -60,6 +60,25 @@ export async function open(
   return adapter.openTransaction(intent, q, corridor);
 }
 
+/**
+ * The exact settlement request `settle()` submits, factored out (#148) so the
+ * `anchor.tx.match` gate check verifies the very request that will be built —
+ * not a parallel reconstruction that could drift from it.
+ */
+export function buildSettlementRequest(
+  opened: OpenTransaction,
+  q: Quote,
+  corridor: Corridor,
+): SettlementRequest {
+  return {
+    to: opened.depositAddress,
+    memo: opened.memo,
+    memoType: opened.memoType,
+    amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
+    corridor,
+  };
+}
+
 // 3b. SETTLE — the native on-chain payment of the bridge asset to the anchor.
 export async function settle(
   submitter: SettlementSubmitter,
@@ -67,14 +86,7 @@ export async function settle(
   q: Quote,
   corridor: Corridor,
 ): Promise<Outcome<SettlementRef>> {
-  const req: SettlementRequest = {
-    to: opened.depositAddress,
-    memo: opened.memo,
-    memoType: opened.memoType,
-    amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
-    corridor,
-  };
-  return submitter.submit(req);
+  return submitter.submit(buildSettlementRequest(opened, q, corridor));
 }
 
 // 4. RECONCILE — match the on-chain leg against the anchor's view of the payout.
@@ -108,10 +120,13 @@ export interface PollOptions {
    * `reconcileUntil` returns a non-retryable `RECONCILE_STALLED` carrying the
    * stuck status and the consecutive count.
    *
-   * Set to `0` or `undefined` to disable stall detection (legacy behaviour).
+   * Omitted or `0` disables stall detection at this layer: `reconcileUntil`
+   * reads `opts.stallThreshold ?? 0` (legacy behaviour).
    *
-   * **Default:** `10`. With a typical `pollMs` of 2 s that is ≈ 20 s — well
-   * below the corridor timeout but long enough that a legitimately slow anchor
+   * **Default here:** none (disabled). `execute()` in `run.ts` applies
+   * `deps.stallThreshold ?? 10` and passes it down, so the production default
+   * is `10`. With a typical `pollMs` of 2 s that is ≈ 20 s — well below the
+   * corridor timeout but long enough that a legitimately slow anchor
    * transitioning through intermediate states won't be misdiagnosed.
    */
   stallThreshold?: number;
@@ -139,6 +154,8 @@ export async function reconcileUntil(
   let firstStatus: string | undefined;
   let lastStatus = "unknown";
   let sameCount = 0;
+  // Omitted or 0 disables stall detection at this layer; execute() applies the
+  // production default of 10 one level up (run.ts) and passes it down.
   const threshold = opts.stallThreshold ?? 0;
   let poll = 0;
   const startedAt = opts.now();
@@ -180,7 +197,9 @@ export async function reconcileUntil(
       return fail(
         "RECONCILE_MISMATCH",
         `tx ${transactionId} terminally failed at anchor (status=${s.value.status})`,
-        { retryable: false },
+        // The full terminal status rides along so the engine can read `status`
+        // and `refunds` without a second poll. See `anchorTerminalStatus`.
+        { retryable: false, cause: s.value },
       );
     }
     if (threshold > 0 && sameCount >= threshold) {
@@ -205,6 +224,21 @@ export async function reconcileUntil(
     }
     await opts.sleep(opts.pollMs);
   }
+}
+
+/**
+ * The anchor's terminal `TransactionStatus`, when `reconcileUntil` failed because
+ * the anchor reported a terminal non-success state (carried on the error's
+ * `cause`). Undefined for every other failure (timeout, stall, transport).
+ */
+export function anchorTerminalStatus(e: { cause?: unknown }): TransactionStatus | undefined {
+  const c = e.cause as Partial<TransactionStatus> | undefined;
+  return c &&
+    typeof c === "object" &&
+    c.terminalFailure === true &&
+    typeof c.status === "string"
+    ? (c as TransactionStatus)
+    : undefined;
 }
 
 /** Exponential backoff with a cap, used between settlement retries. */

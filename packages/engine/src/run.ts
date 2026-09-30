@@ -16,6 +16,7 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type { RouteResolver } from "@corridor/router";
+import type { GateContext, PreSettleGate } from "./gate";
 import { canTransition, isTerminal, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
@@ -23,8 +24,22 @@ import {
   type IdempotencyStore,
   type StoredRun,
 } from "./idempotency";
-import type { RefundRequest, SettlementSubmitter } from "./ports";
-import { backoffMs, comply, open, quote, recover, reconcileUntil, settle } from "./verbs";
+import type {
+  RefundRequest,
+  SettlementRef,
+  SettlementRequest,
+  SettlementSubmitter,
+} from "./ports";
+import {
+  anchorTerminalStatus,
+  backoffMs,
+  comply,
+  open,
+  quote,
+  recover,
+  reconcileUntil,
+  settle,
+} from "./verbs";
 import {
   noopMetrics,
   silentLogger,
@@ -36,15 +51,17 @@ import {
 export interface EngineDeps {
   resolver: RouteResolver;
   submitter: SettlementSubmitter;
+  gate?: PreSettleGate;
   idempotency?: IdempotencyStore;
   now?: () => number;
   /** Injectable sleep so tests don't wait on real backoff/poll delays. */
   sleep?: (ms: number) => Promise<void>;
-  /** Delay between reconcile polls (ms). Defaults to 2s. */
+  /** Delay between reconcile polls (ms). Defaults to 2s. Overridden by `recovery.reconcile.poll_seconds` in the manifest. */
   reconcilePollMs?: number;
   /**
    * Consecutive polls with the same status before bailing with
-   * `RECONCILE_STALLED`. Defaults to 10. Set to `0` to disable.
+   * `RECONCILE_STALLED`. Defaults to 10. Set to `0` to disable. Overridden by
+   * `recovery.reconcile.stall_polls` in the manifest.
    */
   stallThreshold?: number;
   /** Structured logger. Defaults to a silent logger. */
@@ -53,6 +70,11 @@ export interface EngineDeps {
   audit?: AuditSink;
   /** Counter/timing sink. Defaults to a no-op. */
   metrics?: Metrics;
+  /**
+   * Explicit opt-in allowing manifest-trusted routes on a public network without
+   * on-chain attestation.
+   */
+  trustManifestWithoutAttestation?: boolean;
 }
 
 export interface RunResult {
@@ -72,6 +94,11 @@ export interface ExecuteOptions {
    * simply claims someone else's tenancy.
    */
   owner?: string;
+  /**
+   * Explicit opt-in allowing manifest-trusted routes on a public network without
+   * on-chain attestation.
+   */
+  trustManifestWithoutAttestation?: boolean;
 }
 
 export async function execute(
@@ -83,8 +110,11 @@ export async function execute(
   const store = deps.idempotency ?? new InMemoryIdempotencyStore();
   const now = deps.now ?? (() => Date.now());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const pollMs = deps.reconcilePollMs ?? 2_000;
-  const stallThreshold = deps.stallThreshold ?? 10;
+  // Manifest value wins, then EngineDeps, then the engine default.
+  const rc = corridor.recovery.reconcile;
+  const pollMs =
+    rc?.poll_seconds !== undefined ? rc.poll_seconds * 1000 : (deps.reconcilePollMs ?? 2_000);
+  const stallThreshold = rc?.stall_polls ?? deps.stallThreshold ?? 10;
   const metrics = deps.metrics ?? noopMetrics;
   const startedAt = now();
 
@@ -173,6 +203,11 @@ export async function execute(
     );
   }
 
+  // --- pick the receiving anchor ---------------------------------------
+  const route = await deps.resolver.resolve(intent, corridor);
+  const routeTrust = route.trust;
+  const adapter = route.receiving;
+
   const advance = async (to: CorridorState): Promise<Outcome<void>> => {
     if (!canTransition(run.state, to)) {
       return fail("SETTLEMENT_FAILED", `illegal transition ${run.state} -> ${to}`);
@@ -182,7 +217,7 @@ export async function execute(
     run.version += 1;
     trail.push(to);
     await store.put(run);
-    await emitTransition(deps, run, from, now());
+    await emitTransition(deps, run, from, now(), undefined, routeTrust);
     return ok(undefined);
   };
 
@@ -193,13 +228,23 @@ export async function execute(
     run.version += 1;
     trail.push("failed");
     await store.put(run);
-    await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`);
+    await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`, routeTrust);
     return { ok: false, error: e };
   };
 
-  // --- pick the receiving anchor ---------------------------------------
-  const route = await deps.resolver.resolve(intent, corridor);
-  const adapter = route.receiving;
+  if (
+    corridor.settlement.network === "public" &&
+    route.trust === "manifest" &&
+    !deps.trustManifestWithoutAttestation &&
+    !opts.trustManifestWithoutAttestation
+  ) {
+    return die({
+      code: "MANIFEST_INVALID",
+      message:
+        "refusing manifest route trust on public network without explicit { trustManifestWithoutAttestation: true }. Use RegistryRouteResolver for verified routing.",
+      retryable: false,
+    });
+  }
 
   // --- 1. quote ---------------------------------------------------------
   const q = await timed("quote", () => quote(adapter, intent, corridor, now()));
@@ -222,6 +267,9 @@ export async function execute(
   const opened = await timed("open", () => open(adapter, intent, q.value, corridor));
   if (!opened.ok) return die(opened.error);
   run.transactionId = opened.value.transactionId;
+  run.depositAddress = opened.value.depositAddress;
+  run.memo = opened.value.memo;
+  run.memoType = opened.value.memoType;
   {
     const t = await advance("opened");
     if (!t.ok) return die(t.error);
@@ -245,6 +293,16 @@ export async function execute(
   const refundAndStop = async (e: CorridorError): Promise<Err> => {
     const back = await advance("recovering");
     if (!back.ok) return die(back.error);
+    // Money moved and the anchor itself reports a terminal failure: it is
+    // already refunding (SEP-31 `refunds`), so we wait for its report instead of
+    // asking the chain to reverse a payment it cannot reverse. Watching the
+    // anchor from here is a separate step; this only parks the run correctly.
+    if (run.stellarTxHash && anchorTerminalStatus(e)) {
+      run.lastError = `${e.code}: ${e.message}`;
+      const pending = await advance("refund_pending");
+      if (!pending.ok) return die(pending.error);
+      return { ok: false, error: e };
+    }
     // Only reverse the chain if a payment actually went out. If settlement never
     // succeeded, there is nothing on-chain to undo — the sending anchor returns
     // the sender's funds off-chain — so we just record the refunded state.
@@ -315,13 +373,79 @@ export async function execute(
     }
 
     {
+      const t = await advance("verifying");
+      if (!t.ok) return die(t.error);
+    }
+
+    if (deps.gate) {
+      const gateContext: GateContext = {
+        intent,
+        corridor,
+        quote: q.value,
+        opened: opened.value,
+        now: now(),
+        attempt,
+      };
+
+      let gateResult;
+      try {
+        gateResult = await timed("verify", () => deps.gate!.evaluate(gateContext));
+      } catch (e) {
+        return die({
+          code: "SETTLEMENT_FAILED",
+          message: e instanceof Error ? e.message : String(e),
+          retryable: false,
+        });
+      }
+
+      for (const check of gateResult.results) {
+        metrics.increment("corridor.gate.check", {
+          name: check.name,
+          passed: String(check.passed),
+        });
+      }
+
+      if (!gateResult.passed) {
+        const firstFailure = gateResult.results.find((r) => !r.passed);
+        return die({
+          code: firstFailure?.code ?? "SETTLEMENT_FAILED",
+          message: firstFailure?.detail ?? "pre-settle gate failed",
+          retryable: false,
+        });
+      }
+    }
+
+    {
       const t = await advance("settling");
       if (!t.ok) return die(t.error);
     }
 
-    const s = await timed("settle", () =>
-      settle(deps.submitter, opened.value, q.value, corridor),
-    );
+    let s: Outcome<SettlementRef>;
+    if (deps.submitter.findExisting) {
+      const req: SettlementRequest = {
+        to: opened.value.depositAddress,
+        memo: opened.value.memo,
+        memoType: opened.value.memoType,
+        amount: {
+          asset: corridor.settlement.bridge_asset,
+          amount: q.value.sourceAmount.amount,
+        },
+        corridor,
+      };
+      const existing = await timed("findExisting", () => deps.submitter.findExisting!(req));
+      if (!existing.ok) {
+        return finishFailure(existing.error);
+      }
+      if (existing.value) {
+        s = ok(existing.value);
+      } else {
+        s = await timed("settle", () =>
+          settle(deps.submitter, opened.value, q.value, corridor),
+        );
+      }
+    } else {
+      s = await timed("settle", () => settle(deps.submitter, opened.value, q.value, corridor));
+    }
     if (!s.ok) {
       const action = recover(corridor, s.error.retryable, attempt);
       if (action.kind === "retry") {
@@ -392,6 +516,7 @@ async function emitTransition(
   from: CorridorState,
   at: number,
   error?: string,
+  routeTrust?: "attested" | "manifest",
 ): Promise<void> {
   const entry = {
     idempotencyKey: run.idempotencyKey,
@@ -401,6 +526,7 @@ async function emitTransition(
     version: run.version,
     at,
     error,
+    ...(routeTrust && { routeTrust }),
   };
   (deps.logger ?? silentLogger).log(error ? "error" : "info", "corridor.transition", entry);
   const metrics = deps.metrics ?? noopMetrics;

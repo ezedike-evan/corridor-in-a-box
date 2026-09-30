@@ -39,7 +39,8 @@ Of particular interest:
 
 - Vulnerabilities in third-party anchors or in `@stellar/stellar-sdk` itself
   (report those upstream).
-- The proprietary `RouteResolver` implementation, which is not part of this repo.
+- A proprietary `RouteResolver` implementation is not included in this repo; the
+  open interface can support one if developed separately in the future.
 
 ## Supported versions
 

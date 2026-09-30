@@ -11,7 +11,7 @@ import {
   type EngineDeps,
 } from "@corridor/engine";
 import { createService, type ServiceOptions } from "@corridor/service";
-import type { PaymentIntent } from "@corridor/types";
+import type { CorridorErrorCode, PaymentIntent } from "@corridor/types";
 
 function corridor(): Corridor {
   const r = parseCorridor({
@@ -46,10 +46,13 @@ function intentBody(key = "p1"): PaymentIntent {
 
 function deps(adapterOpts = {}): EngineDeps {
   return {
-    resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts)),
+    resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts), {
+      trustManifestWithoutAttestation: true,
+    }),
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
     sleep: async () => {},
+    trustManifestWithoutAttestation: true,
   };
 }
 
@@ -285,5 +288,55 @@ describe("service: auth + rate limiting + health", () => {
     allow = false;
     expect((await hit()).status).toBe(429);
     expect(seen).toEqual(["ip:5.5.5.5", "ip:5.5.5.5"]);
+  });
+});
+
+describe("service documentation sync", () => {
+  it("documents every CorridorErrorCode, HTTP status code, and GET /metrics in web docs", async () => {
+    const { docs } = await import("../web/lib/docs.js");
+    const httpApiDoc = docs.find((d) => d.slug === "http-api");
+    expect(httpApiDoc).toBeDefined();
+    const body = httpApiDoc!.body;
+
+    const errorCodes: CorridorErrorCode[] = [
+      "MANIFEST_INVALID",
+      "AMOUNT_INVALID",
+      "QUOTE_UNAVAILABLE",
+      "QUOTE_EXPIRED",
+      "KYC_REQUIRED",
+      "KYC_REJECTED",
+      "ANCHOR_UNAVAILABLE",
+      "SETTLEMENT_FAILED",
+      "SETTLEMENT_TIMEOUT",
+      "REFUND_UNSUPPORTED",
+      "RECONCILE_MISMATCH",
+      "RECONCILE_STALLED",
+      "IDEMPOTENCY_CONFLICT",
+    ];
+
+    for (const code of errorCodes) {
+      expect(body).toContain(code);
+    }
+
+    const expectedStatuses = [
+      "200",
+      "400",
+      "401",
+      "403",
+      "404",
+      "409",
+      "413",
+      "422",
+      "429",
+      "500",
+      "501",
+      "502",
+      "504",
+    ];
+    for (const status of expectedStatuses) {
+      expect(body).toContain(`\`${status}\``);
+    }
+
+    expect(body).toContain("GET /metrics");
   });
 });

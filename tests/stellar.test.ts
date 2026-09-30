@@ -10,12 +10,18 @@ import {
   TransactionFailedError,
 } from "@stellar/stellar-sdk";
 import {
+  AccountInspector,
+  balanceCheck,
+  destinationCheck,
   LocalKeypairSigner,
   StellarSep10Signer,
   StellarSettlementSubmitter,
+  type AccountFacts,
+  type AccountInspectorServerLike,
   type ExternalSigner,
+  type HorizonPaymentRecordLike,
 } from "@corridor/stellar";
-import type { RefundRequest, SettlementRequest } from "@corridor/engine";
+import type { GateContext, RefundRequest, SettlementRequest } from "@corridor/engine";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
 import type { Horizon } from "@stellar/stellar-sdk";
 
@@ -299,5 +305,775 @@ describe("StellarSettlementSubmitter.submit — sequence-number serialization", 
     // already finished — i.e. submit2 would land at or after confirmEnd1.
     // Releasing early lets submit2 start while confirm1 is still in flight.
     expect(marks.submit2).toBeLessThan(marks.confirmEnd1);
+  });
+});
+
+describe("StellarSettlementSubmitter.fee", () => {
+  it("exposes the default fee of 100 stroops (0.00001 XLM)", () => {
+    expect(StellarSettlementSubmitter.fee).toBe("0.00001");
+    const sub = new StellarSettlementSubmitter({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "https://horizon-testnet.stellar.org",
+    });
+    expect(sub.fee).toBe("0.00001");
+  });
+
+  it("allows custom fee override in constructor", () => {
+    const sub = new StellarSettlementSubmitter({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "https://horizon-testnet.stellar.org",
+      fee: "0.00002",
+    });
+    expect(sub.fee).toBe("0.00002");
+  });
+
+  it("throws at construction on an invalid fee instead of falling back", () => {
+    expect(
+      () =>
+        new StellarSettlementSubmitter({
+          signerSecret: Keypair.random().secret(),
+          horizonUrl: "https://horizon-testnet.stellar.org",
+          fee: "not-a-number",
+        }),
+    ).toThrow(/invalid `fee`/);
+  });
+});
+
+describe("AccountInspector", () => {
+  it("loads account facts and normalizes balances, liabilities and counts", async () => {
+    const fakeAccount = {
+      id: "GACCOUNT123",
+      subentry_count: 5,
+      num_sponsoring: 2,
+      num_sponsored: 1,
+      balances: [
+        {
+          asset_type: "native",
+          balance: "100.5000000",
+          selling_liabilities: "1.0000000",
+          buying_liabilities: "0.5000000",
+        },
+        {
+          asset_type: "credit_alphanum4",
+          asset_code: "USDC",
+          asset_issuer: ISSUER,
+          balance: "500.0000000",
+          selling_liabilities: "50.0000000",
+        },
+      ],
+    };
+    const inspector = new AccountInspector({
+      horizonServer: {
+        loadAccount: async () => fakeAccount as unknown as Horizon.AccountResponse,
+      },
+    });
+
+    const res = await inspector.account("GACCOUNT123");
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value?.id).toBe("GACCOUNT123");
+    expect(res.value?.subentry_count).toBe(5);
+    expect(res.value?.num_sponsoring).toBe(2);
+    expect(res.value?.num_sponsored).toBe(1);
+    expect(res.value?.balances.length).toBe(2);
+    expect(res.value?.balances[0].balance).toBe("100.5000000");
+    expect(res.value?.balances[0].selling_liabilities).toBe("1.0000000");
+  });
+
+  it("returns ok(undefined) when account is 404", async () => {
+    const inspector = new AccountInspector({
+      horizonServer: {
+        loadAccount: async () => {
+          throw Object.assign(new Error("Not Found"), { response: { status: 404 } });
+        },
+      },
+    });
+
+    const res = await inspector.account("GMISSING");
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toBeUndefined();
+    }
+  });
+
+  it("exposes baseReserve and baseFee", async () => {
+    const inspector = new AccountInspector({ baseReserve: "0.5", baseFee: "0.00001" });
+    const reserve = await inspector.baseReserve();
+    expect(reserve.ok).toBe(true);
+    if (reserve.ok) expect(reserve.value).toBe("0.5");
+    const fee = await inspector.baseFee();
+    expect(fee.ok).toBe(true);
+    if (fee.ok) expect(fee.value).toBe("0.00001");
+  });
+});
+
+describe("balanceCheck gate check (chain.balance)", () => {
+  function testContext(
+    opts: {
+      bridgeAsset?: string;
+      assetIssuer?: string;
+      amount?: string;
+    } = {},
+  ): GateContext {
+    const base = testCorridor();
+    const bridge_asset = opts.bridgeAsset ?? "USDC";
+    const amount = opts.amount ?? "100.0000000";
+    return {
+      intent: {
+        idempotencyKey: "test-key-1",
+        corridorId: "test",
+        sender: { id: "sender-1" },
+        recipient: { id: "recip-1" },
+        sourceAmount: { asset: bridge_asset, amount },
+      },
+      corridor: {
+        ...base,
+        settlement: {
+          ...base.settlement,
+          bridge_asset,
+          asset_issuer: opts.assetIssuer ?? base.settlement.asset_issuer,
+        },
+      },
+      quote: {
+        id: "q-test-1",
+        sourceAmount: { asset: bridge_asset, amount },
+        destAmount: { asset: "iso4217:ARS", amount: "10000" },
+        price: "100",
+        expiresAt: Date.now() + 60_000,
+        firm: true,
+      },
+      opened: {
+        transactionId: "tx-1",
+        depositAddress: Keypair.random().publicKey(),
+        memo: "memo123",
+        memoType: "text",
+      },
+      now: Date.now(),
+      attempt: 1,
+    };
+  }
+
+  function mockInspector(facts: AccountFacts | undefined) {
+    return {
+      account: async () => ({ ok: true as const, value: facts }),
+    };
+  }
+
+  it("has the name 'chain.balance'", () => {
+    const check = balanceCheck(mockInspector(undefined), "G1");
+    expect(check.name).toBe("chain.balance");
+  });
+
+  it("fails with PRESETTLE_INSUFFICIENT_FUNDS if account does not exist (404)", async () => {
+    const check = balanceCheck(mockInspector(undefined), "G1");
+    const res = await check.run(testContext());
+    expect(res.passed).toBe(false);
+    expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+    expect(res.detail).toContain("does not exist on-chain");
+  });
+
+  describe("exact-cover and one stroop short (non-XLM bridge asset)", () => {
+    it("exact-cover passes", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 0,
+        num_sponsoring: 0,
+        num_sponsored: 0,
+        balances: [
+          { asset_type: "native", balance: "1.0000100", selling_liabilities: "0" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: ISSUER,
+            balance: "100.0000000",
+            selling_liabilities: "0",
+          },
+        ],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ amount: "100.0000000" }));
+      expect(res.passed).toBe(true);
+      expect(res.detail).toContain("balance covers USDC amount 100.0000000");
+    });
+
+    it("fails when bridge asset is one stroop short (0.0000001 short)", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 0,
+        num_sponsoring: 0,
+        num_sponsored: 0,
+        balances: [
+          { asset_type: "native", balance: "1.0000100", selling_liabilities: "0" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: ISSUER,
+            balance: "99.9999999",
+            selling_liabilities: "0",
+          },
+        ],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ amount: "100.0000000" }));
+      expect(res.passed).toBe(false);
+      expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+      expect(res.detail).toContain("insufficient USDC");
+      expect(res.detail).toContain("required 100.0000000");
+      expect(res.detail).toContain("available 99.9999999");
+    });
+
+    it("fails when XLM balance is one stroop short of fee + reserve", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 0,
+        num_sponsoring: 0,
+        num_sponsored: 0,
+        balances: [
+          { asset_type: "native", balance: "1.0000099", selling_liabilities: "0" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: ISSUER,
+            balance: "100.0000000",
+            selling_liabilities: "0",
+          },
+        ],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ amount: "100.0000000" }));
+      expect(res.passed).toBe(false);
+      expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+      expect(res.detail).toContain("insufficient XLM for fee and reserve");
+      expect(res.detail).toContain("required 0.00001");
+      expect(res.detail).toContain("available 0.0000099");
+    });
+  });
+
+  describe("liabilities reduce available", () => {
+    it("bridge asset liabilities reduce available below amount", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 0,
+        num_sponsoring: 0,
+        num_sponsored: 0,
+        balances: [
+          { asset_type: "native", balance: "5.0000000", selling_liabilities: "0" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: ISSUER,
+            balance: "150.0000000",
+            selling_liabilities: "60.0000000",
+          },
+        ],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ amount: "100.0000000" }));
+      expect(res.passed).toBe(false);
+      expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+      expect(res.detail).toContain("available 90");
+    });
+
+    it("XLM liabilities reduce available below fee + reserve", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 0,
+        num_sponsoring: 0,
+        num_sponsored: 0,
+        balances: [
+          {
+            asset_type: "native",
+            balance: "2.0000100",
+            selling_liabilities: "1.0000001",
+          },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: ISSUER,
+            balance: "100.0000000",
+            selling_liabilities: "0",
+          },
+        ],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ amount: "100.0000000" }));
+      expect(res.passed).toBe(false);
+      expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+      expect(res.detail).toContain("insufficient XLM for fee and reserve");
+    });
+  });
+
+  describe("XLM bridge asset counts amount+fee against the same balance", () => {
+    it("exact-cover passes for XLM bridge asset", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 0,
+        num_sponsoring: 0,
+        num_sponsored: 0,
+        balances: [{ asset_type: "native", balance: "51.0000100", selling_liabilities: "0" }],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ bridgeAsset: "XLM", amount: "50.0000000" }));
+      expect(res.passed).toBe(true);
+      expect(res.detail).toContain("balance covers XLM amount 50.0000000 and fee 0.00001");
+    });
+
+    it("one stroop short fails for XLM bridge asset", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 0,
+        num_sponsoring: 0,
+        num_sponsored: 0,
+        balances: [{ asset_type: "native", balance: "51.0000099", selling_liabilities: "0" }],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ bridgeAsset: "XLM", amount: "50.0000000" }));
+      expect(res.passed).toBe(false);
+      expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+      expect(res.detail).toContain("insufficient XLM");
+      expect(res.detail).toContain("required 50.00001");
+      expect(res.detail).toContain("available 50.0000099");
+    });
+
+    it("fails if balance covers amount + fee but ignores minimum reserve", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 0,
+        num_sponsoring: 0,
+        num_sponsored: 0,
+        balances: [{ asset_type: "native", balance: "50.0000100", selling_liabilities: "0" }],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ bridgeAsset: "XLM", amount: "50.0000000" }));
+      expect(res.passed).toBe(false);
+      expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+    });
+
+    it("fails if balance covers amount + reserve but ignores fee", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 0,
+        num_sponsoring: 0,
+        num_sponsored: 0,
+        balances: [{ asset_type: "native", balance: "51.0000000", selling_liabilities: "0" }],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ bridgeAsset: "XLM", amount: "50.0000000" }));
+      expect(res.passed).toBe(false);
+      expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+    });
+  });
+
+  describe("minimum reserve formula with sponsoring and sponsored counts", () => {
+    it("exact cover with sponsoring and sponsored entries passes", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 3,
+        num_sponsoring: 2,
+        num_sponsored: 1,
+        balances: [
+          { asset_type: "native", balance: "3.0000100", selling_liabilities: "0" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: ISSUER,
+            balance: "100.0000000",
+            selling_liabilities: "0",
+          },
+        ],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ amount: "100.0000000" }));
+      expect(res.passed).toBe(true);
+    });
+
+    it("one stroop short of calculated reserve formula fails", async () => {
+      const facts: AccountFacts = {
+        id: "G1",
+        subentry_count: 3,
+        num_sponsoring: 2,
+        num_sponsored: 1,
+        balances: [
+          { asset_type: "native", balance: "3.0000099", selling_liabilities: "0" },
+          {
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: ISSUER,
+            balance: "100.0000000",
+            selling_liabilities: "0",
+          },
+        ],
+      };
+      const check = balanceCheck(mockInspector(facts), "G1");
+      const res = await check.run(testContext({ amount: "100.0000000" }));
+      expect(res.passed).toBe(false);
+      expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+      expect(res.detail).toContain("minimum reserve 3");
+    });
+  });
+});
+
+describe("AccountInspector.paymentsFrom", () => {
+  it("fetches payments and extracts memo and tx info", async () => {
+    const fakePaymentsCall = {
+      forAccount: () => fakePaymentsCall,
+      order: () => fakePaymentsCall,
+      limit: () => fakePaymentsCall,
+      call: async () => ({
+        records: [
+          {
+            id: "pay-1",
+            transaction_hash: "tx-hash-1",
+            from: "GSENDER",
+            to: "GDEST",
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: ISSUER,
+            amount: "100.0000000",
+            transaction: async () => ({
+              memo: "test-memo",
+              memo_type: "text",
+              ledger_attr: 1234,
+            }),
+          },
+        ],
+      }),
+    };
+
+    const fakeServer = {
+      loadAccount: async () => ({}),
+      payments: () => fakePaymentsCall,
+    } as unknown as AccountInspectorServerLike;
+
+    const inspector = new AccountInspector({
+      horizonServer: fakeServer,
+    });
+
+    const res = await inspector.paymentsFrom("GSENDER");
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toHaveLength(1);
+      expect(res.value[0].transaction_hash).toBe("tx-hash-1");
+      expect(res.value[0].from).toBe("GSENDER");
+      expect(res.value[0].to).toBe("GDEST");
+      expect(res.value[0].amount).toBe("100.0000000");
+      expect(res.value[0].memo).toBe("test-memo");
+      expect(res.value[0].memo_type).toBe("text");
+      expect(res.value[0].ledger).toBe(1234);
+    }
+  });
+
+  it("returns empty array if payments is not supported or returns empty", async () => {
+    const fakeServer = {
+      loadAccount: async () => ({}),
+    } as unknown as AccountInspectorServerLike;
+    const inspector = new AccountInspector({
+      horizonServer: fakeServer,
+    });
+    const res = await inspector.paymentsFrom("GSENDER");
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toEqual([]);
+    }
+  });
+});
+
+describe("StellarSettlementSubmitter.findExisting", () => {
+  const kp = Keypair.random();
+  const destKp = Keypair.random();
+
+  function createSubmitterWithPayments(payments: HorizonPaymentRecordLike[]) {
+    const fakePaymentsCall = {
+      forAccount: () => fakePaymentsCall,
+      order: () => fakePaymentsCall,
+      limit: () => fakePaymentsCall,
+      call: async () => ({ records: payments }),
+    };
+    const server = {
+      loadAccount: async () => new Account(kp.publicKey(), "100"),
+      submitTransaction: async () => ({}),
+      transactions: () => ({
+        transaction: () => ({ call: async () => ({ successful: true }) }),
+      }),
+      payments: () => fakePaymentsCall,
+    };
+    return new StellarSettlementSubmitter({
+      signerSecret: kp.secret(),
+      horizonUrl: "unused",
+      horizonServer: server as unknown as Horizon.Server,
+    });
+  }
+
+  it("finds an existing settlement with exact text memo and amount match", async () => {
+    const sub = createSubmitterWithPayments([
+      {
+        id: "p1",
+        transaction_hash: "existing-tx-1",
+        from: kp.publicKey(),
+        to: destKp.publicKey(),
+        asset_type: "credit_alphanum4",
+        asset_code: "USDC",
+        asset_issuer: ISSUER,
+        amount: "10.0000000",
+        memo: "memo-abc",
+        memo_type: "text",
+        ledger: 500,
+      },
+    ]);
+
+    const req: SettlementRequest = {
+      to: destKp.publicKey(),
+      amount: { asset: "USDC", amount: "10" },
+      memo: "memo-abc",
+      memoType: "text",
+      corridor: testCorridor(),
+    };
+
+    const res = await sub.findExisting(req);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toBeDefined();
+      expect(res.value?.stellarTxHash).toBe("existing-tx-1");
+      expect(res.value?.ledger).toBe(500);
+    }
+  });
+
+  it("finds an existing settlement with hash memo (normalizing hex vs base64)", async () => {
+    // 32-byte hash
+    const hexHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const base64Hash = Buffer.from(hexHash, "hex").toString("base64");
+
+    const sub = createSubmitterWithPayments([
+      {
+        id: "p1",
+        transaction_hash: "hash-tx-1",
+        from: kp.publicKey(),
+        to: destKp.publicKey(),
+        asset_type: "credit_alphanum4",
+        asset_code: "USDC",
+        asset_issuer: ISSUER,
+        amount: "10.0000000",
+        memo: base64Hash,
+        memo_type: "hash",
+        ledger: 600,
+      },
+    ]);
+
+    const req: SettlementRequest = {
+      to: destKp.publicKey(),
+      amount: { asset: "USDC", amount: "10.00" },
+      memo: hexHash,
+      memoType: "hash",
+      corridor: testCorridor(),
+    };
+
+    const res = await sub.findExisting(req);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value?.stellarTxHash).toBe("hash-tx-1");
+      expect(res.value?.ledger).toBe(600);
+    }
+  });
+
+  it("finds an existing XLM native settlement", async () => {
+    const xlmCorridor = parseCorridor({
+      id: "test-xlm",
+      source: { name: "S", asset: "XLM", endpoints: { home_domain: "s.example" } },
+      dest: {
+        name: "D",
+        asset: "iso4217:ARS",
+        endpoints: {
+          home_domain: "d.example",
+          transfer_server_sep31: "https://d.example/sep31",
+        },
+      },
+      fx: { path: ["ARS", "XLM", "ARS"], who_holds_risk: "receiving_anchor" },
+      compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
+      settlement: { network: "testnet", bridge_asset: "native", asset_issuer: ISSUER },
+      recovery: { max_retries: 2 },
+    });
+    if (!xlmCorridor.ok) throw new Error(`bad corridor: ${JSON.stringify(xlmCorridor.error)}`);
+
+    const sub = createSubmitterWithPayments([
+      {
+        id: "p1",
+        transaction_hash: "xlm-tx-1",
+        from: kp.publicKey(),
+        to: destKp.publicKey(),
+        asset_type: "native",
+        amount: "5.0000000",
+        memo: "12345",
+        memo_type: "id",
+        ledger: 700,
+      },
+    ]);
+
+    const req: SettlementRequest = {
+      to: destKp.publicKey(),
+      amount: { asset: "XLM", amount: "5" },
+      memo: "12345",
+      memoType: "id",
+      corridor: xlmCorridor.value,
+    };
+
+    const res = await sub.findExisting(req);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value?.stellarTxHash).toBe("xlm-tx-1");
+    }
+  });
+
+  it("returns ok(undefined) when destination, amount, or memo does not match", async () => {
+    const sub = createSubmitterWithPayments([
+      {
+        id: "p1",
+        transaction_hash: "tx-diff-memo",
+        from: kp.publicKey(),
+        to: destKp.publicKey(),
+        asset_type: "credit_alphanum4",
+        asset_code: "USDC",
+        asset_issuer: ISSUER,
+        amount: "10.0000000",
+        memo: "different-memo",
+        memo_type: "text",
+      },
+    ]);
+
+    const req: SettlementRequest = {
+      to: destKp.publicKey(),
+      amount: { asset: "USDC", amount: "10" },
+      memo: "expected-memo",
+      memoType: "text",
+      corridor: testCorridor(),
+    };
+
+    const res = await sub.findExisting(req);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toBeUndefined();
+    }
+  });
+});
+
+describe("destinationCheck gate check (chain.destination)", () => {
+  const SIGNER = Keypair.random().publicKey();
+  const DEST = Keypair.random().publicKey();
+
+  function destContext(
+    opts: { bridgeAsset?: string; destination?: string } = {},
+  ): GateContext {
+    const base = testCorridor();
+    const bridge_asset = opts.bridgeAsset ?? "USDC";
+    return {
+      intent: {
+        idempotencyKey: "test-key-1",
+        corridorId: "test",
+        sender: { id: "sender-1" },
+        recipient: { id: "recip-1" },
+        sourceAmount: { asset: bridge_asset, amount: "100" },
+      },
+      corridor: {
+        ...base,
+        settlement: { ...base.settlement, bridge_asset },
+      },
+      quote: {
+        id: "q-test-1",
+        sourceAmount: { asset: bridge_asset, amount: "100" },
+        destAmount: { asset: "iso4217:ARS", amount: "10000" },
+        price: "100",
+        expiresAt: Date.now() + 60_000,
+        firm: true,
+      },
+      opened: {
+        transactionId: "tx-1",
+        depositAddress: opts.destination ?? DEST,
+        memo: "memo123",
+        memoType: "text",
+      },
+      now: Date.now(),
+      attempt: 1,
+    };
+  }
+
+  function destFacts(balances: AccountFacts["balances"], id: string = DEST): AccountFacts {
+    return { id, subentry_count: 0, num_sponsoring: 0, num_sponsored: 0, balances };
+  }
+
+  function mockInspector(facts: AccountFacts | undefined) {
+    return { account: async () => ({ ok: true as const, value: facts }) };
+  }
+
+  const usdcTrustline = (is_authorized: boolean) => ({
+    asset_type: "credit_alphanum4",
+    asset_code: "USDC",
+    asset_issuer: ISSUER,
+    balance: "0.0000000",
+    is_authorized,
+  });
+
+  it("has the name 'chain.destination'", () => {
+    expect(destinationCheck(mockInspector(undefined), SIGNER).name).toBe("chain.destination");
+  });
+
+  it("fails when the destination account does not exist", async () => {
+    const result = await destinationCheck(mockInspector(undefined), SIGNER).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("exists");
+  });
+
+  it("fails when the destination has no trustline for the bridge asset", async () => {
+    const facts = destFacts([{ asset_type: "native", balance: "10.0000000" }]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("no USDC trustline");
+  });
+
+  it("fails when the trustline exists but is not authorized", async () => {
+    const facts = destFacts([usdcTrustline(false)]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("not authorized");
+  });
+
+  it("fails a self-payment before ever touching Horizon", async () => {
+    const inspector = {
+      account: async () => {
+        throw new Error("must not be called for a self-payment");
+      },
+    };
+    const result = await destinationCheck(inspector, SIGNER).run(
+      destContext({ destination: SIGNER }),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("self-payment");
+  });
+
+  it("fails an operator-denylisted destination", async () => {
+    const facts = destFacts([usdcTrustline(true)]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER, {
+      denylist: (g) => g === DEST,
+    }).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("denylist");
+  });
+
+  it("passes native XLM with no trustline", async () => {
+    const facts = destFacts([{ asset_type: "native", balance: "10.0000000" }]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(
+      destContext({ bridgeAsset: "XLM" }),
+    );
+    expect(result.passed).toBe(true);
+    expect(result.detail).toContain("no trustline");
+  });
+
+  it("passes an existing destination with an authorized trustline", async () => {
+    const facts = destFacts([usdcTrustline(true)]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(destContext());
+    expect(result.passed).toBe(true);
   });
 });

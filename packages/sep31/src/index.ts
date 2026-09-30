@@ -3,7 +3,8 @@
 //
 // This is the whole point of the standard: you don't write a new adapter per anchor.
 // Bespoke exchanges/OTC desks that don't speak SEP-31 implement AnchorAdapter
-// directly instead — those would live in the private repo, not here.
+// directly instead — bespoke implementations are outside this generic adapter
+// and could be maintained separately; no private repo is assumed to exist.
 //
 // The HTTP shapes below follow SEP-31 (GET /info, POST /transactions,
 // GET /transactions/:id), SEP-38 (POST /quote), SEP-10 (GET/POST web_auth) and
@@ -707,11 +708,12 @@ export class Sep31Adapter implements AnchorAdapter {
   // network. Learning that a refund *happened* is `getTransaction`'s job (the
   // anchor flips the transaction's status once it refunds).
   //
-  // Nothing calls this yet: whether refund initiation belongs on the
-  // AnchorAdapter port at all is a separate design decision. The method exists
-  // to occupy the name with the refusal — the engine already parks any refused
-  // refund in `held` for a human (the out-of-band path in docs/operations.md),
-  // and that is asserted at the engine seam in tests/engine.test.ts.
+  // Since #72, `requestRefund` is part of the `AnchorAdapter` port. The
+  // generic `Sep31Adapter` fails closed with `REFUND_UNSUPPORTED` — standard
+  // SEP-31 anchors have no sender-initiated refund endpoint. The engine does
+  // not call it yet, and the state machine defines `refund_pending` but no
+  // transition enters it. The method occupies the name so bespoke adapters
+  // (OTC desks, proprietary anchors) can implement anchor-driven refunds.
   async requestRefund(
     transactionId: string,
     _amount?: Money,
@@ -727,3 +729,9 @@ export class Sep31Adapter implements AnchorAdapter {
     );
   }
 }
+
+export {
+  openedTxCheck,
+  type OpenedTxCheckOptions,
+  type ReportedTransactionFields,
+} from "./openedTxCheck";
