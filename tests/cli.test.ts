@@ -12,11 +12,7 @@ const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
 const CLI = fileURLToPath(new URL("../packages/cli/src/index.ts", import.meta.url));
 
 function run(args: string[]) {
-  return spawnSync(TSX, [CLI, ...args], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-    shell: process.platform === "win32",
-  });
+  return spawnSync(TSX, [CLI, ...args], { cwd: REPO_ROOT, encoding: "utf8" });
 }
 
 describe("corridor CLI", () => {
