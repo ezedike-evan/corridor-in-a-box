@@ -39,6 +39,7 @@ export {
   consoleLogger,
   silentLogger,
   InMemoryAuditLog,
+  emitTransition,
   noopMetrics,
   InMemoryMetrics,
   PrometheusMetrics,
@@ -47,6 +48,8 @@ export {
   type LogFields,
   type AuditSink,
   type AuditEntry,
+  type TransitionSinks,
+  type TransitionOptions,
   type Metrics,
   type MetricTags,
 } from "./observability";

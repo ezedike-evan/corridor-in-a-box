@@ -7,8 +7,10 @@ import {
   InMemoryIdempotencyStore,
   InMemoryMetrics,
   createMockSubmitter,
+  emitTransition,
   execute,
   reconcileUntil,
+  type CheckResult,
   type EngineDeps,
 } from "@corridor/engine";
 import type { PaymentIntent } from "@corridor/types";
@@ -233,5 +235,121 @@ describe("reconcile polling observability", () => {
     const pollMetrics = metrics.counters.filter((c) => c.name === "corridor.reconcile.poll");
     expect(pollMetrics.length).toBeGreaterThanOrEqual(1);
     expect(pollMetrics[0].tags?.corridor).toBe("test");
+  });
+});
+
+// `verifying` (#138) is not a CorridorState yet and execute() does not run the
+// gate yet (#141), so these drive emitTransition directly. Drop the
+// `as never` casts once #138 lands, and assert through execute() after #141.
+describe("pre-settle gate results in the audit trail", () => {
+  const passing: CheckResult = {
+    name: "chain.balance",
+    passed: true,
+    detail: "GSENDER holds 250.00 USDC, needs 100.00",
+    durationMs: 12,
+  };
+  const failing: CheckResult = {
+    name: "sep31.info.asset",
+    passed: false,
+    code: "SETTLEMENT_FAILED",
+    detail: "anchor /info does not list USDC:GISSUER",
+    durationMs: 40,
+  };
+  const run = (state: "settling" | "failed") => ({
+    idempotencyKey: "obs-gate",
+    corridorId: "test",
+    state,
+    version: 4,
+  });
+  const capture = () => {
+    const logs: { level: string; msg: string; fields?: Record<string, unknown> }[] = [];
+    return {
+      logs,
+      logger: {
+        log(level: string, msg: string, fields?: Record<string, unknown>) {
+          logs.push({ level, msg, fields });
+        },
+      },
+    };
+  };
+
+  it("records one result per configured check on verifying -> settling", async () => {
+    const audit = new InMemoryAuditLog();
+    const { logs, logger } = capture();
+    const checks = [passing, { ...passing, name: "stellar.toml.hash", detail: "match" }];
+
+    await emitTransition({ audit, logger }, run("settling"), "verifying" as never, 1, {
+      checks,
+    });
+
+    expect(audit.entries).toHaveLength(1);
+    const entry = audit.entries[0]!;
+    expect(entry).toMatchObject({ from: "verifying", to: "settling" });
+    expect(entry.checks).toHaveLength(checks.length);
+    expect(entry.checks).toEqual(checks);
+
+    const gateLogs = logs.filter((l) => l.msg === "corridor.gate.check");
+    expect(gateLogs.map((l) => l.level)).toEqual(["info", "info"]);
+  });
+
+  it("records failed checks with passed:false, code and detail on verifying -> failed", async () => {
+    const audit = new InMemoryAuditLog();
+    const { logs, logger } = capture();
+
+    await emitTransition({ audit, logger }, run("failed"), "verifying" as never, 1, {
+      error: "SETTLEMENT_FAILED: pre-settle gate refused",
+      checks: [passing, failing],
+    });
+
+    const entry = audit.entries[0]!;
+    expect(entry.error).toContain("SETTLEMENT_FAILED");
+    expect(entry.checks).toHaveLength(2);
+    expect(entry.checks?.find((c) => !c.passed)).toEqual({
+      name: "sep31.info.asset",
+      passed: false,
+      code: "SETTLEMENT_FAILED",
+      detail: "anchor /info does not list USDC:GISSUER",
+      durationMs: 40,
+    });
+
+    // info for the pass, warn for the failure — one line each.
+    const gateLogs = logs.filter((l) => l.msg === "corridor.gate.check");
+    expect(gateLogs.map((l) => [l.level, l.fields?.check])).toEqual([
+      ["info", "chain.balance"],
+      ["warn", "sep31.info.asset"],
+    ]);
+    expect(gateLogs[1]!.fields).toMatchObject({
+      idempotencyKey: "obs-gate",
+      passed: false,
+      code: "SETTLEMENT_FAILED",
+      detail: "anchor /info does not list USDC:GISSUER",
+    });
+    // The transition line stays flat; the results live on the per-check lines.
+    const transition = logs.find((l) => l.msg === "corridor.transition");
+    expect(transition?.fields).not.toHaveProperty("checks");
+  });
+
+  it("does not snapshot a caller's later mutation of the checks array", async () => {
+    const audit = new InMemoryAuditLog();
+    const checks = [passing];
+    await emitTransition({ audit }, run("settling"), "verifying" as never, 1, { checks });
+    checks.push(failing);
+    expect(audit.entries[0]!.checks).toHaveLength(1);
+  });
+
+  it("leaves checks off every transition that is not leaving verifying", async () => {
+    const audit = new InMemoryAuditLog();
+    const deps: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: createMockSubmitter(),
+      idempotency: new InMemoryIdempotencyStore(),
+      audit,
+      trustManifestWithoutAttestation: true,
+    };
+    const r = await execute({ ...intent, idempotencyKey: "obs-nochecks" }, corridor(), deps);
+    expect(r.ok).toBe(true);
+    expect(audit.entries.every((e) => !("checks" in e))).toBe(true);
   });
 });

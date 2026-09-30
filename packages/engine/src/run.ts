@@ -16,7 +16,7 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type { RouteResolver } from "@corridor/router";
-import { canTransition, isTerminal, type CorridorState } from "./state";
+import { canTransition, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
   hasRequestedRefund,
@@ -26,8 +26,8 @@ import {
 import type { RefundRequest, SettlementSubmitter } from "./ports";
 import { backoffMs, comply, open, quote, recover, reconcileUntil, settle } from "./verbs";
 import {
+  emitTransition,
   noopMetrics,
-  silentLogger,
   type AuditSink,
   type Logger,
   type Metrics,
@@ -197,7 +197,7 @@ export async function execute(
     run.version += 1;
     trail.push(to);
     await store.put(run);
-    await emitTransition(deps, run, from, now(), undefined, routeTrust);
+    await emitTransition(deps, run, from, now(), { routeTrust });
     return ok(undefined);
   };
 
@@ -208,7 +208,10 @@ export async function execute(
     run.version += 1;
     trail.push("failed");
     await store.put(run);
-    await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`, routeTrust);
+    await emitTransition(deps, run, from, now(), {
+      error: `${e.code}: ${e.message}`,
+      routeTrust,
+    });
     return { ok: false, error: e };
   };
 
@@ -410,34 +413,6 @@ function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
   };
 }
 
-/** Log + audit a single transition. `run` must already be at its new state. */
-async function emitTransition(
-  deps: EngineDeps,
-  run: StoredRun,
-  from: CorridorState,
-  at: number,
-  error?: string,
-  routeTrust?: "attested" | "manifest",
-): Promise<void> {
-  const entry = {
-    idempotencyKey: run.idempotencyKey,
-    corridorId: run.corridorId,
-    from,
-    to: run.state,
-    version: run.version,
-    at,
-    error,
-    ...(routeTrust && { routeTrust }),
-  };
-  (deps.logger ?? silentLogger).log(error ? "error" : "info", "corridor.transition", entry);
-  const metrics = deps.metrics ?? noopMetrics;
-  metrics.increment("corridor.transition", { to: run.state, corridor: run.corridorId });
-  if (isTerminal(run.state)) {
-    metrics.increment("corridor.terminal", { state: run.state, corridor: run.corridorId });
-  }
-  await deps.audit?.record(entry);
-}
-
 /**
  * Resume a persisted run that crashed after the money moved. From `settled` we
  * re-poll the anchor (the payment already went out — we must NOT re-settle) and,
@@ -496,7 +471,9 @@ async function resumeRun(
       run.version += 1;
       trail.push("failed");
       await store.put(run);
-      await emitTransition(deps, run, from, now(), `${r.error.code}: ${r.error.message}`);
+      await emitTransition(deps, run, from, now(), {
+        error: `${r.error.code}: ${r.error.message}`,
+      });
       return { ok: false, error: r.error };
     }
     const t = await advance("reconciled");

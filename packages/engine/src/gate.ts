@@ -24,7 +24,11 @@ export interface CheckResult {
   readonly passed: boolean;
   /** Required when !passed. */
   readonly code?: CorridorErrorCode;
-  /** Human-readable, safe to log (no PII). */
+  /**
+   * Human-readable, and recorded verbatim in logs and the audit trail, so it
+   * must never carry PII: only ids, amounts, asset codes, account G-addresses
+   * and statuses — never names, emails, phone numbers or KYC fields.
+   */
   readonly detail: string;
   readonly durationMs: number;
 }

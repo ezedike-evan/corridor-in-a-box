@@ -3,7 +3,8 @@
 // the fact, so every state transition is both logged and recorded as an immutable
 // audit entry. Both sinks are injected; the engine never reaches for a global.
 
-import type { CorridorState } from "./state";
+import type { CheckResult } from "./gate";
+import { isTerminal, type CorridorState } from "./state";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -39,6 +40,12 @@ export interface AuditEntry {
   readonly at: number;
   readonly error?: string;
   readonly routeTrust?: "attested" | "manifest";
+  /**
+   * Every pre-settle gate result, on the transition out of `verifying`
+   * (to `settling` on a pass, `failed` on a refusal), so "why did (or didn't)
+   * we pay?" is answerable after the fact. Absent on every other transition.
+   */
+  readonly checks?: readonly CheckResult[];
 }
 
 export interface AuditSink {
@@ -168,4 +175,73 @@ export class PrometheusMetrics implements Metrics {
     }
     return lines.join("\n") + "\n";
   }
+}
+
+// --- Transitions -----------------------------------------------------------
+
+export interface TransitionSinks {
+  readonly logger?: Logger;
+  readonly metrics?: Metrics;
+  readonly audit?: AuditSink;
+}
+
+export interface TransitionOptions {
+  readonly error?: string;
+  readonly routeTrust?: "attested" | "manifest";
+  /** Pre-settle gate results; pass them on the transition out of `verifying`. */
+  readonly checks?: readonly CheckResult[];
+}
+
+/**
+ * Log + audit a single transition. `run` must already be at its new state.
+ * When gate `checks` are given, each is also logged on its own line — info when
+ * it passed, warn when it failed — and the full list lands on the audit entry.
+ */
+export async function emitTransition(
+  sinks: TransitionSinks,
+  run: {
+    readonly idempotencyKey: string;
+    readonly corridorId: string;
+    readonly state: CorridorState;
+    readonly version: number;
+  },
+  from: CorridorState,
+  at: number,
+  opts: TransitionOptions = {},
+): Promise<void> {
+  const { error, routeTrust, checks } = opts;
+  const entry: AuditEntry = {
+    idempotencyKey: run.idempotencyKey,
+    corridorId: run.corridorId,
+    from,
+    to: run.state,
+    version: run.version,
+    at,
+    error,
+    ...(routeTrust && { routeTrust }),
+    ...(checks && { checks: [...checks] }),
+  };
+  const logger = sinks.logger ?? silentLogger;
+  for (const c of checks ?? []) {
+    // Only the check's own fields — `detail` is PII-free by contract (see
+    // CheckResult) and nothing about the sender or recipient is added here.
+    logger.log(c.passed ? "info" : "warn", "corridor.gate.check", {
+      idempotencyKey: run.idempotencyKey,
+      corridorId: run.corridorId,
+      check: c.name,
+      passed: c.passed,
+      ...(c.code && { code: c.code }),
+      detail: c.detail,
+      durationMs: c.durationMs,
+    });
+  }
+  // The per-check lines carry the results; keep the transition line flat.
+  const { checks: _checks, ...transition } = entry;
+  logger.log(error ? "error" : "info", "corridor.transition", transition);
+  const metrics = sinks.metrics ?? noopMetrics;
+  metrics.increment("corridor.transition", { to: run.state, corridor: run.corridorId });
+  if (isTerminal(run.state)) {
+    metrics.increment("corridor.terminal", { state: run.state, corridor: run.corridorId });
+  }
+  await sinks.audit?.record(entry);
 }

@@ -7,6 +7,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — audit entries can carry pre-settle gate results (2026-09-30)
+
+`AuditEntry` gains an optional `checks: readonly CheckResult[]`, so the
+transition out of `verifying` can record every gate result and "why did (or
+didn't) we pay?" is answerable after the fact
+([#142](https://github.com/ezedike-evan/corridor-in-a-box/issues/142)).
+`emitTransition` moves to `observability.ts`, is exported from
+`@corridor/engine`, and takes `{ error, routeTrust, checks }` as an options
+object. Each check is logged as `corridor.gate.check` — `info` when it passed,
+`warn` when it failed. `CheckResult.detail` is now documented as PII-free:
+ids, amounts, asset codes, G-addresses and statuses only. `execute()` does not
+pass `checks` yet; that follows #138 (`verifying` state) and #141 (gate in
+`execute()`).
+
 ### Maintenance — ESLint 10 landed
 
 - `eslint` 10 landed in [#37](https://github.com/ezedike-evan/corridor-in-a-box/pull/37).
