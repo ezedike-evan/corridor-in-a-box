@@ -14,6 +14,7 @@ source:
 dest:
   name: Anchor Platform Reference
   asset: "iso4217:USD" # off-chain payout asset the reference server delivers
+  protocol: sep31
   endpoints:
     home_domain: localhost:8080
     transfer_server_sep31: http://localhost:8080/sep31

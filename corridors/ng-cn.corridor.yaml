@@ -18,6 +18,7 @@ source:
 dest:
   name: China RMB Off-Ramp (does not exist yet)
   asset: "iso4217:CNY"
+  protocol: sep31
   endpoints:
     home_domain: example-cn-anchor.invalid # no transfer_server_sep31 on purpose
     # transfer_server_sep31: <-- the missing piece. This is what blocks the lane.

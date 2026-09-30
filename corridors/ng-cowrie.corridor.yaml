@@ -25,6 +25,7 @@ source:
 dest:
   name: Cowrie Exchange (Nigeria)
   asset: "iso4217:NGN"
+  protocol: sep31
   endpoints:
     home_domain: cowrie.exchange
     transfer_server_sep31: https://api.cowrie.exchange/sep31/direct

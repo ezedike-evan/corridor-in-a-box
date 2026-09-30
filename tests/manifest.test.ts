@@ -7,6 +7,7 @@ const valid = {
   dest: {
     name: "D",
     asset: "iso4217:ARS",
+    protocol: "sep31" as const,
     endpoints: {
       home_domain: "d.example",
       transfer_server_sep31: "https://d.example/sep31",
@@ -24,6 +25,20 @@ const validProof = {
   stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
   anchor_transaction_id: "anchor-tx-999",
   amount: "50.00",
+};
+
+// Legacy manifest shape (no protocol field) — backward compat.
+const legacyValid = {
+  ...valid,
+  dest: {
+    name: "D",
+    asset: "iso4217:ARS",
+    endpoints: {
+      home_domain: "d.example",
+      transfer_server_sep31: "https://d.example/sep31",
+      quote_server: "https://d.example/sep38",
+    },
+  },
 };
 
 describe("manifest", () => {
@@ -339,5 +354,32 @@ describe("recovery.reconcile", () => {
     expect(mk({ poll_seconds: 12, stall_polls: 5 })).toHaveLength(1);
     expect(mk({ poll_seconds: 10, stall_polls: 4 })).toHaveLength(0);
     expect(mk({ poll_seconds: 10, stall_polls: 0 })).toHaveLength(0);
+  });
+
+  it("emits no warnings when dest.protocol is explicitly set to sep31", () => {
+    const r = parseCorridor(valid);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.warnings).toEqual([]);
+      expect(r.value.dest.protocol).toBe("sep31");
+    }
+  });
+
+  it("defaults dest.protocol to sep31 and emits a deprecation warning for legacy manifests", () => {
+    const r = parseCorridor(legacyValid);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.dest.protocol).toBe("sep31");
+      expect(r.warnings.length).toBeGreaterThan(0);
+      expect(r.warnings[0]).toMatch(/dest\.protocol/);
+    }
+  });
+
+  it("does not include _legacyProtocol in the parsed corridor value", () => {
+    const r = parseCorridor(legacyValid);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect("_legacyProtocol" in r.value.dest).toBe(false);
+    }
   });
 });
