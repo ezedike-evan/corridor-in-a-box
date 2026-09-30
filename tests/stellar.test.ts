@@ -952,6 +952,9 @@ describe("StellarSettlementSubmitter.findExisting", () => {
     if (res.ok) {
       expect(res.value).toBeUndefined();
     }
+  });
+});
+
 describe("destinationCheck gate check (chain.destination)", () => {
   const SIGNER = Keypair.random().publicKey();
   const DEST = Keypair.random().publicKey();
