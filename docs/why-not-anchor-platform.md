@@ -35,8 +35,9 @@ for any standards-compliant anchor.
   timeout enforcement, retry/backoff, and a real refund/hold recovery path —
   the things you need to not lose an in-flight payment.
 - **A route seam.** The open repo ships the `RouteResolver` interface and a
-  trivial "use the declared anchor" default; the health-/rate-weighted resolver
-  is the proprietary half, injected at runtime.
+  trivial "use the declared anchor" default. A health-/rate-weighted resolver
+  could be developed as a separate proprietary component, but none is included
+  or injected at runtime today.
 - **Build-time liveness checks.** `corridor plan` surfaces missing endpoints
   (e.g. a destination with no SEP-31 server) before you touch the network.
 

@@ -46,9 +46,11 @@
 #
 # `doctor` is the counterpart to that seeding: it reports how far the observer's
 # cursor has drifted behind Horizon *before* a run, rather than letting the run
-# discover it by polling for the full recovery timeout and failing with
-# SETTLEMENT_TIMEOUT. It exits non-zero on any failed check, so it can gate CI or
-# a verify:corridor run.
+# discover it by ending in RECONCILE_STALLED after 10 identical consecutive polls
+# (~20 s with the default stallThreshold=10 and reconcilePollMs=2000).
+# SETTLEMENT_TIMEOUT only fires when the anchor's status keeps changing but never
+# reaches a terminal state within recovery.timeout_seconds. `doctor` exits
+# non-zero on any failed check, so it can gate CI or a verify:corridor run.
 #
 #   CURSOR_LAG_FAIL_LEDGERS=<n>  lag at which the cursor check fails (default 180)
 #

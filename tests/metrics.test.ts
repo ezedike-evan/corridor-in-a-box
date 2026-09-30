@@ -43,11 +43,14 @@ const intent: PaymentIntent = {
 
 function deps(metrics: InMemoryMetrics, adapterOpts = {}): EngineDeps {
   return {
-    resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts)),
+    resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts), {
+      trustManifestWithoutAttestation: true,
+    }),
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
     metrics,
     sleep: async () => {},
+    trustManifestWithoutAttestation: true,
   };
 }
 
@@ -63,10 +66,39 @@ describe("metrics", () => {
     }
     expect(timingNames).toContain("corridor.duration");
 
-    // 7 transitions counted
-    expect(m.counters.filter((c) => c.name === "corridor.transition")).toHaveLength(7);
+    // 8 transitions counted
+    expect(m.counters.filter((c) => c.name === "corridor.transition")).toHaveLength(8);
     const terminal = m.counters.find((c) => c.name === "corridor.terminal");
     expect(terminal?.tags?.state).toBe("completed");
+  });
+
+  it("records gate timing and check counter metrics when gate is evaluated", async () => {
+    const m = new InMemoryMetrics();
+    const d = deps(m);
+    d.gate = {
+      async evaluate() {
+        return {
+          passed: true,
+          results: [
+            {
+              name: "chain.balance",
+              passed: true,
+              detail: "sufficient",
+              durationMs: 1,
+            },
+          ],
+        };
+      },
+    };
+    const r = await execute(intent, corridor(), d);
+    expect(r.ok).toBe(true);
+
+    const timingNames = m.timings.map((t) => t.name);
+    expect(timingNames).toContain("corridor.verb.verify");
+
+    const gateChecks = m.counters.filter((c) => c.name === "corridor.gate.check");
+    expect(gateChecks).toHaveLength(1);
+    expect(gateChecks[0].tags).toEqual({ name: "chain.balance", passed: "true" });
   });
 
   it("counts a failed terminal when a verb fails", async () => {

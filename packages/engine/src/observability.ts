@@ -38,6 +38,7 @@ export interface AuditEntry {
   readonly version: number;
   readonly at: number;
   readonly error?: string;
+  readonly routeTrust?: "attested" | "manifest";
 }
 
 export interface AuditSink {

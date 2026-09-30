@@ -1,7 +1,7 @@
 # Fixture: a corridor whose dest endpoints carry endpoints_verified_at, so
 # `corridor plan` reports it VERIFIED. Nothing here points at a real anchor —
-# it exists purely to exercise the third liveness state, which no shipped
-# manifest can reach until someone has actually checked a live stellar.toml.
+# it exists purely so the VERIFIED state is tested independently of any real
+# anchor's data or live network reachability.
 id: verified-fixture
 
 source:

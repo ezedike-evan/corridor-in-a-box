@@ -1,0 +1,32 @@
+name: Question
+description: Ask a question about corridor-in-a-box design, architecture, or usage.
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for asking. For **security vulnerabilities** (double-settlement,
+        idempotency bypass, key exposure, …) do **not** open a public issue — see
+        [SECURITY.md](../blob/main/SECURITY.md).
+  - type: input
+    id: package
+    attributes:
+      label: Affected package or area
+      description: e.g. "@corridor/engine", "@corridor/sep31", "@corridor/service", CLI, docs…
+      placeholder: "@corridor/engine"
+    validations:
+      required: false
+  - type: textarea
+    id: question
+    attributes:
+      label: What is your question?
+      description: Provide a clear and concise description of what you would like to know or discuss.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / Use case
+      description: Any context or background information about what you are trying to accomplish.
+    validations:
+      required: false

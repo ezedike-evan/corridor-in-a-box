@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseCorridor } from "@corridor/manifest";
+import { liveness, parseCorridor } from "@corridor/manifest";
 
 const valid = {
   id: "t",
@@ -42,5 +42,115 @@ describe("manifest", () => {
     void source;
     const r = parseCorridor(rest);
     expect(r.ok).toBe(false);
+  });
+
+  describe("source.protocol", () => {
+    const withSource = (source: unknown) => parseCorridor({ ...valid, source });
+
+    it("defaults an absent protocol to prefunded (existing manifests unchanged)", () => {
+      const r = parseCorridor(valid);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value.source.protocol).toBe("prefunded");
+    });
+
+    it("accepts prefunded with only name and asset", () => {
+      const r = withSource({ name: "Treasury", asset: "USDC", protocol: "prefunded" });
+      expect(r.ok).toBe(true);
+    });
+
+    it("accepts sep6 with transfer_server and rejects it without", () => {
+      const base = { name: "S", asset: "USDC", protocol: "sep6" };
+      const good = withSource({
+        ...base,
+        endpoints: { home_domain: "s.example", transfer_server: "https://s.example/sep6" },
+      });
+      expect(good.ok).toBe(true);
+      const bad = withSource({ ...base, endpoints: { home_domain: "s.example" } });
+      expect(bad.ok).toBe(false);
+      if (!bad.ok) expect(bad.error.code).toBe("MANIFEST_INVALID");
+    });
+
+    it("accepts sep24 with transfer_server_sep24 + web_auth and rejects a missing one", () => {
+      const base = { name: "S", asset: "USDC", protocol: "sep24" };
+      const good = withSource({
+        ...base,
+        endpoints: {
+          home_domain: "s.example",
+          transfer_server_sep24: "https://s.example/sep24",
+          web_auth: "https://s.example/auth",
+        },
+      });
+      expect(good.ok).toBe(true);
+      const noAuth = withSource({
+        ...base,
+        endpoints: {
+          home_domain: "s.example",
+          transfer_server_sep24: "https://s.example/sep24",
+        },
+      });
+      expect(noAuth.ok).toBe(false);
+    });
+
+    it("accepts custom:<id> with base_url and rejects unknown protocols", () => {
+      const good = withSource({
+        name: "S",
+        asset: "USDC",
+        protocol: "custom:acme",
+        endpoints: { home_domain: "s.example", base_url: "https://s.example/api" },
+      });
+      expect(good.ok).toBe(true);
+      const noUrl = withSource({
+        name: "S",
+        asset: "USDC",
+        protocol: "custom:acme",
+        endpoints: { home_domain: "s.example" },
+      });
+      expect(noUrl.ok).toBe(false);
+      const unknown = withSource({ name: "S", asset: "USDC", protocol: "sep99" });
+      expect(unknown.ok).toBe(false);
+    });
+  });
+});
+
+describe("recovery.reconcile", () => {
+  it("is optional and leaves the fields unset by default", () => {
+    const r = parseCorridor(valid);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.recovery.reconcile).toBeUndefined();
+  });
+
+  it("parses poll_seconds and stall_polls (0 allowed to disable)", () => {
+    const r = parseCorridor({
+      ...valid,
+      recovery: { reconcile: { poll_seconds: 5, stall_polls: 0 } },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.recovery.reconcile).toEqual({ poll_seconds: 5, stall_polls: 0 });
+    const partial = parseCorridor({ ...valid, recovery: { reconcile: { stall_polls: 4 } } });
+    expect(partial.ok && partial.value.recovery.reconcile?.poll_seconds).toBeUndefined();
+  });
+
+  it("rejects non-positive poll_seconds and negative stall_polls", () => {
+    for (const reconcile of [
+      { poll_seconds: 0 },
+      { poll_seconds: 1.5 },
+      { stall_polls: -1 },
+    ]) {
+      expect(parseCorridor({ ...valid, recovery: { reconcile } }).ok).toBe(false);
+    }
+  });
+
+  it("warns when poll_seconds x stall_polls can never fire before the timeout", () => {
+    const mk = (reconcile: object) => {
+      const r = parseCorridor({ ...valid, recovery: { timeout_seconds: 60, reconcile } });
+      if (!r.ok) throw new Error("invalid");
+      return liveness(r.value).warnings.filter((w) =>
+        w.includes("stall check can never fire"),
+      );
+    };
+    expect(mk({ poll_seconds: 10, stall_polls: 6 })).toHaveLength(1);
+    expect(mk({ poll_seconds: 12, stall_polls: 5 })).toHaveLength(1);
+    expect(mk({ poll_seconds: 10, stall_polls: 4 })).toHaveLength(0);
+    expect(mk({ poll_seconds: 10, stall_polls: 0 })).toHaveLength(0);
   });
 });

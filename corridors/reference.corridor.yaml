@@ -1,7 +1,7 @@
 # corridor #0 — the Anchor Platform SEP-31 reference server on testnet.
-# Stand it up locally (docker compose, per the Stellar docs SEP-31 guide) and the
-# engine can exercise quote -> comply -> open -> settle -> reconcile end to end
-# against a conformant SEP-31 implementation. No commercial agreement required.
+# Stand it up locally (scripts/reference-anchor.sh via podman, per the Stellar
+# docs SEP-31 guide) and the engine can exercise quote -> comply -> open -> settle -> reconcile
+# end to end against a conformant SEP-31 implementation. No commercial agreement required.
 # This is the lane you run THIS WEEK to prove the engine.
 id: reference-testnet
 

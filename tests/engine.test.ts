@@ -5,6 +5,7 @@ import { StaticRouteResolver } from "@corridor/router";
 import {
   InMemoryAuditLog,
   InMemoryIdempotencyStore,
+  InMemoryMetrics,
   hasRequestedRefund,
   canTransition,
   createMockSubmitter,
@@ -12,6 +13,7 @@ import {
   reconcileUntil,
   type CorridorState,
   type EngineDeps,
+  type PreSettleGate,
   type SettlementSubmitter,
 } from "@corridor/engine";
 import type { TransactionStatus } from "@corridor/adapter-kit";
@@ -48,11 +50,14 @@ function intent(key = "k1"): PaymentIntent {
   };
 }
 
-function deps(adapterOpts = {}): EngineDeps {
+function deps(adapterOpts = {}, trustManifestWithoutAttestation = true): EngineDeps {
   return {
-    resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts)),
+    resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts), {
+      trustManifestWithoutAttestation: true,
+    }),
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
+    trustManifestWithoutAttestation,
   };
 }
 
@@ -68,6 +73,7 @@ describe("engine.execute", () => {
         "quoted",
         "compliant",
         "opened",
+        "verifying",
         "settling",
         "settled",
         "reconciled",
@@ -108,11 +114,14 @@ describe("engine.execute", () => {
     };
 
     const r = await execute(intent(), corridor(), {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter,
       idempotency: new InMemoryIdempotencyStore(),
       now,
       sleep,
+      trustManifestWithoutAttestation: true,
     });
 
     expect(r.ok).toBe(false);
@@ -120,6 +129,50 @@ describe("engine.execute", () => {
     // Exactly one settle attempt: the retry loop's fresh expiry check catches
     // the stale quote before ever calling submit() a second time.
     expect(submitCalls).toBe(1);
+  });
+
+  it("a public-network corridor with manifest trust and no opt-in ends failed before settling", async () => {
+    let submitCalled = false;
+    const submitter: SettlementSubmitter = {
+      async submit() {
+        submitCalled = true;
+        return ok({ stellarTxHash: "hash", ledger: 1 });
+      },
+      async refund() {
+        return ok({ stellarTxHash: "refund-hash", ledger: 2 });
+      },
+    };
+    const store = new InMemoryIdempotencyStore();
+    const audit = new InMemoryAuditLog();
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      idempotency: store,
+      audit,
+      // No trustManifestWithoutAttestation on deps or opts
+    };
+
+    const c = corridor(); // network: "public"
+    const i = intent("manifest-refuse-1");
+    const r = await execute(i, c, d);
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("MANIFEST_INVALID");
+      expect(r.error.message).toContain("refusing manifest route trust on public network");
+    }
+
+    const stored = await store.get(i.idempotencyKey);
+    expect(stored?.state).toBe("failed");
+    expect(submitCalled).toBe(false);
+
+    const trail = audit.entries.map((e) => e.to);
+    expect(trail).toContain("failed");
+    expect(trail).not.toContain("settling");
+    expect(trail).not.toContain("settled");
+    expect(trail).not.toContain("completed");
   });
 
   it("fails closed when KYC is rejected", async () => {
@@ -148,6 +201,198 @@ describe("engine.execute", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("AMOUNT_INVALID");
   });
+
+  it("reuses an existing on-chain settlement without calling submit()", async () => {
+    let submitCalls = 0;
+    const existingRef = { stellarTxHash: "existing-tx-hash-123", ledger: 777 };
+    const submitter = createMockSubmitter({ existingRef });
+    const originalSubmit = submitter.submit;
+    submitter.submit = async (req) => {
+      submitCalls++;
+      return originalSubmit(req);
+    };
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      idempotency: new InMemoryIdempotencyStore(),
+      trustManifestWithoutAttestation: true,
+    };
+
+    const r = await execute(intent("existing-settle"), corridor(), d);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.state).toBe("completed");
+      expect(r.value.stellarTxHash).toBe("existing-tx-hash-123");
+    }
+    expect(submitCalls).toBe(0);
+  });
+});
+
+describe("engine pre-settle gate", () => {
+  it("terminates in failed with check code and 0 submit calls when gate check fails", async () => {
+    let submitCalls = 0;
+    const submitter: SettlementSubmitter = {
+      async submit() {
+        submitCalls++;
+        return ok({ stellarTxHash: "tx-123", ledger: 100 });
+      },
+      async refund() {
+        return ok({ stellarTxHash: "refund-123", ledger: 101 });
+      },
+    };
+
+    const metrics = new InMemoryMetrics();
+    const failingGate: PreSettleGate = {
+      async evaluate() {
+        return {
+          passed: false,
+          results: [
+            {
+              name: "chain.balance",
+              passed: false,
+              code: "PRESETTLE_INSUFFICIENT_FUNDS",
+              detail: "insufficient bridge asset balance",
+              durationMs: 5,
+            },
+          ],
+        };
+      },
+    };
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      gate: failingGate,
+      idempotency: new InMemoryIdempotencyStore(),
+      metrics,
+      trustManifestWithoutAttestation: true,
+    };
+
+    const r = await execute(intent(), corridor(), d);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+      expect(r.error.message).toBe("insufficient bridge asset balance");
+    }
+    expect(submitCalls).toBe(0);
+    const gateCounters = metrics.counters.filter((c) => c.name === "corridor.gate.check");
+    expect(gateCounters).toHaveLength(1);
+    expect(gateCounters[0].tags).toEqual({ name: "chain.balance", passed: "false" });
+  });
+
+  it("re-evaluates gate after retrying (attempt 1 fails submit, attempt 2 fails gate)", async () => {
+    let submitCalls = 0;
+    const submitter: SettlementSubmitter = {
+      async submit() {
+        submitCalls++;
+        return fail("SETTLEMENT_FAILED", "transient network error", { retryable: true });
+      },
+      async refund() {
+        return ok({ stellarTxHash: "refund-123", ledger: 101 });
+      },
+    };
+
+    const evaluatedAttempts: number[] = [];
+    const gate: PreSettleGate = {
+      async evaluate(ctx) {
+        evaluatedAttempts.push(ctx.attempt);
+        if (ctx.attempt === 0) {
+          return {
+            passed: true,
+            results: [
+              {
+                name: "chain.balance",
+                passed: true,
+                detail: "sufficient",
+                durationMs: 2,
+              },
+            ],
+          };
+        }
+        return {
+          passed: false,
+          results: [
+            {
+              name: "chain.balance",
+              passed: false,
+              code: "PRESETTLE_INSUFFICIENT_FUNDS",
+              detail: "balance depleted on retry",
+              durationMs: 2,
+            },
+          ],
+        };
+      },
+    };
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      gate,
+      idempotency: new InMemoryIdempotencyStore(),
+      sleep: async () => {},
+      trustManifestWithoutAttestation: true,
+    };
+
+    const r = await execute(intent(), corridorWith({ max_retries: 2 }), d);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+      expect(r.error.message).toBe("balance depleted on retry");
+    }
+    expect(evaluatedAttempts).toEqual([0, 1]);
+    expect(submitCalls).toBe(1); // attempt 0 called submit; attempt 1 died at gate before submit
+  });
+
+  it("ends failed without entering settling when gate evaluation throws", async () => {
+    let submitCalled = false;
+    const submitter: SettlementSubmitter = {
+      async submit() {
+        submitCalled = true;
+        return ok({ stellarTxHash: "tx-123", ledger: 100 });
+      },
+      async refund() {
+        return ok({ stellarTxHash: "refund-123", ledger: 101 });
+      },
+    };
+
+    const audit = new InMemoryAuditLog();
+    const throwingGate: PreSettleGate = {
+      async evaluate() {
+        throw new Error("unexpected gate crash");
+      },
+    };
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      gate: throwingGate,
+      idempotency: new InMemoryIdempotencyStore(),
+      audit,
+      trustManifestWithoutAttestation: true,
+    };
+
+    const r = await execute(intent(), corridor(), d);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_FAILED");
+      expect(r.error.message).toContain("unexpected gate crash");
+    }
+    expect(submitCalled).toBe(false);
+
+    const states = audit.entries.map((e) => e.to);
+    expect(states).toContain("verifying");
+    expect(states).toContain("failed");
+    expect(states).not.toContain("settling");
+  });
 });
 
 // Helper: build a corridor with custom recovery policy / timeout.
@@ -175,10 +420,13 @@ function corridorWith(recovery: Record<string, unknown>): Corridor {
 describe("engine recovery", () => {
   it("refunds the sender when settlement fails and no payment went out", async () => {
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: createMockSubmitter({ failSubmit: true }),
       idempotency: new InMemoryIdempotencyStore(),
       sleep: async () => {},
+      trustManifestWithoutAttestation: true,
     };
     const r = await execute(
       intent(),
@@ -194,7 +442,9 @@ describe("engine recovery", () => {
     const refunded: string[] = [];
     const base = createMockSubmitter();
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false }), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: {
         submit: base.submit,
         refund: async (req) => {
@@ -208,6 +458,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     };
     const r = await execute(
       intent(),
@@ -297,16 +548,19 @@ describe("engine recovery", () => {
     let t = 0;
     const base = createMockAdapter({ settled: false });
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => ({
-        ...base,
-        getTransaction: async () =>
-          ok({
-            status: "pending_customer_info_update",
-            settled: false,
-            terminalFailure: false,
-            awaitingInput: true,
-          }),
-      })),
+      resolver: new StaticRouteResolver(
+        () => ({
+          ...base,
+          getTransaction: async () =>
+            ok({
+              status: "pending_customer_info_update",
+              settled: false,
+              terminalFailure: false,
+              awaitingInput: true,
+            }),
+        }),
+        { trustManifestWithoutAttestation: true },
+      ),
       submitter: createMockSubmitter(),
       idempotency: new InMemoryIdempotencyStore(),
       now: () => t,
@@ -314,6 +568,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     };
     const r = await execute(
       intent("awaiting-input"),
@@ -336,7 +591,9 @@ describe("engine recovery", () => {
     const store = new InMemoryIdempotencyStore();
     const base = createMockSubmitter();
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false }), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: base,
       idempotency: store,
       now: () => t,
@@ -344,6 +601,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     };
     const i = intent();
     await execute(
@@ -366,7 +624,9 @@ describe("engine recovery", () => {
     const store = new InMemoryIdempotencyStore();
     const base = createMockSubmitter();
     const deps = (): EngineDeps => ({
-      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false }), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: {
         submit: base.submit,
         refund: async (req) => {
@@ -380,6 +640,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     });
     const c = corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" });
     const i = intent();
@@ -400,13 +661,16 @@ describe("engine recovery", () => {
     const base = createMockSubmitter();
     const failing = createMockAdapter({ terminalFailure: true });
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => ({
-        ...failing,
-        getTransaction: async (id) => {
-          polls += 1;
-          return failing.getTransaction(id);
-        },
-      })),
+      resolver: new StaticRouteResolver(
+        () => ({
+          ...failing,
+          getTransaction: async (id) => {
+            polls += 1;
+            return failing.getTransaction(id);
+          },
+        }),
+        { trustManifestWithoutAttestation: true },
+      ),
       submitter: {
         submit: base.submit,
         refund: async (req) => {
@@ -422,6 +686,7 @@ describe("engine recovery", () => {
       // A long timeout: if the engine waited it out instead of bailing, the test
       // would still pass on the error code — so assert it polled only once.
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     };
     const r = await execute(
       intent("terminal-1"),
@@ -431,7 +696,9 @@ describe("engine recovery", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("RECONCILE_MISMATCH");
     expect(polls).toBe(1); // bailed on the first status, did not poll to timeout
-    expect(refunded).toHaveLength(1); // and reversed the on-chain payment
+    // The anchor is already refunding: the run parks in refund_pending and the
+    // engine does not ask the chain to reverse the payment (#171).
+    expect(refunded).toHaveLength(0);
   });
 
   it("escalates a REFUND_UNSUPPORTED refund to held (fail-closed refund path)", async () => {
@@ -443,7 +710,9 @@ describe("engine recovery", () => {
     let t = 0;
     const base = createMockSubmitter();
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false }), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: {
         submit: base.submit,
         refund: async () =>
@@ -457,6 +726,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     };
     const store = d.idempotency!;
     const r = await execute(
@@ -472,10 +742,13 @@ describe("engine recovery", () => {
 
   it("parks for manual intervention when rollback policy is hold", async () => {
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: createMockSubmitter({ failSubmit: true }),
       idempotency: new InMemoryIdempotencyStore(),
       sleep: async () => {},
+      trustManifestWithoutAttestation: true,
     };
     const store = d.idempotency!;
     const r = await execute(
@@ -577,6 +850,26 @@ describe("reconcile stall detection", () => {
     if (!result.ok) expect(result.error.code).toBe("RECONCILE_STALLED");
     expect(polls()).toBe(6);
   });
+
+  it("does NOT stall when stallThreshold is omitted (disabled at this layer)", async () => {
+    const { adapter, polls } = stalledAdapter("stuck");
+    let t = 0;
+    // reconcileUntil reads `opts.stallThreshold ?? 0`, so omitting the option
+    // disables stall detection here: an anchor stuck on one status forever has
+    // to reach the deadline timeout rather than return RECONCILE_STALLED.
+    // (execute() applies the production default of 10 one level up in run.ts.)
+    const result = await reconcileUntil(adapter, "tx_omitted_threshold", {
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      deadlineMs: t + 500,
+      pollMs: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("SETTLEMENT_TIMEOUT");
+    expect(polls()).toBeGreaterThan(1);
+  });
 });
 
 describe("state machine", () => {
@@ -595,7 +888,8 @@ describe("state machine", () => {
     // test walking the graph found it. The two kinds of recovery are now
     // distinct so the double-spend is unreachable by construction.
     expect(canTransition("settling", "retrying")).toBe(true);
-    expect(canTransition("retrying", "settling")).toBe(true);
+    expect(canTransition("retrying", "verifying")).toBe(true);
+    expect(canTransition("retrying", "settling")).toBe(false);
 
     // `recovering` is terminal-bound and cannot get back to the chain.
     expect(canTransition("recovering", "settling")).toBe(false);
@@ -660,8 +954,9 @@ function refundHarness(
     refundCalls,
     trail: () => audit.entries.map((e) => e.to),
     deps: {
-      resolver: new StaticRouteResolver(() =>
-        createMockAdapter({ settled: opts.settled ?? true }),
+      resolver: new StaticRouteResolver(
+        () => createMockAdapter({ settled: opts.settled ?? true }),
+        { trustManifestWithoutAttestation: true },
       ),
       submitter,
       idempotency: store,
@@ -671,6 +966,7 @@ function refundHarness(
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     },
   };
 }
@@ -693,6 +989,7 @@ describe("engine refund path", () => {
       "quoted",
       "compliant",
       "opened",
+      "verifying",
       "settling",
       "settled",
       "recovering",
@@ -793,5 +1090,170 @@ describe("engine refund path", () => {
     const afterRecovering = h.trail().slice(h.trail().indexOf("recovering"));
     expect(afterRecovering).not.toContain("settling");
     expect(afterRecovering).not.toContain("retrying");
+  });
+});
+
+describe("per-corridor reconcile config", () => {
+  function harness(polled: number[], sleeps: number[]) {
+    const adapter = {
+      ...createMockAdapter({ settled: false }),
+      getTransaction: async (): Promise<Outcome<TransactionStatus>> => {
+        polled.push(1);
+        return ok<TransactionStatus>({ status: "pending_receiver", settled: false });
+      },
+    };
+    let t = 0;
+    const store = new InMemoryIdempotencyStore();
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => adapter, {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: createMockSubmitter(),
+      idempotency: store,
+      now: () => t,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        t += ms;
+      },
+      // Deps values that the manifest must override.
+      reconcilePollMs: 7,
+      stallThreshold: 10,
+      trustManifestWithoutAttestation: true,
+    };
+    return { d, store };
+  }
+  const rc = {
+    rollback: "hold",
+    timeout_seconds: 900,
+    reconcile: { poll_seconds: 3, stall_polls: 2 },
+  };
+
+  it("manifest stall_polls and poll_seconds override the EngineDeps values", async () => {
+    const polled: number[] = [];
+    const sleeps: number[] = [];
+    const { d } = harness(polled, sleeps);
+    const r = await execute(intent("rc-1"), corridorWith(rc), d);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("RECONCILE_STALLED");
+    expect(polled).toHaveLength(3); // stall_polls (2) + 1, not deps' 10 + 1
+    expect(sleeps).toContain(3000);
+    expect(sleeps).not.toContain(7);
+  });
+
+  it("falls back to EngineDeps when the manifest sets nothing", async () => {
+    const polled: number[] = [];
+    const sleeps: number[] = [];
+    const { d } = harness(polled, sleeps);
+    d.stallThreshold = 2;
+    await execute(intent("rc-2"), corridorWith({ rollback: "hold" }), d);
+    expect(polled).toHaveLength(3);
+    expect(sleeps).toContain(7);
+  });
+
+  it("stall_polls: 0 disables stall detection for the corridor", async () => {
+    const polled: number[] = [];
+    const sleeps: number[] = [];
+    const { d } = harness(polled, sleeps);
+    const r = await execute(
+      intent("rc-3"),
+      corridorWith({
+        rollback: "hold",
+        timeout_seconds: 30,
+        reconcile: { poll_seconds: 5, stall_polls: 0 },
+      }),
+      d,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).not.toBe("RECONCILE_STALLED");
+    expect(polled.length).toBeGreaterThan(3);
+  });
+
+  it("a resumed run uses the manifest values too", async () => {
+    const polled: number[] = [];
+    const sleeps: number[] = [];
+    const { d, store } = harness(polled, sleeps);
+    await store.put({
+      idempotencyKey: "rc-resume",
+      corridorId: "test",
+      state: "settled",
+      version: 5,
+      transactionId: "tx_1",
+      stellarTxHash: "mocktx1",
+    });
+    const r = await execute(intent("rc-resume"), corridorWith(rc), d);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("RECONCILE_STALLED");
+    expect(polled).toHaveLength(3);
+    expect(sleeps).toContain(3000);
+  });
+});
+
+describe("refund_pending producer", () => {
+  it("parks in refund_pending, without calling submitter.refund, when the anchor errors after settle", async () => {
+    const h = refundHarness();
+    const d: EngineDeps = {
+      ...h.deps,
+      resolver: new StaticRouteResolver(() => createMockAdapter({ terminalFailure: true }), {
+        trustManifestWithoutAttestation: true,
+      }),
+    };
+    const r = await execute(
+      intent("rp-1"),
+      corridorWith({ max_retries: 0, timeout_seconds: 3600, rollback: "refund_sender" }),
+      d,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("RECONCILE_MISMATCH");
+    expect((await h.store.get("rp-1"))?.state).toBe("refund_pending");
+    expect(h.trail()).toEqual([
+      "quoted",
+      "compliant",
+      "opened",
+      "verifying",
+      "settling",
+      "settled",
+      "recovering",
+      "refund_pending",
+    ]);
+    expect(h.refundCalls).toHaveLength(0);
+    expect((await h.store.get("rp-1"))?.refundId).toBeUndefined();
+  });
+
+  it("does not treat a reconcile timeout as an anchor refund: still reverses via the submitter", async () => {
+    const h = refundHarness({ settled: false });
+    await execute(
+      intent("rp-2"),
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" }),
+      h.deps,
+    );
+    expect((await h.store.get("rp-2"))?.state).toBe("refunded");
+    expect(h.refundCalls).toHaveLength(1);
+  });
+
+  it("no-hash path (settle never succeeded) still ends refunded without touching the chain", async () => {
+    const h = refundHarness({ failSubmit: true });
+    await execute(
+      intent("rp-3"),
+      corridorWith({ max_retries: 0, timeout_seconds: 60, rollback: "refund_sender" }),
+      h.deps,
+    );
+    expect((await h.store.get("rp-3"))?.state).toBe("refunded");
+    expect(h.refundCalls).toHaveLength(0);
+  });
+
+  it("hold policy is unchanged: anchor error after settle ends held", async () => {
+    const h = refundHarness();
+    const d: EngineDeps = {
+      ...h.deps,
+      resolver: new StaticRouteResolver(() => createMockAdapter({ terminalFailure: true }), {
+        trustManifestWithoutAttestation: true,
+      }),
+    };
+    await execute(
+      intent("rp-4"),
+      corridorWith({ max_retries: 0, timeout_seconds: 3600, rollback: "hold" }),
+      d,
+    );
+    expect((await h.store.get("rp-4"))?.state).toBe("held");
   });
 });

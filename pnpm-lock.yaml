@@ -178,6 +178,9 @@ importers:
       '@corridor/adapter-kit':
         specifier: workspace:*
         version: link:../adapter-kit
+      '@corridor/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@corridor/manifest':
         specifier: workspace:*
         version: link:../manifest

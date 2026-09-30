@@ -17,20 +17,46 @@ body:
     validations:
       required: true
   - type: dropdown
-    id: receive-side
+    id: liveness
     attributes:
-      label: Does the destination anchor run a live SEP-31 receive-side server?
+      label: What does `pnpm cli plan` report?
+      description: Run `pnpm cli plan corridors/your-lane.corridor.yaml` and pick the state.
       options:
-        - "Yes — endpoints are published in its stellar.toml"
-        - "Testnet only"
-        - "No / unknown (lane will validate but report NOT runnable)"
+        - "NOT RUNNABLE — a required endpoint is missing outright"
+        - "UNVERIFIED — endpoints present but not confirmed against stellar.toml"
+        - "VERIFIED — endpoints checked against anchor's published stellar.toml on a recorded date"
     validations:
       required: true
+  - type: input
+    id: verified_at
+    attributes:
+      label: Date you fetched stellar.toml
+      description: If VERIFIED, the date you confirmed endpoints against https://<home_domain>/.well-known/stellar.toml (YYYY-MM-DD).
+      placeholder: "2026-01-15"
+    validations:
+      required: false
+  - type: textarea
+    id: probe_output
+    attributes:
+      label: Probe output (if run)
+      description: Paste the output of `@corridor/probe` if you ran it against the anchor's stellar.toml.
+      render: text
+    validations:
+      required: false
   - type: textarea
     id: endpoints
     attributes:
-      label: Known SEP endpoints
-      description: home_domain, SEP-31 transfer server, SEP-38 quote server, SEP-10 web_auth, SEP-12 KYC server — whatever you have.
+      label: Known stellar.toml endpoint keys
+      description: |
+        List the keys from the anchor's published stellar.toml. The probe reads:
+        - `DIRECT_PAYMENT_SERVER` (SEP-31)
+        - `ANCHOR_QUOTE_SERVER` (SEP-38)
+        - `WEB_AUTH_ENDPOINT` (SEP-10)
+        - `KYC_SERVER` (SEP-12)
+        - `TRANSFER_SERVER` (SEP-6)
+        - `TRANSFER_SERVER_SEP0024` (SEP-24)
+
+        Note: Most real ramps are SEP-24/SEP-6, not SEP-31. Say which SEPs the anchor actually publishes.
       render: yaml
     validations:
       required: false

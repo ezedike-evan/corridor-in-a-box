@@ -20,7 +20,11 @@ See CONTRIBUTING.md for the ground rules.
 - [ ] `pnpm lint && pnpm typecheck && pnpm test` pass locally
 - [ ] Tests added/updated for any behaviour change (engine logic exercised through the mock adapter / submitter)
 - [ ] No corridor-specific strings added to `packages/engine` (a corridor is configuration, not code)
-- [ ] No dependency on the proprietary `RouteResolver` dataset added outside the `packages/router` seam
+- [ ] No routing-intelligence or proprietary data logic added outside the `packages/router` seam
 - [ ] Money handled via the `Money` type — never a JS `number`
-- [ ] README / relevant doc updated if a public interface changed
+- [ ] CHANGELOG entry
+- [ ] `.env.example`
+- [ ] web docs page
+- [ ] runbook
+- [ ] a grep for stale claims about the thing you changed
 - [ ] No secrets, signing keys, or `.env` files committed
