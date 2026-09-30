@@ -7,6 +7,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Changed — anchor-side terminal failure after settle enters `refund_pending`
+
+- Under `rollback: refund_sender`, when money has moved and the anchor reports a
+  terminal failure, the run now goes `recovering -> refund_pending` and waits for
+  the anchor's refund report instead of calling `submitter.refund` (which the real
+  submitter always refuses). `reconcileUntil` now carries the terminal
+  `TransactionStatus` on the error's `cause` (`anchorTerminalStatus()`). Timeouts,
+  stalls, the no-hash path and the `hold` / `manual` policies are unchanged.
+
+### Added — per-corridor reconcile cadence
+
+- Manifests can set `recovery.reconcile: { poll_seconds?, stall_polls? }`
+  (`stall_polls: 0` disables stall detection). Resolution order is manifest,
+  then `EngineDeps.reconcilePollMs` / `stallThreshold`, then 2s / 10 polls; it
+  applies to resumed runs too. `liveness()` warns when
+  `poll_seconds x stall_polls` is not below `timeout_seconds`.
+
+### Added — `source.protocol` declares how the sending side is reached (#182)
+
+`source` now takes an optional `protocol`: `prefunded` (default; the operator
+already holds the bridge asset, needs only `name`/`asset`), `sep6` (requires
+`endpoints.transfer_server`), `sep24` (requires `endpoints.transfer_server_sep24`
+and `endpoints.web_auth`), or `custom:<id>` (requires `endpoints.base_url`).
+Schema only; the engine does not act on it yet. Manifests that omit `protocol`
+parse as `prefunded`, so existing corridors are unchanged. `corridor plan` now
+prints the source protocol.
+
 ### Maintenance — ESLint 10 landed
 
 - `eslint` 10 landed in [#37](https://github.com/ezedike-evan/corridor-in-a-box/pull/37).
@@ -31,6 +58,32 @@ Added 9 dedicated pre-settle gate and circuit breaker error codes to `CorridorEr
 - `CORRIDOR_HALTED` — per-corridor circuit breaker is open
 
 Added helper `isPreSettleCode(code): boolean` in `@corridor/types` and mapped the error codes in `@corridor/service` HTTP router.
+### Changed — attester rejections carry a typed contract error code (2026-09-24)
+
+`AnchorAttester.attest` turned an attester-contract revert into a message such
+as "too soon: this domain was attested within the cooldown window (contract
+error #3)", and `examples/attest.ts` decided whether to fail the job by
+checking that message for the word "cooldown". Rewording the message would
+have silently turned every cooldown hit into a job failure (or the reverse).
+
+`@corridor/attester` now exports `AttesterContractError` (mirroring the
+contract's `enum Error`: `NotInitialised = 1`, `NotAnAttester = 2`,
+`TooSoon = 3`, `InvalidDomain = 4`) and an `AttesterError` type: when the
+contract itself rejected the attestation, the error carries its number as
+`contractError`. `explain()` is exported and returns `{ code?, message }`.
+`examples/attest.ts` now checks `contractError === AttesterContractError.TooSoon`.
+The error `code` and message text are unchanged, so existing callers keep
+working.
+
+### Added — Gate check: balance covers amount, fee and minimum reserve (#151) (2026-09-25)
+
+Added `balanceCheck(inspector, signerPublicKey, opts?)` GateCheck (name `chain.balance`) in `@corridor/stellar`:
+
+- Minimum reserve = `(2 + subentry_count + num_sponsoring − num_sponsored) × base_reserve`, computed strictly with `@corridor/types` decimal money helpers, never floats.
+- Exposes `fee` from `StellarSettlementSubmitter` rather than duplicating `BASE_FEE`.
+- Refuses before signing unless bridge asset balance − selling liabilities ≥ amount, and XLM balance − selling liabilities − minimum reserve ≥ fee (plus amount when bridge asset is XLM).
+- Reports `PRESETTLE_INSUFFICIENT_FUNDS` with required vs available in `detail`.
+- Added `AccountInspector` read-only Horizon inspector and typed account facts in `@corridor/stellar`.
 
 ### Security — soroban-sdk 25 → 27 clears GHSA-x57h-xx53-v53w (2026-08-31)
 

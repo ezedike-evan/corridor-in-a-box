@@ -123,7 +123,9 @@ describe.skipIf(!hasAnchor)("crash-resume (live anchor, in-memory store)", () =>
     const adapter = adapterFor(c);
     const store = new InMemoryIdempotencyStore();
     const { submitter, hashes } = trackingSubmitter(submitterFor());
-    const resolver = new StaticRouteResolver(() => adapter);
+    const resolver = new StaticRouteResolver(() => adapter, {
+      trustManifestWithoutAttestation: true,
+    });
     const ikey = `crash-resume-inmem-${Date.now()}`;
 
     const intent: PaymentIntent = {
@@ -201,7 +203,9 @@ describe.skipIf(!hasAnchor || !hasDb)("crash-resume (live anchor + Postgres)", (
     const adapter = adapterFor(c);
     const store = new PostgresIdempotencyStore(pool as unknown as Queryable);
     const { submitter, hashes } = trackingSubmitter(submitterFor());
-    const resolver = new StaticRouteResolver(() => adapter);
+    const resolver = new StaticRouteResolver(() => adapter, {
+      trustManifestWithoutAttestation: true,
+    });
     const ikey = `crash-resume-pg-${Date.now()}`;
 
     const intent: PaymentIntent = {

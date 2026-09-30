@@ -96,11 +96,14 @@ async function main(): Promise<void> {
   const audit = new InMemoryAuditLog();
 
   const deps: EngineDeps = {
-    resolver: new StaticRouteResolver(() => adapter),
+    resolver: new StaticRouteResolver(() => adapter, {
+      trustManifestWithoutAttestation: true,
+    }),
     submitter,
     idempotency: store,
     audit,
     logger: consoleLogger,
+    trustManifestWithoutAttestation: true,
   };
 
   // --- SEP-12 registration ------------------------------------------------

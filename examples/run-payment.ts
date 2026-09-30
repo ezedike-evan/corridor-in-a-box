@@ -34,10 +34,13 @@ async function main(): Promise<void> {
 
   const audit = new InMemoryAuditLog();
   const deps = {
-    resolver: new StaticRouteResolver(() => createMockAdapter({ name: corridor.dest.name })),
+    resolver: new StaticRouteResolver(() => createMockAdapter({ name: corridor.dest.name }), {
+      trustManifestWithoutAttestation: true,
+    }),
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
     audit,
+    trustManifestWithoutAttestation: true,
   };
 
   const intent: PaymentIntent = {

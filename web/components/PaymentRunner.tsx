@@ -13,6 +13,7 @@ const ALL_STATES: CorridorState[] = [
   "quoted",
   "compliant",
   "opened",
+  "verifying",
   "settling",
   "settled",
   "reconciled",
@@ -143,9 +144,9 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
           </p>
         </div>
 
-        {/* State the run's epistemic status up front. Every corridor in the repo
-            is currently UNVERIFIED, and a green trail below must not be read as
-            evidence that the lane works. */}
+        {/* State the run's epistemic status up front. A green trail below
+            must not be read as evidence that the lane works — in-process runs
+            are simulations and do not touch live network endpoints. */}
         <div className="rounded-lg border border-border bg-bg-subtle px-3 py-2 text-xs text-secondary-text">
           <span className="font-medium">
             {live.state === "verified"

@@ -45,7 +45,9 @@ function printPlan(c: Corridor): void {
   line(
     `route:    ${c.fx.path.join(" -> ")}   (risk: ${c.fx.who_holds_risk}, ttl ${c.fx.quote_ttl_seconds}s)`,
   );
-  line(`source:   ${c.source.name}  [${c.source.asset}]  ${c.source.endpoints.home_domain}`);
+  line(
+    `source:   ${c.source.name}  [${c.source.asset}]  ${c.source.protocol}${c.source.endpoints?.home_domain ? `  ${c.source.endpoints.home_domain}` : ""}`,
+  );
   line(`dest:     ${c.dest.name}  [${c.dest.asset}]  ${c.dest.endpoints.home_domain}`);
   line(`bridge:   ${c.settlement.bridge_asset} on ${c.settlement.network}`);
   line(

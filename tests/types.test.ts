@@ -49,6 +49,7 @@ describe("isPreSettleCode", () => {
       "MANIFEST_INVALID",
       "AMOUNT_INVALID",
       "QUOTE_UNAVAILABLE",
+      "SETTLEMENT_FAILED",
       "QUOTE_EXPIRED",
       "KYC_REQUIRED",
       "KYC_REJECTED",
