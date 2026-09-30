@@ -1086,6 +1086,7 @@ describe("refund_pending producer", () => {
       "quoted",
       "compliant",
       "opened",
+      "verifying",
       "settling",
       "settled",
       "recovering",
