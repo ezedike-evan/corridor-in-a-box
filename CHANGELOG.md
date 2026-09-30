@@ -15,6 +15,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   submitter always refuses). `reconcileUntil` now carries the terminal
   `TransactionStatus` on the error's `cause` (`anchorTerminalStatus()`). Timeouts,
   stalls, the no-hash path and the `hold` / `manual` policies are unchanged.
+
 ### Added — `source.protocol` declares how the sending side is reached (#182)
 
 `source` now takes an optional `protocol`: `prefunded` (default; the operator
