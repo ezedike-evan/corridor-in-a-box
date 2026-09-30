@@ -19,7 +19,15 @@ import {
   TransactionFailedError,
   xdr,
 } from "@stellar/stellar-sdk";
-import { fail, fromScaled, ok, STROOP_SCALE, toScaled, type Outcome } from "@corridor/types";
+import {
+  compareAmounts,
+  fail,
+  fromScaled,
+  ok,
+  STROOP_SCALE,
+  toScaled,
+  type Outcome,
+} from "@corridor/types";
 import type {
   CheckResult,
   GateCheck,
@@ -126,7 +134,8 @@ export class StellarSep10Signer implements Sep10Signer {
 type HorizonServerLike = Pick<
   Horizon.Server,
   "loadAccount" | "submitTransaction" | "transactions"
->;
+> &
+  Partial<Pick<Horizon.Server, "payments">>;
 
 export interface StellarSubmitterOptions {
   /** Production: a KMS/HSM-backed signer that never exposes the seed. */
@@ -137,6 +146,8 @@ export interface StellarSubmitterOptions {
   horizonUrl: string;
   /** Test seam: inject a fake Horizon server instead of connecting for real. */
   horizonServer?: HorizonServerLike;
+  /** Optional account inspector for checking existing payments or balance. */
+  inspector?: AccountInspector;
   /** The settlement fee (in XLM decimal string). Defaults to StellarSettlementSubmitter.fee. */
   fee?: string;
   /** How long to keep polling Horizon for confirmation. Default 30s. */
@@ -162,6 +173,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
   readonly fee: string;
   private readonly signer: ExternalSigner;
   private readonly server: HorizonServerLike;
+  private readonly inspector: AccountInspector;
   private readonly confirmTimeoutMs: number;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -178,6 +190,12 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
     }
     this.signer = opts.signer ?? LocalKeypairSigner.fromSecret(opts.signerSecret as string);
     this.server = opts.horizonServer ?? new Horizon.Server(opts.horizonUrl);
+    this.inspector =
+      opts.inspector ??
+      new AccountInspector({
+        horizonServer: this.server,
+        horizonUrl: opts.horizonUrl,
+      });
     this.confirmTimeoutMs = opts.confirmTimeoutMs ?? 30_000;
     this.now = opts.now ?? (() => Date.now());
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -271,6 +289,71 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
     }
   }
 
+  async findExisting(req: SettlementRequest): Promise<Outcome<SettlementRef | undefined>> {
+    try {
+      const paymentsOutcome = await this.inspector.paymentsFrom(this.signer.publicKey);
+      if (!paymentsOutcome.ok) return paymentsOutcome;
+
+      const { bridge_asset, asset_issuer } = req.corridor.settlement;
+      const isXlm =
+        bridge_asset.toUpperCase() === "XLM" || bridge_asset.toLowerCase() === "native";
+
+      for (const p of paymentsOutcome.value) {
+        // Must be sent from our signing account
+        if (p.from !== this.signer.publicKey) continue;
+
+        // Destination match
+        if (p.to !== req.to) continue;
+
+        // Asset match
+        if (isXlm) {
+          if (p.asset_type !== "native" && p.asset_code?.toUpperCase() !== "XLM") continue;
+        } else {
+          if (p.asset_code?.toUpperCase() !== bridge_asset.toUpperCase()) continue;
+          if (asset_issuer && p.asset_issuer && p.asset_issuer !== asset_issuer) continue;
+        }
+
+        // Amount match using compareAmounts
+        const cmp = compareAmounts(p.amount, req.amount.amount);
+        if (!cmp.ok || cmp.value !== 0) continue;
+
+        // Memo match respecting type (hash vs text vs id)
+        if (!req.memo) {
+          if (p.memo && p.memo_type !== "none") continue;
+        } else {
+          const reqType = req.memoType ?? "text";
+          const pType = p.memo_type ?? "text";
+          if (reqType === "hash") {
+            if (pType !== "hash") continue;
+            const reqHex = normalizeHashMemo(req.memo);
+            const pHex = p.memo ? normalizeHashMemo(p.memo) : "";
+            if (reqHex !== pHex) continue;
+          } else if (reqType === "id") {
+            if (pType !== "id") continue;
+            if (p.memo !== req.memo) continue;
+          } else {
+            // text memo
+            if (pType !== "text" && pType !== undefined) continue;
+            if (p.memo !== req.memo) continue;
+          }
+        }
+
+        return ok<SettlementRef>({
+          stellarTxHash: p.transaction_hash,
+          ledger: p.ledger,
+        });
+      }
+
+      return ok(undefined);
+    } catch (err: unknown) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        `failed to check for existing settlement: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err, retryable: true },
+      );
+    }
+  }
+
   async refund(req: RefundRequest): Promise<Outcome<SettlementRef>> {
     return fail(
       "REFUND_UNSUPPORTED",
@@ -302,6 +385,17 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
       }
       await this.sleep(1_000);
     }
+  }
+}
+
+function normalizeHashMemo(m: string): string {
+  if (/^[0-9a-fA-F]{64}$/.test(m)) {
+    return m.toLowerCase();
+  }
+  try {
+    return Buffer.from(m, "base64").toString("hex").toLowerCase();
+  } catch {
+    return m.toLowerCase();
   }
 }
 
@@ -338,6 +432,20 @@ function describe(cause: unknown): string {
 }
 
 // --- Account Inspector & Balance Gate Check -------------------------------
+
+export interface PaymentFact {
+  readonly id: string;
+  readonly transaction_hash: string;
+  readonly from: string;
+  readonly to: string;
+  readonly asset_type: string;
+  readonly asset_code?: string;
+  readonly asset_issuer?: string;
+  readonly amount: string;
+  readonly memo?: string;
+  readonly memo_type?: "text" | "hash" | "id" | "none" | "return" | string;
+  readonly ledger?: number;
+}
 
 export interface AccountBalanceFact {
   readonly asset_type: string;
@@ -382,19 +490,49 @@ export interface HorizonAccountResponseLike {
   readonly flags?: AccountFacts["flags"];
 }
 
+export interface HorizonPaymentTxLike {
+  readonly memo?: string;
+  readonly memo_type?: string;
+  readonly ledger_attr?: number;
+  readonly ledger?: number;
+}
+
+export interface HorizonPaymentRecordLike {
+  readonly id?: string;
+  readonly transaction_hash?: string;
+  readonly from?: string;
+  readonly source_account?: string;
+  readonly funder?: string;
+  readonly to?: string;
+  readonly account?: string;
+  readonly into?: string;
+  readonly asset_type?: string;
+  readonly asset_code?: string;
+  readonly asset_issuer?: string;
+  readonly amount?: string;
+  readonly starting_balance?: string;
+  readonly memo?: string;
+  readonly memo_type?: string;
+  readonly ledger?: number;
+  readonly transaction?: () => Promise<HorizonPaymentTxLike>;
+}
+
+export type AccountInspectorServerLike = Pick<Horizon.Server, "loadAccount"> &
+  Partial<Pick<Horizon.Server, "payments" | "transactions">>;
+
 export interface AccountInspectorOptions {
   readonly horizonUrl?: string;
-  readonly horizonServer?: Pick<Horizon.Server, "loadAccount">;
+  readonly horizonServer?: AccountInspectorServerLike;
   readonly baseReserve?: string;
   readonly baseFee?: string;
 }
 
 /**
  * Read-only Horizon account inspector. Provides typed account facts,
- * balances, subentry counts, liabilities, and base reserve/fee.
+ * balances, subentry counts, liabilities, base reserve/fee, and payment history.
  */
 export class AccountInspector {
-  private readonly server: Pick<Horizon.Server, "loadAccount">;
+  private readonly server: AccountInspectorServerLike;
   private readonly defaultBaseReserve: string;
   private readonly defaultBaseFee: string;
 
@@ -442,6 +580,90 @@ export class AccountInspector {
       return fail(
         "SETTLEMENT_FAILED",
         `failed to load account ${id}: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err, retryable: true },
+      );
+    }
+  }
+
+  async paymentsFrom(
+    accountId: string,
+    opts: { limit?: number } = {},
+  ): Promise<Outcome<PaymentFact[]>> {
+    try {
+      if (typeof this.server.payments !== "function") {
+        return ok([]);
+      }
+      const limit = opts.limit ?? 50;
+      const res = await this.server
+        .payments()
+        .forAccount(accountId)
+        .order("desc")
+        .limit(limit)
+        .call();
+
+      const records = (res.records ?? []) as unknown as HorizonPaymentRecordLike[];
+      const facts: PaymentFact[] = [];
+      for (const record of records) {
+        const from = record.from ?? record.source_account ?? record.funder;
+        const to = record.to ?? record.account ?? record.into;
+        if (!from || !to) continue;
+
+        let memo: string | undefined;
+        let memoType: string | undefined;
+        let ledger: number | undefined;
+
+        if (typeof record.transaction === "function") {
+          try {
+            const tx = (await record.transaction()) as unknown as HorizonPaymentTxLike;
+            memo = tx.memo;
+            memoType = tx.memo_type;
+            ledger = tx.ledger_attr ?? (typeof tx.ledger === "number" ? tx.ledger : undefined);
+          } catch {
+            // ignore lookup error
+          }
+        } else if (typeof this.server.transactions === "function" && record.transaction_hash) {
+          try {
+            const tx = (await this.server
+              .transactions()
+              .transaction(record.transaction_hash)
+              .call()) as unknown as HorizonPaymentTxLike;
+            memo = tx.memo;
+            memoType = tx.memo_type;
+            ledger = tx.ledger_attr ?? (typeof tx.ledger === "number" ? tx.ledger : undefined);
+          } catch {
+            // ignore lookup error
+          }
+        }
+
+        if (memo === undefined && record.memo !== undefined) {
+          memo = record.memo;
+        }
+        if (memoType === undefined && record.memo_type !== undefined) {
+          memoType = record.memo_type;
+        }
+        if (ledger === undefined && record.ledger !== undefined) {
+          ledger = record.ledger;
+        }
+
+        facts.push({
+          id: record.id ?? "",
+          transaction_hash: record.transaction_hash ?? "",
+          from,
+          to,
+          asset_type: record.asset_type ?? (record.asset_code ? "credit_alphanum4" : "native"),
+          asset_code: record.asset_code,
+          asset_issuer: record.asset_issuer,
+          amount: record.amount ?? record.starting_balance ?? "0",
+          memo,
+          memo_type: memoType,
+          ledger,
+        });
+      }
+      return ok(facts);
+    } catch (err: unknown) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        `failed to load payments for account ${accountId}: ${err instanceof Error ? err.message : String(err)}`,
         { cause: err, retryable: true },
       );
     }

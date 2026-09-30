@@ -50,6 +50,56 @@ export const AnchorSchema = z.object({
   asset: z.string().min(1),
 });
 
+/**
+ * How the SENDING side is reached. Schema only: the engine does not act on this
+ * yet (the source-anchor adapter and fund step come later), it only lets a
+ * manifest say whether the operator already holds the bridge asset or on-ramps
+ * through an anchor deposit.
+ *
+ *  - `prefunded` (default when `protocol` is absent): the operator's own
+ *    treasury. Needs only `name` / `asset`; `endpoints` is optional.
+ *  - `sep6`: SEP-6 deposit; requires `endpoints.transfer_server`.
+ *  - `sep24`: SEP-24 interactive deposit; requires
+ *    `endpoints.transfer_server_sep24` and `endpoints.web_auth`.
+ *  - `custom:<id>`: bespoke integration; requires `endpoints.base_url`.
+ */
+const SourceBase = { name: z.string().min(1), asset: z.string().min(1) };
+const SourceEndpointsBase = AnchorEndpointsSchema.partial({ home_domain: true });
+
+export const PrefundedSourceSchema = z.object({
+  ...SourceBase,
+  protocol: z.literal("prefunded"),
+  endpoints: SourceEndpointsBase.optional(),
+});
+export const Sep6SourceSchema = z.object({
+  ...SourceBase,
+  protocol: z.literal("sep6"),
+  endpoints: AnchorEndpointsSchema.extend({ transfer_server: z.string().url() }),
+});
+export const Sep24SourceSchema = z.object({
+  ...SourceBase,
+  protocol: z.literal("sep24"),
+  endpoints: AnchorEndpointsSchema.extend({
+    transfer_server_sep24: z.string().url(),
+    web_auth: z.string().url(),
+  }),
+});
+export const CustomSourceSchema = z.object({
+  ...SourceBase,
+  protocol: z
+    .string()
+    .regex(/^custom:[A-Za-z0-9_.-]+$/, "expected prefunded, sep6, sep24 or custom:<id>"),
+  endpoints: AnchorEndpointsSchema.extend({ base_url: z.string().url() }),
+});
+
+export const SourceAnchorSchema = z.preprocess(
+  (raw) =>
+    raw && typeof raw === "object" && !Array.isArray(raw) && !("protocol" in raw)
+      ? { ...raw, protocol: "prefunded" }
+      : raw,
+  z.union([PrefundedSourceSchema, Sep6SourceSchema, Sep24SourceSchema, CustomSourceSchema]),
+);
+
 export const FxSchema = z.object({
   /** The conversion path, in order. e.g. ["NGN","USDC","ARS"]. >= 2 hops. */
   path: z.array(z.string().min(1)).min(2),
@@ -108,7 +158,7 @@ export const CorridorSchema = z.object({
   id: z.string().min(1),
   /** Human note. Use it to record liveness, e.g. "pending: no RMB SEP-31 anchor". */
   status_note: z.string().optional(),
-  source: AnchorSchema,
+  source: SourceAnchorSchema,
   dest: AnchorSchema,
   fx: FxSchema,
   compliance: ComplianceSchema,
@@ -119,6 +169,7 @@ export const CorridorSchema = z.object({
 
 export type Corridor = z.infer<typeof CorridorSchema>;
 export type AnchorConfig = z.infer<typeof AnchorSchema>;
+export type SourceAnchorConfig = z.infer<typeof SourceAnchorSchema>;
 
 /** Parse + validate a corridor manifest from an object already in memory. */
 export function parseCorridor(raw: unknown): Outcome<Corridor> {
