@@ -4,7 +4,7 @@
 // other side is Anclap, Bitso, a testnet reference server, or a bespoke OTC desk.
 // Standards-compliant anchors are served by one generic adapter (@corridor/sep31);
 // bespoke integrations implement this same interface and (in the real product)
-// live in the PRIVATE repo.
+// could be implemented separately; no private implementation is included here.
 
 import type { Corridor } from "@corridor/manifest";
 import { ok, type Money, type Outcome, type PaymentIntent } from "@corridor/types";

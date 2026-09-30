@@ -16,11 +16,12 @@ touches the Stellar network. No corridor in this repo has yet been confirmed
 against a live anchor, so every one of them renders `UNVERIFIED` or
 `NOT RUNNABLE` (see [Liveness](#liveness-has-three-states-and-green-has-to-be-earned)).
 
-This repo is the **open half** of an open-core system. The proprietary half — the
-anchor health/conformance dataset and the route intelligence built on it — lives
-in a separate private repo and is injected at runtime through one interface
-(`RouteResolver`). The open/closed boundary is a **repo boundary, not a folder
-boundary**: everything here is publishable as-is.
+This repo contains the **open, runnable corridor engine** and the `RouteResolver`
+seam. The intended open-core design leaves room for a proprietary anchor
+health/conformance dataset and route intelligence to be supplied through that
+interface, but neither that component nor a separate private repo is included
+here. The current default resolver lets the open repo run corridors on its own.
+Everything in this repo is publishable as-is.
 
 > No smart contract required. SEP-31 is off-chain orchestration of a single
 > **native** Stellar payment (the settle leg). Soroban only ever enters as an
@@ -77,23 +78,30 @@ Three boundaries do the work:
    YAML file, not a code change.
 2. **engine ↔ adapters** — the engine knows only the `AnchorAdapter` interface.
    Standards-compliant anchors share one adapter; bespoke exchange/OTC desks
-   implement the same interface and live in the private repo.
+   implement the same interface. Proprietary implementations could be maintained
+   separately; none is included in this repo.
 3. **router seam** — the open repo ships the `RouteResolver` interface plus two
    resolvers: `StaticRouteResolver` (trust the manifest) and
-   `RegistryRouteResolver` (require a fresh on-chain attestation). The
-   proprietary health-/rate-weighted resolver is injected at runtime. **That
-   single seam is the entire open-core line.**
+   `RegistryRouteResolver` (require a fresh on-chain attestation). A
+   health-/rate-weighted resolver could be supplied separately; it is not
+   included or injected by this repo. The interface is the seam for that
+   possible future component.
 
 ## Corridor sequencing
 
 Picking the destination is the binding constraint, not the code. SEP-31 needs a
 _live receiving anchor_ on the destination side, so corridors ship in this order:
 
-| Stage  | Corridor                                                              | Why                                                                                                                                                                                                                                                                |
-| ------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet)        | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.**                                                                                                                                 |
-| **#1** | `mx-example.corridor.yaml` (Mexico) — **a template, not a live lane** | Shows the shape of a real corridor. **Every endpoint in it is fictional** and `corridor plan` reports it `UNVERIFIED`. Becomes real when an anchor relationship exists: replace the URLs from the anchor's published stellar.toml and set `endpoints_verified_at`. |
-| later  | `ng-cn.corridor.yaml` (Nigeria → China)                               | The headline case study, **not** corridor #1. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else.                                                                                         |
+| Stage  | Corridor                                                                           | Why                                                                                                                                                                                                      |
+| ------ | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet)                     | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.**                                                                       |
+| **#1** | `ng-cowrie.corridor.yaml` (USD → NGN via Cowrie Exchange) — **VERIFIED endpoints** | First real lane. Endpoints confirmed 2026-08-11 via `@corridor/probe`. `quote_source: external` (no SEP-38). No payment attempted, no business relationship in place — see the manifest's `status_note`. |
+| later  | `ng-cn.corridor.yaml` (Nigeria → China)                                            | The headline case study. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else.                                                    |
+
+> **Template**: `mx-example.corridor.yaml` (Mexico) shows the _shape_ of a real
+> corridor but **every endpoint in it is fictional** — `corridor plan` reports it
+> `UNVERIFIED`. It becomes real when an anchor relationship exists: replace the
+> URLs from the anchor's published `stellar.toml` and set `endpoints_verified_at`.
 
 The CLI makes the constraint visible. `ng-cn` validates structurally, but:
 
@@ -257,8 +265,10 @@ CORRIDOR_SIGNER_SECRET=S… pnpm verify:corridor
 It exits non-zero unless the run's terminal state is `completed`, printing the
 full trail and the last error either way, so it can gate CI or a release. Before
 opening a payment it runs `reference-anchor.sh doctor` — a run against a sick
-stack does not fail fast, it polls for the whole of `recovery.timeout_seconds`
-and then reports `SETTLEMENT_TIMEOUT`.
+stack ends in `RECONCILE_STALLED` after 10 identical consecutive polls (~20 s
+with the default `stallThreshold=10` and `reconcilePollMs=2000`).
+`SETTLEMENT_TIMEOUT` only fires when the anchor's status keeps _changing_ but
+never reaches a terminal state within `recovery.timeout_seconds`.
 
 The signer must be a **testnet** account holding the corridor's bridge asset
 (`USDC` from the issuer the anchor quotes) with a trustline for it. The runner
@@ -283,7 +293,8 @@ Swap the mocks for the real implementations (both ship in this repo):
   is recorded.
 
 Then point a manifest at the testnet reference server and run it for real. The
-proprietary `RouteResolver` is the one piece injected from the private repo.
+open repo runs with its default `RouteResolver`; a proprietary implementation
+could be supplied separately, but none is included in this archive.
 
 ## Verifying against a real anchor
 
@@ -311,15 +322,25 @@ CORRIDOR_SIGNER_SECRET=S...   # testnet only; enables SEP-10 auth
 pnpm exec vitest run tests/integration/sep31-live.test.ts
 ```
 
-The `nightly-live-anchor` workflow re-runs the same suite on a schedule once
-those values are configured as repo secrets, so the claim stays continuously
-verified rather than a one-off capture.
+The [`nightly-live-anchor`](./.github/workflows/nightly-live-anchor.yml) workflow
+already re-runs this same read-only probe every night against the SDF test
+anchor — it defaults `ANCHOR_HOME_DOMAIN` and friends to the public
+`testanchor.stellar.org` values above, so it doesn't wait on repo secrets to
+start probing. The one var that _is_ a real secret, `CORRIDOR_SIGNER_SECRET`,
+gates the SEP-10/SEP-12 legs: without it configured as a repo secret those legs
+skip (and the job says so via a `::warning::`) while the rest of the probe
+still runs.
 
 The full money-moving end-to-end capture (open → settle → reconcile against a
 testnet anchor) is a manual step — the procedure is in
-[docs/operations.md](./docs/operations.md). This is the one Phase-1 roadmap item
-still open: until that trail is captured here, treat the **settle leg** as
-verified against mocks only (the auth/quote/KYC legs above are live-verified).
+[docs/operations.md](./docs/operations.md). The **settle leg** itself is
+live-verified on testnet, not just against mocks — see [Proof against a real
+SEP-31 anchor](#proof-against-a-real-sep-31-anchor) above (ledger 4030910, 10
+USDC to the anchor's deposit address) and [Proof the settle leg is
+real](#proof-the-settle-leg-is-real) above (ledger 4024693). What's still
+unproven against a real counterparty is `reconcile → completed` — see [where it
+stops, precisely](#proof-against-a-real-sep-31-anchor) above — and that is the
+one Phase-1 roadmap item still open.
 
 ## License
 

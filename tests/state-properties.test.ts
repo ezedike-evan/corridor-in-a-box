@@ -15,6 +15,7 @@ const ALL: CorridorState[] = [
   "quoted",
   "compliant",
   "opened",
+  "verifying",
   "settling",
   "retrying",
   "settled",
@@ -169,11 +170,13 @@ describe("state machine structure", () => {
     expect(entrances).toEqual(["settling"]);
   });
 
-  it("only retrying can re-enter settling", () => {
-    // Retry exists and is intended, but it must go through `retrying`, which is
-    // reachable only from a settle that failed BEFORE money moved. `recovering`
-    // — which a post-settlement failure enters — deliberately cannot get back.
+  it("only verifying reaches settling", () => {
     const entrances = ALL.filter((s) => canTransition(s, "settling")).sort();
+    expect(entrances).toEqual(["verifying"]);
+  });
+
+  it("only opened and retrying reach verifying", () => {
+    const entrances = ALL.filter((s) => canTransition(s, "verifying")).sort();
     expect(entrances).toEqual(["opened", "retrying"]);
   });
 
@@ -220,6 +223,7 @@ describe("state machine structure", () => {
       "quoted",
       "compliant",
       "opened",
+      "verifying",
       "settling",
       "settled",
       "reconciled",

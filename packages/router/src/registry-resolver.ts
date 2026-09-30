@@ -1,13 +1,15 @@
 // RegistryRouteResolver — refuse to route through an anchor nobody has checked.
 //
-// This is where the open-core line stops being a diagram and becomes code.
+// This is where the RouteResolver seam becomes code.
 //
 //   OPEN (here)         Does this anchor demonstrably work, and how recently was
 //                       that established? Facts, read from the on-chain registry.
-//   CLOSED (private)    Which of several working anchors should this payment go
+//   NOT INCLUDED        Which of several working anchors should this payment go
 //                       through? Health scoring, rate weighting, split routing.
+//                       Not part of this repo; a resolver like that could be
+//                       supplied separately through the same interface.
 //
-// The open half is a GATE, not a chooser: it answers yes/no on evidence and
+// This resolver is a GATE, not a chooser: it answers yes/no on evidence and
 // nothing more. That is deliberate — a gate is exactly the piece that has to be
 // auditable, because it is what stands between an operator and settling into a
 // lane that does not exist.
@@ -82,7 +84,7 @@ export class RegistryRouteResolver implements RouteResolver {
     const domain = corridor.dest.endpoints.home_domain;
 
     if (this.allowed.has(domain)) {
-      return { receiving: this.adapterFor(corridor) };
+      return { receiving: this.adapterFor(corridor), trust: "attested" };
     }
 
     let serves: boolean;
@@ -116,6 +118,6 @@ export class RegistryRouteResolver implements RouteResolver {
       );
     }
 
-    return { receiving: this.adapterFor(corridor) };
+    return { receiving: this.adapterFor(corridor), trust: "attested" };
   }
 }

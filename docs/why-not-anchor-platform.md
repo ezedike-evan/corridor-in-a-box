@@ -36,8 +36,9 @@ for any standards-compliant anchor.
   the things you need to not lose an in-flight payment.
 - **A route seam.** The open repo ships the `RouteResolver` interface plus two
   resolvers: `StaticRouteResolver` (trust the manifest) and
-  `RegistryRouteResolver` (require a fresh on-chain attestation); the
-  health-/rate-weighted resolver is the proprietary half, injected at runtime.
+  `RegistryRouteResolver` (require a fresh on-chain attestation). A
+  health-/rate-weighted resolver could be developed as a separate proprietary
+  component, but none is included or injected at runtime today.
 - **Build-time liveness checks.** `corridor plan` surfaces missing endpoints
   (e.g. a destination with no SEP-31 server) before you touch the network.
 

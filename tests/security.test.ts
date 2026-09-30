@@ -50,9 +50,12 @@ function service(opts: {
     apiKeys: opts.apiKeys,
     rateLimit: opts.rateLimit,
     deps: {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       idempotency: opts.store ?? new InMemoryIdempotencyStore(),
       submitter: opts.submitter ?? recordingSubmitter().submitter,
+      trustManifestWithoutAttestation: true,
     },
   });
 }

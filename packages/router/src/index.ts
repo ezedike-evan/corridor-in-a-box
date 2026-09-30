@@ -1,10 +1,10 @@
-// @corridor/router — the open-core line drawn in code.
+// @corridor/router — the RouteResolver seam drawn in code.
 //
 // The interface and two open resolvers ship here: StaticRouteResolver (trust the
-// manifest) and RegistryRouteResolver (require a fresh on-chain attestation). The
-// proprietary health-weighted, rate-aware resolver is injected at runtime.
-// Anyone can run the open engine; only the operator supplies the proprietary routing
-// intelligence.
+// manifest) and RegistryRouteResolver (require a fresh on-chain attestation). A
+// resolver weighted by anchor health, conformance, latency, and proprietary
+// routing data could be supplied separately in the future; no such proprietary
+// component is included or injected here.
 
 import type { Corridor } from "@corridor/manifest";
 import type { AnchorAdapter } from "@corridor/adapter-kit";
@@ -15,26 +15,44 @@ export interface RouteDecision {
   readonly receiving: AnchorAdapter;
   /** Reserved for split routing across multiple anchors (weights sum to 1). */
   readonly split?: ReadonlyArray<{ adapter: AnchorAdapter; weight: number }>;
+  /** How the route decision was reached: verified against on-chain evidence or assumed from manifest. */
+  readonly trust: "attested" | "manifest";
 }
 
 export interface RouteResolver {
   resolve(intent: PaymentIntent, corridor: Corridor): Promise<RouteDecision>;
 }
 
+export interface StaticRouteResolverOptions {
+  readonly trustManifestWithoutAttestation?: boolean;
+}
+
 /**
  * Default resolver: use the single anchor the manifest declares. No intelligence.
- * Swap this out for the proprietary resolver by passing a different RouteResolver
- * to the engine — that is the entire open/closed boundary.
+ * Swap this out for another RouteResolver implementation if one is developed;
+ * the interface is an extension seam, not evidence of a separate closed repo.
  */
 export class StaticRouteResolver implements RouteResolver {
-  constructor(private readonly adapterFor: (corridor: Corridor) => AnchorAdapter) {}
+  constructor(
+    private readonly adapterFor: (corridor: Corridor) => AnchorAdapter,
+    options?: StaticRouteResolverOptions,
+  ) {
+    if (!options?.trustManifestWithoutAttestation) {
+      throw new Error(
+        "StaticRouteResolver requires explicit { trustManifestWithoutAttestation: true }. Use RegistryRouteResolver for verified routing.",
+      );
+    }
+  }
 
   async resolve(_intent: PaymentIntent, corridor: Corridor): Promise<RouteDecision> {
-    return { receiving: this.adapterFor(corridor) };
+    return {
+      receiving: this.adapterFor(corridor),
+      trust: "manifest",
+    };
   }
 }
 
-// The registry-backed resolver: the open half of the seam, in code.
+// The registry-backed resolver: the evidence-based resolver, in code.
 // StaticRouteResolver above trusts the manifest; this one requires evidence.
 export {
   RegistryRouteResolver,

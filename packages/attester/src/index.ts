@@ -18,7 +18,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import type { ProbeResult } from "@corridor/probe";
-import { fail, ok, type Outcome } from "@corridor/types";
+import { err, fail, ok, type CorridorError, type Outcome } from "@corridor/types";
 
 export interface AttesterOptions {
   rpcUrl: string;
@@ -39,16 +39,40 @@ export interface AttestationRef {
 }
 
 /**
- * Errors the attester CONTRACT can return, by its numeric code. Mapped back to
- * something legible because a bare "HostError: Error(Contract, #3)" tells an
- * operator reading a job log nothing about what to do next.
+ * Errors the attester CONTRACT can return, by its numeric code. Mirrors
+ * `contracts/attester/src/lib.rs` `enum Error` — keep the two in step.
+ *
+ * Branch on these (via `AttesterError.contractError`) rather than on the text
+ * of an error message: the wording is for humans and may change.
  */
-const CONTRACT_ERRORS: Record<number, string> = {
-  1: "attester contract is not initialised",
-  2: "this key is not an enrolled attester — run add_attester first",
-  3: "too soon: this domain was attested within the cooldown window",
-  4: "invalid domain",
+export enum AttesterContractError {
+  NotInitialised = 1,
+  NotAnAttester = 2,
+  TooSoon = 3,
+  InvalidDomain = 4,
+}
+
+/**
+ * Mapped back to something legible because a bare "HostError: Error(Contract,
+ * #3)" tells an operator reading a job log nothing about what to do next.
+ */
+const CONTRACT_ERRORS: Record<AttesterContractError, string> = {
+  [AttesterContractError.NotInitialised]: "attester contract is not initialised",
+  [AttesterContractError.NotAnAttester]:
+    "this key is not an enrolled attester — run add_attester first",
+  [AttesterContractError.TooSoon]:
+    "too soon: this domain was attested within the cooldown window",
+  [AttesterContractError.InvalidDomain]: "invalid domain",
 };
+
+/**
+ * A CorridorError from {@link AnchorAttester.attest}. When the contract itself
+ * rejected the attestation, `contractError` carries its numeric error code —
+ * compare it against {@link AttesterContractError}.
+ */
+export interface AttesterError extends CorridorError {
+  readonly contractError?: AttesterContractError | number;
+}
 
 export class AnchorAttester {
   private readonly server: rpc.Server;
@@ -82,7 +106,7 @@ export class AnchorAttester {
    * rejects `probes_passed` exceeding `probes_run` anyway, but the honesty has
    * to start here rather than rely on the contract to catch it.
    */
-  async attest(result: ProbeResult): Promise<Outcome<AttestationRef>> {
+  async attest(result: ProbeResult): Promise<Outcome<AttestationRef, AttesterError>> {
     if (result.probesPassed & ~result.probesRun) {
       return fail(
         "MANIFEST_INVALID",
@@ -116,7 +140,9 @@ export class AnchorAttester {
       // AND surfaces a contract revert before anything is paid for.
       const sim = await this.server.simulateTransaction(built);
       if (rpc.Api.isSimulationError(sim)) {
-        return fail("MANIFEST_INVALID", `${result.domain}: ${explain(sim.error)}`);
+        const { code, message } = explain(sim.error);
+        const failed = fail("MANIFEST_INVALID", `${result.domain}: ${message}`);
+        return code === undefined ? failed : err({ ...failed.error, contractError: code });
       }
 
       const prepared = rpc.assembleTransaction(built, sim).build();
@@ -162,10 +188,19 @@ export class AnchorAttester {
   }
 }
 
-/** Map a raw host error onto the contract's own vocabulary where we can. */
-function explain(error: string): string {
+/**
+ * Map a raw host error onto the contract's own vocabulary where we can.
+ *
+ * `code` is the contract error number whenever the host error names one (even
+ * one this client does not know yet); `message` is for humans only.
+ */
+export function explain(error: string): {
+  code?: AttesterContractError | number;
+  message: string;
+} {
   const m = error.match(/Error\(Contract, #(\d+)\)/);
-  const code = m ? Number(m[1]) : undefined;
-  const known = code !== undefined ? CONTRACT_ERRORS[code] : undefined;
-  return known ? `${known} (contract error #${code})` : error;
+  if (!m) return { message: error };
+  const code = Number(m[1]);
+  const known = CONTRACT_ERRORS[code as AttesterContractError] as string | undefined;
+  return { code, message: known ? `${known} (contract error #${code})` : error };
 }

@@ -65,13 +65,14 @@ export default async function Home() {
         />
       </section>
 
-      {/* Anchors — read live from the on-chain registry */}
+      {/* Anchors — read from the on-chain registry */}
       <section className="flex flex-col gap-5">
         <div className="flex items-end justify-between gap-4">
           <div>
             <h2 className="text-2xl font-semibold">Attested anchors</h2>
             <p className="max-w-2xl text-secondary-text">
-              Read live from the on-chain registry. Each card separates what an anchor&apos;s{" "}
+              Read from the on-chain registry (refreshed hourly); each card shows the attestation
+              ledger. Each card separates what an anchor&apos;s{" "}
               <code className="rounded bg-bg-subtle px-1 py-0.5 text-xs">stellar.toml</code>{" "}
               <em>advertises</em> from what actually <em>worked</em> when it was probed — because
               those are different claims, and treating them as one is how a lane that does not
