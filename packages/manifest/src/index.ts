@@ -42,13 +42,54 @@ export const AnchorEndpointsSchema = z.object({
     .optional(),
 });
 
-export const AnchorSchema = z.object({
+const AnchorBaseSchema = z.object({
   name: z.string().min(1),
-  endpoints: AnchorEndpointsSchema,
   /** Asset this anchor deals in at this leg. Source side: typically "USDC".
    *  Dest side: the off-chain payout asset, e.g. "iso4217:ARS". */
   asset: z.string().min(1),
 });
+
+export const AnchorSchema = AnchorBaseSchema.extend({ endpoints: AnchorEndpointsSchema });
+
+// `transfer_server_sep31` stays optional so an incomplete manifest still
+// parses; `liveness()` reports a SEP-31 dest without it as NOT runnable.
+const Sep31DestSchema = AnchorBaseSchema.extend({
+  protocol: z.literal("sep31").default("sep31"),
+  endpoints: AnchorEndpointsSchema,
+});
+
+const Sep6DestSchema = AnchorBaseSchema.extend({
+  protocol: z.literal("sep6"),
+  endpoints: z.object({
+    home_domain: z.string().min(1),
+    transfer_server: z.string().url(),
+    web_auth: z.string().url().optional(),
+    kyc_server: z.string().url().optional(),
+    quote_server: z.string().url().optional(),
+    endpoints_verified_at: AnchorEndpointsSchema.shape.endpoints_verified_at,
+  }),
+});
+
+const CustomDestSchema = AnchorBaseSchema.extend({
+  protocol: z.string().regex(/^custom:[a-z0-9-]+$/, "expected custom:<lowercase-id>"),
+  endpoints: z.object({
+    home_domain: z.string().min(1),
+    base_url: z.string().url(),
+    extra: z.record(z.string()).default({}),
+    endpoints_verified_at: AnchorEndpointsSchema.shape.endpoints_verified_at,
+  }),
+});
+
+// A discriminated union discriminates before defaults apply, so default an
+// absent `protocol` to "sep31" first (existing manifests unchanged), the same
+// way SourceAnchorSchema defaults to "prefunded".
+export const DestSchema = z.preprocess(
+  (raw) =>
+    raw && typeof raw === "object" && !Array.isArray(raw) && !("protocol" in raw)
+      ? { ...raw, protocol: "sep31" }
+      : raw,
+  z.discriminatedUnion("protocol", [Sep31DestSchema, Sep6DestSchema]).or(CustomDestSchema),
+);
 
 /**
  * How the SENDING side is reached. Schema only: the engine does not act on this
@@ -207,7 +248,7 @@ export const CorridorSchema = z.object({
   /** Human note. Use it to record liveness, e.g. "pending: no RMB SEP-31 anchor". */
   status_note: z.string().optional(),
   source: SourceAnchorSchema,
-  dest: AnchorSchema,
+  dest: DestSchema,
   fx: FxSchema,
   compliance: ComplianceSchema,
   settlement: SettlementSchema,
@@ -217,7 +258,15 @@ export const CorridorSchema = z.object({
 });
 
 export type Corridor = z.infer<typeof CorridorSchema>;
-export type AnchorConfig = z.infer<typeof AnchorSchema>;
+export type DestProtocol = "sep31" | "sep6" | `custom:${string}`;
+export type Sep31Anchor = z.infer<typeof Sep31DestSchema>;
+export type Sep6Anchor = z.infer<typeof Sep6DestSchema>;
+export type CustomAnchor = z.infer<typeof CustomDestSchema>;
+export type AnchorConfig = Sep31Anchor | Sep6Anchor | CustomAnchor;
+
+export function protocolOf(anchor: z.infer<typeof DestSchema>): DestProtocol {
+  return anchor.protocol as DestProtocol;
+}
 export type SourceAnchorConfig = z.infer<typeof SourceAnchorSchema>;
 export type Proof = z.infer<typeof ProofSchema>;
 

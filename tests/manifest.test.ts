@@ -5,6 +5,7 @@ const valid = {
   id: "t",
   source: { name: "S", asset: "USDC", endpoints: { home_domain: "s.example" } },
   dest: {
+    protocol: "sep31",
     name: "D",
     asset: "iso4217:ARS",
     endpoints: {
@@ -49,6 +50,45 @@ describe("manifest", () => {
     void source;
     const r = parseCorridor(rest);
     expect(r.ok).toBe(false);
+  });
+
+  it("accepts a SEP-31 destination and flags a missing SEP-31 endpoint as not runnable", () => {
+    expect(parseCorridor(valid).ok).toBe(true);
+    const legacy: { dest: { protocol?: string } } = structuredClone(valid);
+    delete legacy.dest.protocol;
+    const legacyResult = parseCorridor(legacy);
+    expect(legacyResult.ok).toBe(true);
+    if (legacyResult.ok) expect(legacyResult.value.dest.protocol).toBe("sep31");
+    const bad: { dest: { endpoints: { transfer_server_sep31?: string } } } =
+      structuredClone(valid);
+    delete bad.dest.endpoints.transfer_server_sep31;
+    const badResult = parseCorridor(bad);
+    expect(badResult.ok).toBe(true);
+    if (badResult.ok) expect(liveness(badResult.value).state).toBe("not-runnable");
+  });
+
+  it("accepts SEP-6 and rejects missing TRANSFER_SERVER", () => {
+    const dest = {
+      ...valid.dest,
+      protocol: "sep6",
+      endpoints: { home_domain: "d.example", transfer_server: "https://d.example/sep6" },
+    };
+    expect(parseCorridor({ ...valid, dest }).ok).toBe(true);
+    expect(
+      parseCorridor({ ...valid, dest: { ...dest, endpoints: { home_domain: "d.example" } } })
+        .ok,
+    ).toBe(false);
+  });
+
+  it("accepts a valid custom protocol and rejects malformed ids", () => {
+    const dest = {
+      ...valid.dest,
+      protocol: "custom:acme",
+      endpoints: { home_domain: "d.example", base_url: "https://api.d.example", extra: {} },
+    };
+    expect(parseCorridor({ ...valid, dest }).ok).toBe(true);
+    expect(parseCorridor({ ...valid, dest: { ...dest, protocol: "custom:" } }).ok).toBe(false);
+    expect(parseCorridor({ ...valid, dest: { ...dest, protocol: "sep24" } }).ok).toBe(false);
   });
 
   describe("source.protocol", () => {

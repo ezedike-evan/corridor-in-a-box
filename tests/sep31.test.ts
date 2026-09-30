@@ -97,6 +97,30 @@ const intent: PaymentIntent = {
 };
 
 describe("SEP-10 auth", () => {
+  it("rejects a non-SEP-31 destination with a clear error", () => {
+    const raw = {
+      id: "test",
+      source: { name: "S", asset: "USDC", endpoints: { home_domain: "s.example" } },
+      dest: {
+        protocol: "sep6",
+        name: "D",
+        asset: "iso4217:ARS",
+        endpoints: { home_domain: "d.example", transfer_server: "https://d.example/sep6" },
+      },
+      fx: { path: ["ARS", "USDC"], who_holds_risk: "receiving_anchor" },
+      compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
+      settlement: { network: "public", asset_issuer: "GISSUER" },
+      recovery: {},
+    };
+    const parsed = parseCorridor(raw);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(() => new Sep31Adapter(parsed.value)).toThrow(
+        'Sep31Adapter cannot handle protocol "sep6"',
+      );
+    }
+  });
+
   it("does the challenge/response handshake and attaches the JWT", async () => {
     const token = jwt(900);
     const signer: Sep10Signer = {

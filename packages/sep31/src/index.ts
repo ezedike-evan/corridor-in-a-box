@@ -13,7 +13,7 @@
 // adapter never has to depend on a Stellar SDK. The on-chain settle leg is NOT
 // here; that's the engine's job.
 
-import type { AnchorConfig, Corridor } from "@corridor/manifest";
+import type { Sep31Anchor, Corridor } from "@corridor/manifest";
 import {
   applyPrice,
   compareAmounts,
@@ -246,7 +246,7 @@ function jwtExpiryMs(token: string): number | undefined {
 
 export class Sep31Adapter implements AnchorAdapter {
   readonly name: string;
-  private readonly anchor: AnchorConfig;
+  private readonly anchor: Sep31Anchor;
   /** Bridge asset for this corridor — the denomination `amount_in` is reported in. */
   private readonly settlementAsset: string;
   private readonly fetchImpl: FetchLike;
@@ -254,7 +254,12 @@ export class Sep31Adapter implements AnchorAdapter {
   private cachedToken?: { token: string; expMs: number };
 
   constructor(corridor: Corridor, opts: Sep31AdapterOptions = {}) {
-    this.anchor = corridor.dest;
+    if (corridor.dest.protocol !== "sep31") {
+      throw new Error(
+        `Sep31Adapter cannot handle protocol "${corridor.dest.protocol}"; use an adapter for that protocol`,
+      );
+    }
+    this.anchor = corridor.dest as Sep31Anchor;
     this.settlementAsset = corridor.settlement.bridge_asset;
     this.name = corridor.dest.name;
     this.fetchImpl = opts.fetchImpl ?? fetch;
