@@ -108,10 +108,13 @@ export interface PollOptions {
    * `reconcileUntil` returns a non-retryable `RECONCILE_STALLED` carrying the
    * stuck status and the consecutive count.
    *
-   * Set to `0` or `undefined` to disable stall detection (legacy behaviour).
+   * Omitted or `0` disables stall detection at this layer: `reconcileUntil`
+   * reads `opts.stallThreshold ?? 0` (legacy behaviour).
    *
-   * **Default:** `10`. With a typical `pollMs` of 2 s that is ≈ 20 s — well
-   * below the corridor timeout but long enough that a legitimately slow anchor
+   * **Default here:** none (disabled). `execute()` in `run.ts` applies
+   * `deps.stallThreshold ?? 10` and passes it down, so the production default
+   * is `10`. With a typical `pollMs` of 2 s that is ≈ 20 s — well below the
+   * corridor timeout but long enough that a legitimately slow anchor
    * transitioning through intermediate states won't be misdiagnosed.
    */
   stallThreshold?: number;
@@ -139,6 +142,8 @@ export async function reconcileUntil(
   let firstStatus: string | undefined;
   let lastStatus = "unknown";
   let sameCount = 0;
+  // Omitted or 0 disables stall detection at this layer; execute() applies the
+  // production default of 10 one level up (run.ts) and passes it down.
   const threshold = opts.stallThreshold ?? 0;
   let poll = 0;
   const startedAt = opts.now();

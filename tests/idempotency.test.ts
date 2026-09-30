@@ -47,10 +47,13 @@ const intent: PaymentIntent = {
 
 function deps(store: InMemoryIdempotencyStore): EngineDeps {
   return {
-    resolver: new StaticRouteResolver(() => createMockAdapter()),
+    resolver: new StaticRouteResolver(() => createMockAdapter(), {
+      trustManifestWithoutAttestation: true,
+    }),
     submitter: createMockSubmitter(),
     idempotency: store,
     sleep: async () => {},
+    trustManifestWithoutAttestation: true,
   };
 }
 
@@ -105,10 +108,13 @@ describe("concurrent claim", () => {
       },
     };
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: counting,
       idempotency: store,
       sleep: async () => {},
+      trustManifestWithoutAttestation: true,
     };
 
     const [a, b] = await Promise.all([

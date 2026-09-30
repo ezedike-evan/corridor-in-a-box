@@ -53,6 +53,11 @@ export interface EngineDeps {
   audit?: AuditSink;
   /** Counter/timing sink. Defaults to a no-op. */
   metrics?: Metrics;
+  /**
+   * Explicit opt-in allowing manifest-trusted routes on a public network without
+   * on-chain attestation.
+   */
+  trustManifestWithoutAttestation?: boolean;
 }
 
 export interface RunResult {
@@ -72,6 +77,11 @@ export interface ExecuteOptions {
    * simply claims someone else's tenancy.
    */
   owner?: string;
+  /**
+   * Explicit opt-in allowing manifest-trusted routes on a public network without
+   * on-chain attestation.
+   */
+  trustManifestWithoutAttestation?: boolean;
 }
 
 export async function execute(
@@ -173,6 +183,11 @@ export async function execute(
     );
   }
 
+  // --- pick the receiving anchor ---------------------------------------
+  const route = await deps.resolver.resolve(intent, corridor);
+  const routeTrust = route.trust;
+  const adapter = route.receiving;
+
   const advance = async (to: CorridorState): Promise<Outcome<void>> => {
     if (!canTransition(run.state, to)) {
       return fail("SETTLEMENT_FAILED", `illegal transition ${run.state} -> ${to}`);
@@ -182,7 +197,7 @@ export async function execute(
     run.version += 1;
     trail.push(to);
     await store.put(run);
-    await emitTransition(deps, run, from, now());
+    await emitTransition(deps, run, from, now(), undefined, routeTrust);
     return ok(undefined);
   };
 
@@ -193,13 +208,23 @@ export async function execute(
     run.version += 1;
     trail.push("failed");
     await store.put(run);
-    await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`);
+    await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`, routeTrust);
     return { ok: false, error: e };
   };
 
-  // --- pick the receiving anchor ---------------------------------------
-  const route = await deps.resolver.resolve(intent, corridor);
-  const adapter = route.receiving;
+  if (
+    corridor.settlement.network === "public" &&
+    route.trust === "manifest" &&
+    !deps.trustManifestWithoutAttestation &&
+    !opts.trustManifestWithoutAttestation
+  ) {
+    return die({
+      code: "MANIFEST_INVALID",
+      message:
+        "refusing manifest route trust on public network without explicit { trustManifestWithoutAttestation: true }. Use RegistryRouteResolver for verified routing.",
+      retryable: false,
+    });
+  }
 
   // --- 1. quote ---------------------------------------------------------
   const q = await timed("quote", () => quote(adapter, intent, corridor, now()));
@@ -392,6 +417,7 @@ async function emitTransition(
   from: CorridorState,
   at: number,
   error?: string,
+  routeTrust?: "attested" | "manifest",
 ): Promise<void> {
   const entry = {
     idempotencyKey: run.idempotencyKey,
@@ -401,6 +427,7 @@ async function emitTransition(
     version: run.version,
     at,
     error,
+    ...(routeTrust && { routeTrust }),
   };
   (deps.logger ?? silentLogger).log(error ? "error" : "info", "corridor.transition", entry);
   const metrics = deps.metrics ?? noopMetrics;

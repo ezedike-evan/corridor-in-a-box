@@ -195,11 +195,14 @@ async function main(): Promise<void> {
   const store = new InMemoryIdempotencyStore();
 
   const deps: EngineDeps = {
-    resolver: new StaticRouteResolver(() => adapter),
+    resolver: new StaticRouteResolver(() => adapter, {
+      trustManifestWithoutAttestation: true,
+    }),
     submitter: new StellarSettlementSubmitter({ signer, horizonUrl: HORIZON }),
     idempotency: store,
     audit,
     logger: consoleLogger,
+    trustManifestWithoutAttestation: true,
   };
 
   // SEP-12 identifies both parties to the receiving anchor. The sending side

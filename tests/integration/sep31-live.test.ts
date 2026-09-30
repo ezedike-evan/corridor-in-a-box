@@ -1,6 +1,8 @@
 // Opt-in integration test against a REAL SEP-31 receiving anchor (e.g. the
 // Anchor Platform reference server on testnet). It is SKIPPED unless the anchor
-// env vars are set, so it never runs in the default `pnpm test` or in CI.
+// env vars are set, so it never runs in the default `pnpm test` — but the
+// nightly-live-anchor workflow (.github/workflows/nightly-live-anchor.yml) runs
+// it every night against the SDF test anchor.
 //
 // Run it (see .env.example for the full list):
 //
@@ -13,6 +15,9 @@
 //
 // The default cases are READ-ONLY: they exercise SEP-10 auth, the SEP-38 quote,
 // and the conformance probes without opening a transaction or moving funds.
+// Optionally, ANCHOR_RECIPIENT_SEP12_ID enables the compliance probe,
+// ANCHOR_RECIPIENT_ID overrides the recipient id, and ANCHOR_AMOUNT overrides
+// the source amount.
 //
 // One further case DOES move money, and is therefore behind its own explicit
 // gate on top of the anchor/signer ones: it runs a full execute() and asserts
@@ -20,7 +25,7 @@
 // not make until something checks it. Enable it with:
 //
 //   CORRIDOR_LIVE_SETTLEMENT=1 \
-//   RECIPIENT_SEP12_ID=… SENDER_SEP12_ID=…   # ids this anchor issued \
+//   ANCHOR_RECIPIENT_SEP12_ID=… SENDER_SEP12_ID=…   # ids this anchor issued \
 //   HORIZON_URL=https://horizon-testnet.stellar.org \
 //   pnpm exec vitest run tests/integration/sep31-live.test.ts
 //
@@ -174,7 +179,9 @@ describe.skipIf(!hasAnchor)("SEP-31 live anchor (settlement)", () => {
       const store = new InMemoryIdempotencyStore();
 
       const deps: EngineDeps = {
-        resolver: new StaticRouteResolver(() => adapterFor(c)),
+        resolver: new StaticRouteResolver(() => adapterFor(c), {
+          trustManifestWithoutAttestation: true,
+        }),
         submitter: new StellarSettlementSubmitter({
           signer,
           horizonUrl: env.HORIZON_URL || "https://horizon-testnet.stellar.org",

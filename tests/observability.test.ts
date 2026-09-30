@@ -46,11 +46,14 @@ describe("audit trail", () => {
   it("records one immutable entry per state transition, in order", async () => {
     const audit = new InMemoryAuditLog();
     const deps: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: createMockSubmitter(),
       idempotency: new InMemoryIdempotencyStore(),
       audit,
       now: () => 1700000000000,
+      trustManifestWithoutAttestation: true,
     };
     const r = await execute(intent, corridor(), deps);
     expect(r.ok).toBe(true);
@@ -72,6 +75,7 @@ describe("audit trail", () => {
       from: "created",
       to: "quoted",
       at: 1700000000000,
+      routeTrust: "manifest",
     });
     // versions are monotonic
     const versions = audit.entries.map((e) => e.version);
@@ -81,10 +85,13 @@ describe("audit trail", () => {
   it("records the error on a failing transition", async () => {
     const audit = new InMemoryAuditLog();
     const deps: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter({ kyc: "rejected" })),
+      resolver: new StaticRouteResolver(() => createMockAdapter({ kyc: "rejected" }), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: createMockSubmitter(),
       idempotency: new InMemoryIdempotencyStore(),
       audit,
+      trustManifestWithoutAttestation: true,
     };
     const r = await execute(intent, corridor(), deps);
     expect(r.ok).toBe(false);
@@ -205,11 +212,14 @@ describe("reconcile polling observability", () => {
     const metrics = new InMemoryMetrics();
 
     const deps: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: createMockSubmitter(),
       idempotency: new InMemoryIdempotencyStore(),
       logger,
       metrics,
+      trustManifestWithoutAttestation: true,
     };
 
     const r = await execute(intent, corridor(), deps);

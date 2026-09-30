@@ -48,11 +48,14 @@ function intent(key = "k1"): PaymentIntent {
   };
 }
 
-function deps(adapterOpts = {}): EngineDeps {
+function deps(adapterOpts = {}, trustManifestWithoutAttestation = true): EngineDeps {
   return {
-    resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts)),
+    resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts), {
+      trustManifestWithoutAttestation: true,
+    }),
     submitter: createMockSubmitter(),
     idempotency: new InMemoryIdempotencyStore(),
+    trustManifestWithoutAttestation,
   };
 }
 
@@ -108,11 +111,14 @@ describe("engine.execute", () => {
     };
 
     const r = await execute(intent(), corridor(), {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter,
       idempotency: new InMemoryIdempotencyStore(),
       now,
       sleep,
+      trustManifestWithoutAttestation: true,
     });
 
     expect(r.ok).toBe(false);
@@ -120,6 +126,50 @@ describe("engine.execute", () => {
     // Exactly one settle attempt: the retry loop's fresh expiry check catches
     // the stale quote before ever calling submit() a second time.
     expect(submitCalls).toBe(1);
+  });
+
+  it("a public-network corridor with manifest trust and no opt-in ends failed before settling", async () => {
+    let submitCalled = false;
+    const submitter: SettlementSubmitter = {
+      async submit() {
+        submitCalled = true;
+        return ok({ stellarTxHash: "hash", ledger: 1 });
+      },
+      async refund() {
+        return ok({ stellarTxHash: "refund-hash", ledger: 2 });
+      },
+    };
+    const store = new InMemoryIdempotencyStore();
+    const audit = new InMemoryAuditLog();
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      idempotency: store,
+      audit,
+      // No trustManifestWithoutAttestation on deps or opts
+    };
+
+    const c = corridor(); // network: "public"
+    const i = intent("manifest-refuse-1");
+    const r = await execute(i, c, d);
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("MANIFEST_INVALID");
+      expect(r.error.message).toContain("refusing manifest route trust on public network");
+    }
+
+    const stored = await store.get(i.idempotencyKey);
+    expect(stored?.state).toBe("failed");
+    expect(submitCalled).toBe(false);
+
+    const trail = audit.entries.map((e) => e.to);
+    expect(trail).toContain("failed");
+    expect(trail).not.toContain("settling");
+    expect(trail).not.toContain("settled");
+    expect(trail).not.toContain("completed");
   });
 
   it("fails closed when KYC is rejected", async () => {
@@ -175,10 +225,13 @@ function corridorWith(recovery: Record<string, unknown>): Corridor {
 describe("engine recovery", () => {
   it("refunds the sender when settlement fails and no payment went out", async () => {
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: createMockSubmitter({ failSubmit: true }),
       idempotency: new InMemoryIdempotencyStore(),
       sleep: async () => {},
+      trustManifestWithoutAttestation: true,
     };
     const r = await execute(
       intent(),
@@ -194,7 +247,9 @@ describe("engine recovery", () => {
     const refunded: string[] = [];
     const base = createMockSubmitter();
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false }), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: {
         submit: base.submit,
         refund: async (req) => {
@@ -208,6 +263,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     };
     const r = await execute(
       intent(),
@@ -297,16 +353,19 @@ describe("engine recovery", () => {
     let t = 0;
     const base = createMockAdapter({ settled: false });
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => ({
-        ...base,
-        getTransaction: async () =>
-          ok({
-            status: "pending_customer_info_update",
-            settled: false,
-            terminalFailure: false,
-            awaitingInput: true,
-          }),
-      })),
+      resolver: new StaticRouteResolver(
+        () => ({
+          ...base,
+          getTransaction: async () =>
+            ok({
+              status: "pending_customer_info_update",
+              settled: false,
+              terminalFailure: false,
+              awaitingInput: true,
+            }),
+        }),
+        { trustManifestWithoutAttestation: true },
+      ),
       submitter: createMockSubmitter(),
       idempotency: new InMemoryIdempotencyStore(),
       now: () => t,
@@ -314,6 +373,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     };
     const r = await execute(
       intent("awaiting-input"),
@@ -336,7 +396,9 @@ describe("engine recovery", () => {
     const store = new InMemoryIdempotencyStore();
     const base = createMockSubmitter();
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false }), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: base,
       idempotency: store,
       now: () => t,
@@ -344,6 +406,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     };
     const i = intent();
     await execute(
@@ -366,7 +429,9 @@ describe("engine recovery", () => {
     const store = new InMemoryIdempotencyStore();
     const base = createMockSubmitter();
     const deps = (): EngineDeps => ({
-      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false }), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: {
         submit: base.submit,
         refund: async (req) => {
@@ -380,6 +445,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     });
     const c = corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" });
     const i = intent();
@@ -400,13 +466,16 @@ describe("engine recovery", () => {
     const base = createMockSubmitter();
     const failing = createMockAdapter({ terminalFailure: true });
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => ({
-        ...failing,
-        getTransaction: async (id) => {
-          polls += 1;
-          return failing.getTransaction(id);
-        },
-      })),
+      resolver: new StaticRouteResolver(
+        () => ({
+          ...failing,
+          getTransaction: async (id) => {
+            polls += 1;
+            return failing.getTransaction(id);
+          },
+        }),
+        { trustManifestWithoutAttestation: true },
+      ),
       submitter: {
         submit: base.submit,
         refund: async (req) => {
@@ -422,6 +491,7 @@ describe("engine recovery", () => {
       // A long timeout: if the engine waited it out instead of bailing, the test
       // would still pass on the error code — so assert it polled only once.
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     };
     const r = await execute(
       intent("terminal-1"),
@@ -443,7 +513,9 @@ describe("engine recovery", () => {
     let t = 0;
     const base = createMockSubmitter();
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false })),
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false }), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: {
         submit: base.submit,
         refund: async () =>
@@ -457,6 +529,7 @@ describe("engine recovery", () => {
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     };
     const store = d.idempotency!;
     const r = await execute(
@@ -472,10 +545,13 @@ describe("engine recovery", () => {
 
   it("parks for manual intervention when rollback policy is hold", async () => {
     const d: EngineDeps = {
-      resolver: new StaticRouteResolver(() => createMockAdapter()),
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
       submitter: createMockSubmitter({ failSubmit: true }),
       idempotency: new InMemoryIdempotencyStore(),
       sleep: async () => {},
+      trustManifestWithoutAttestation: true,
     };
     const store = d.idempotency!;
     const r = await execute(
@@ -577,6 +653,26 @@ describe("reconcile stall detection", () => {
     if (!result.ok) expect(result.error.code).toBe("RECONCILE_STALLED");
     expect(polls()).toBe(6);
   });
+
+  it("does NOT stall when stallThreshold is omitted (disabled at this layer)", async () => {
+    const { adapter, polls } = stalledAdapter("stuck");
+    let t = 0;
+    // reconcileUntil reads `opts.stallThreshold ?? 0`, so omitting the option
+    // disables stall detection here: an anchor stuck on one status forever has
+    // to reach the deadline timeout rather than return RECONCILE_STALLED.
+    // (execute() applies the production default of 10 one level up in run.ts.)
+    const result = await reconcileUntil(adapter, "tx_omitted_threshold", {
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      deadlineMs: t + 500,
+      pollMs: 100,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("SETTLEMENT_TIMEOUT");
+    expect(polls()).toBeGreaterThan(1);
+  });
 });
 
 describe("state machine", () => {
@@ -660,8 +756,9 @@ function refundHarness(
     refundCalls,
     trail: () => audit.entries.map((e) => e.to),
     deps: {
-      resolver: new StaticRouteResolver(() =>
-        createMockAdapter({ settled: opts.settled ?? true }),
+      resolver: new StaticRouteResolver(
+        () => createMockAdapter({ settled: opts.settled ?? true }),
+        { trustManifestWithoutAttestation: true },
       ),
       submitter,
       idempotency: store,
@@ -671,6 +768,7 @@ function refundHarness(
         t += ms;
       },
       reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
     },
   };
 }

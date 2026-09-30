@@ -88,6 +88,13 @@ describe("corridor CLI", () => {
     expect(r.stdout).toContain("no per-customer KYC");
   });
 
+  it("plan: reports VERIFIED for ng-cowrie", () => {
+    const r = run(["plan", "corridors/ng-cowrie.corridor.yaml"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("liveness: ✓ VERIFIED");
+    expect(r.stdout).toContain("2026-08-11");
+  });
+
   it("plan: prints the status_note when present", () => {
     const r = run(["plan", "corridors/ng-cn.corridor.yaml"]);
     expect(r.stdout).toContain("PENDING");
