@@ -7,6 +7,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Fixed — operations.md §1 step 4 described output a reader could never see (closes #129)
+
+`docs/operations.md` step 4 instructed readers to run
+`pnpm cli plan corridors/reference.corridor.yaml` and said it "must report the lane
+runnable (no liveness warnings)". The reference corridor points at `localhost` and
+has no `endpoints_verified_at` by design — setting that field on a localhost manifest
+would be meaningless — so `plan` always prints `UNVERIFIED` plus a warning about
+unconfirmed endpoints. Step 4 was therefore impossible to pass as written, which
+stopped readers dead.
+
+The step now shows the actual expected output and explains what the pre-flight is
+really checking: that the manifest parses (exit 0), that liveness is **not** `NOT
+RUNNABLE` (all required endpoint fields are present), and that it is **not**
+`✓ VERIFIED` (a localhost manifest reporting verified would be the lie to catch).
+The live readiness check — containers up, SEP-31 receiving, observer cursor in range
+— is `reference-anchor.sh doctor`, and the step now points there explicitly.
+
 ### Changed — anchor-side terminal failure after settle enters `refund_pending`
 
 - Under `rollback: refund_sender`, when money has moved and the anchor reports a
@@ -43,6 +60,22 @@ prints the source protocol.
   rather than a release comparison. The historical 0.1.0 section below remains
   unlinked until its release commit can be tagged.
 
+### Added — Pre-settle gate and corridor-halt error codes (#139) (2026-09-25)
+
+Added 9 dedicated pre-settle gate and circuit breaker error codes to `CorridorErrorCode`:
+
+- `PRESETTLE_ANCHOR_DRIFT` — live /info or stellar.toml no longer matches what was verified
+- `PRESETTLE_TX_MISMATCH` — the opened anchor transaction is not what we are about to pay
+- `PRESETTLE_DESTINATION_UNSAFE` — destination missing, no trustline, or not authorized
+- `PRESETTLE_INSUFFICIENT_FUNDS` — our balance cannot cover amount + fee + reserve
+- `PRESETTLE_QUOTE_WINDOW` — firm quote will not survive settle + confirm
+- `PRESETTLE_AMOUNT_OUT_OF_RANGE` — outside anchor or manifest min/max
+- `PRESETTLE_RECEIVER_NOT_ACCEPTED` — SEP-12 status is no longer ACCEPTED
+- `CORRIDOR_UNPROVEN` — amount above the canary cap on a non-PROVEN lane
+- `CORRIDOR_HALTED` — per-corridor circuit breaker is open
+
+Added helper `isPreSettleCode(code): boolean` in `@corridor/types` and mapped the error codes in `@corridor/service` HTTP router.
+
 ### Changed — attester rejections carry a typed contract error code (2026-09-24)
 
 `AnchorAttester.attest` turned an attester-contract revert into a message such
@@ -59,6 +92,25 @@ contract itself rejected the attestation, the error carries its number as
 `examples/attest.ts` now checks `contractError === AttesterContractError.TooSoon`.
 The error `code` and message text are unchanged, so existing callers keep
 working.
+
+### Added — `verifying` state between `opened` and `settling` (2026-09-25)
+
+The engine moved straight from `opened` to `settling`, so a pre-settle gate done
+inside `opened` would have been invisible in the trail — `opened -> failed` could
+mean either "the anchor rejected the open" or "we refused to pay" — and it would
+have run only once, while a retry re-entered `settling` after a backoff during
+which balances, quote validity and anchor status can all change.
+
+`verifying` makes the gate an auditable fact and, more importantly, an
+unskippable one. `settling` is now reachable ONLY from `verifying`, so a
+control-flow bug in `run.ts` cannot bypass it — the same "unreachable by
+construction" argument the recovery states already make. `opened` and `retrying`
+lost their direct edges into `settling`; every attempt walks
+`opened -> verifying -> settling` on the first pass and
+`retrying -> verifying -> settling` after a retry. A refusal is `failed`, never
+`recovering`, because no money has moved and there is nothing to unwind. The
+state and engine wiring shipped with the pre-settle gate (#353); this entry adds
+the property tests that pin the invariant (#138).
 
 ### Added — Gate check: balance covers amount, fee and minimum reserve (#151) (2026-09-25)
 
