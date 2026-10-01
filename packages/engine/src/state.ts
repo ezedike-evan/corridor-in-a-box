@@ -8,6 +8,7 @@ export type CorridorState =
   | "quoted"
   | "compliant"
   | "opened"
+  | "verifying"
   | "settling"
   | "retrying"
   | "settled"
@@ -23,11 +24,12 @@ const NEXT: Record<CorridorState, readonly CorridorState[]> = {
   created: ["quoted", "failed"],
   quoted: ["compliant", "recovering", "failed"],
   compliant: ["opened", "recovering", "failed"],
-  opened: ["settling", "recovering", "failed"],
+  opened: ["verifying", "recovering", "failed"],
+  verifying: ["settling", "failed"],
   settling: ["settled", "retrying", "recovering", "failed"],
   // A settle attempt failed BEFORE money moved, so going round again is safe.
-  // This is the only state that may re-enter `settling`.
-  retrying: ["settling", "recovering", "failed"],
+  // This is the only state that may re-enter `verifying`.
+  retrying: ["verifying", "recovering", "failed"],
   settled: ["reconciled", "recovering", "failed"],
   reconciled: ["completed", "failed"],
   completed: [],

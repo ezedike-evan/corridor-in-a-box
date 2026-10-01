@@ -58,12 +58,13 @@ describe("audit trail", () => {
     const r = await execute(intent, corridor(), deps);
     expect(r.ok).toBe(true);
 
-    // created -> quoted -> compliant -> opened -> settling -> settled
-    //   -> reconciled -> completed = 7 transitions
+    // created -> quoted -> compliant -> opened -> verifying -> settling -> settled
+    //   -> reconciled -> completed = 8 transitions
     expect(audit.entries.map((e) => e.to)).toEqual([
       "quoted",
       "compliant",
       "opened",
+      "verifying",
       "settling",
       "settled",
       "reconciled",

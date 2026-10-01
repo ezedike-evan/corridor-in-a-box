@@ -12,7 +12,11 @@ const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
 const CLI = fileURLToPath(new URL("../packages/cli/src/index.ts", import.meta.url));
 
 function run(args: string[]) {
-  return spawnSync(TSX, [CLI, ...args], { cwd: REPO_ROOT, encoding: "utf8" });
+  return spawnSync(TSX, [CLI, ...args], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    shell: process.platform === "win32",
+  });
 }
 
 describe("corridor CLI", () => {
@@ -86,6 +90,13 @@ describe("corridor CLI", () => {
     expect(r.stdout).toContain("NOT RUNNABLE");
     expect(r.stdout).toContain("quotes will fail");
     expect(r.stdout).toContain("no per-customer KYC");
+  });
+
+  it("plan: reports VERIFIED for ng-cowrie", () => {
+    const r = run(["plan", "corridors/ng-cowrie.corridor.yaml"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("liveness: ✓ VERIFIED");
+    expect(r.stdout).toContain("2026-08-11");
   });
 
   it("plan: prints the status_note when present", () => {

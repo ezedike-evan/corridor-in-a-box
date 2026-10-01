@@ -37,8 +37,49 @@ run is automated by `pnpm verify:corridor` and the `reference-corridor` workflow
    ANCHOR_SEP31_WEB_AUTH=… CORRIDOR_SIGNER_SECRET=S… \
    pnpm exec vitest run tests/integration/sep31-live.test.ts
    ```
-4. **Pre-flight the manifest** offline: `pnpm cli plan corridors/reference.corridor.yaml`
-   must report the lane runnable (no liveness warnings).
+4. **Pre-flight the manifest** offline:
+
+   ```bash
+   pnpm cli plan corridors/reference.corridor.yaml
+   ```
+
+   Expected output (abridged):
+
+   ```
+   liveness: ? UNVERIFIED — endpoints present but unconfirmed. NOT runnable.
+
+   liveness warnings:
+     ! dest endpoints are UNVERIFIED — the URLs below have never been confirmed against …
+   ```
+
+   `UNVERIFIED` is the correct and expected result for the reference corridor.
+   `corridors/reference.corridor.yaml` points at `localhost` and deliberately has no
+   `endpoints_verified_at` — setting that field on a localhost manifest would be
+   meaningless. The warning about unconfirmed endpoints is the proof that the
+   manifest is honest, not broken.
+
+   What the pre-flight check is actually verifying here:
+
+   - The manifest parses and validates (exit 0).
+   - The liveness state is **not** `NOT RUNNABLE` — every required endpoint field
+     (`transfer_server_sep31`, `quote_server`, `kyc_server`) is present. A
+     `NOT RUNNABLE` result or a "quotes will fail / no per-customer KYC" warning
+     means the manifest has a structural gap that will break the run.
+   - The output is **not** `✓ VERIFIED` — a localhost manifest that somehow
+     reported verified would be the lie to catch.
+
+   The live readiness check — are the containers up, is SEP-31 receiving, is the
+   observer cursor in range — is `scripts/reference-anchor.sh doctor` (step 2 above,
+   or run it again here):
+
+   ```bash
+   scripts/reference-anchor.sh doctor
+   ```
+
+   That command exits non-zero and names the failing check, so it can gate CI.
+   Run it after `up` and before driving a payment; `plan` cannot replace it for a
+   self-hosted stack.
+
 5. **Drive one payment** with the real implementations wired per the README's
    "Going live" list (`Sep31Adapter` + `StellarSettlementSubmitter` +
    `PostgresIdempotencyStore`, with an `audit` sink). Capture the resulting
@@ -64,10 +105,19 @@ scripts/reference-anchor.sh down           # tear it all down
 
 #### `doctor` - check before you run, not after
 
-A corridor run against a sick stack does not fail fast. It reaches `settled`,
-polls until stall detection triggers (around 20 seconds of unchanged statuses),
-and fails with `RECONCILE_STALLED`. That time was spent learning
-something that was knowable beforehand. Run `doctor` first:
+A corridor run against a sick stack does not fail fast. It reaches `settled`
+and polls while waiting for the anchor to reconcile. If the anchor reports
+unchanged statuses for the configured stall window, the engine stops early
+with `RECONCILE_STALLED`—around 20 seconds by default. If statuses continue
+changing but never reach a terminal state, polling continues until
+`recovery.timeout_seconds` expires (900s by default), then fails with
+`SETTLEMENT_TIMEOUT`.
+
+A corridor can tune its reconciliation patience with
+`recovery.reconcile: { poll_seconds, stall_polls }`; unset fields fall back to
+`EngineDeps.reconcilePollMs` / `stallThreshold`, then 2s / 10 polls. In either
+case, time spent waiting on a sick stack was spent learning something that was
+knowable beforehand. Run `doctor` first:
 
 ```
 reference anchor doctor
@@ -140,7 +190,7 @@ exits non-zero unless the terminal state is `completed`. It prints the trail on
 both paths — the failing run is the one worth reading:
 
 ```
-trail: created -> quoted -> compliant -> opened -> settling -> retrying -> settling -> recovering -> refunded
+trail: created -> quoted -> compliant -> opened -> verifying -> settling -> retrying -> verifying -> settling -> recovering -> refunded
 
 ✗ SETTLEMENT_FAILED — settlement submit failed: tx_failed operations=[op_src_no_trust]
   terminal state: refunded
@@ -251,11 +301,11 @@ the chain. Verify the belief before closing the run:
   payments (the same check "Crash mid-flight" below prescribes for `settling`)
   before declaring the sender whole.
 
-If an anchor-driven refund path ever lands (a refund-wait state between
-`recovering` and `refunded`), a second, legitimate way into this state appears —
-one where a payment **did** go out and the anchor returned it, hash set. The
-run's trail tells the two apart — and `refund_id`, described below, records
-which refund it was.
+The state machine defines `refund_pending` (between `recovering` and `refunded`)
+but no transition enters it yet — the engine does not call `requestRefund`. When
+a producer lands, a payment that did go out and was returned by the anchor will
+enter `refund_pending` with `stellar_tx_hash` set. The run's trail tells the
+two apart — and `refund_id`, described below, records which refund it was.
 
 ### `refund_id` on the run
 

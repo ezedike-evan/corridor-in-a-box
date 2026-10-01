@@ -12,9 +12,13 @@ corridor is a new `*.corridor.yaml` file — not a fork.
 **Live demo:** [corridor-in-a-box.vercel.app](https://corridor-in-a-box.vercel.app)
 — the corridor dashboard and a payment walkthrough. **The walkthrough is a
 simulation**: it drives a re-implementation of the state machine and never
-touches the Stellar network. No corridor in this repo has yet been confirmed
-against a live anchor, so every one of them renders `UNVERIFIED` or
-`NOT RUNNABLE` (see [Liveness](#liveness-has-three-states-and-green-has-to-be-earned)).
+touches the Stellar network. `ng-cowrie` is the one exception: its endpoints
+were probed against Cowrie's production API on 2026-08-11 — SEP-10 signed a
+challenge, SEP-12 answered, and SEP-31 `/info` returned a non-empty receive
+list — so it renders `VERIFIED`. That means endpoints were checked, not that
+money moved: Cowrie publishes no SEP-38 quote server, no payment has been
+attempted, and no business relationship is in place. Every other shipped
+manifest renders `UNVERIFIED` or `NOT RUNNABLE` (see [Liveness](#liveness-has-three-states-and-green-has-to-be-earned)).
 
 This repo contains the **open, runnable corridor engine** and the `RouteResolver`
 seam. The intended open-core design leaves room for a proprietary anchor
@@ -45,7 +49,7 @@ See [CONTRIBUTING](./CONTRIBUTING.md), [SECURITY](./SECURITY.md), and the
 `pnpm example` walks a payment through every state and proves idempotency:
 
 ```
-created -> quoted -> compliant -> opened -> settling -> settled -> reconciled -> completed
+created -> quoted -> compliant -> opened -> verifying -> settling -> settled -> reconciled -> completed
 replay with same key -> idempotent return (state=completed)
 ```
 
@@ -56,18 +60,26 @@ packages/
   types/         Outcome<T> result type (no-throw) + Money/PaymentIntent
   manifest/      Zod schema for a corridor + loader  ← the abstraction lives here
   adapter-kit/   AnchorAdapter port + conformance probes + a mock adapter
-  sep31/         ONE generic adapter for any standards-compliant SEP-31 anchor
-                 (SEP-10 auth + SEP-12 KYC; crypto behind an injected signer)
-  stellar/       the ONLY chain-touching package: @stellar/stellar-sdk-backed
-                 settlement submitter + SEP-10 signer
+  probe/         conformance probes for corridor/anchor behavior
+  registry/      conformance registry client
+  attester/      attestation writer for the conformance registry
+  sep31/         ONE generic adapter for any standards-compliant SEP-31
+                 anchor (SEP-10 auth + SEP-12 KYC; crypto behind an injected signer)
+  stellar/       the only package on the money path that touches the chain;
+                 @stellar/stellar-sdk-backed settlement submitter + SEP-10 signer
   router/        RouteResolver seam — open interface + dumb static default
   engine/        corridor-agnostic orchestration of the five verbs, with a
                  persisted state machine, crash-resume, recovery, audit trail,
                  metrics hooks, and a durable Postgres idempotency store
-  service/       thin HTTP API over the engine (auth + rate limiting), zero deps
+  service/       thin HTTP API over the engine (auth + rate limiting),
+                 zero deps
   cli/           validate a manifest; print an offline runnability plan
-corridors/       the manifests — ALL corridor-specifics live here, nowhere else
-docs/            key management, "why not Anchor Platform", SEP coverage, operations, …
+corridors/       the manifests — ALL corridor-specifics live here,
+                 nowhere else
+contracts/       Soroban registry + attester contracts
+scripts/         reference-anchor.sh + assert-testnet-corridor.ts
+docs/            key management, "why not Anchor Platform", SEP coverage,
+                 operations, …
 examples/        runnable end-to-end demo
 ```
 
@@ -126,9 +138,12 @@ type a URL into a YAML file. So `corridor plan` and the dashboard report:
 | `VERIFIED`     | Endpoints were checked against the anchor's published `stellar.toml` on a recorded date. |
 
 `VERIFIED` requires `dest.endpoints.endpoints_verified_at` — a date a human sets
-only after actually looking. **Every corridor in this repo is currently
-`UNVERIFIED` or `NOT RUNNABLE`**, which is the honest state of the project: no
-lane here has been confirmed against a live anchor yet.
+only after actually looking. `ng-cowrie` is `VERIFIED`: its endpoints were
+probed on 2026-08-11, and SEP-10, SEP-12, and SEP-31 answered. This does not
+mean money moved — Cowrie publishes no SEP-38 quote server, no payment has
+been attempted, and no business relationship is in place. Every other shipped
+manifest is currently `UNVERIFIED` or `NOT RUNNABLE`. Green has to be earned;
+here, `VERIFIED` means endpoints were checked, not that a payment was made.
 
 ## The anchor registry (on-chain)
 
@@ -263,8 +278,10 @@ CORRIDOR_SIGNER_SECRET=S… pnpm verify:corridor
 It exits non-zero unless the run's terminal state is `completed`, printing the
 full trail and the last error either way, so it can gate CI or a release. Before
 opening a payment it runs `reference-anchor.sh doctor` — a run against a sick
-stack does not fail fast, it polls for the whole of `recovery.timeout_seconds`
-and then reports `SETTLEMENT_TIMEOUT`.
+stack ends in `RECONCILE_STALLED` after 10 identical consecutive polls (~20 s
+with the default `stallThreshold=10` and `reconcilePollMs=2000`).
+`SETTLEMENT_TIMEOUT` only fires when the anchor's status keeps _changing_ but
+never reaches a terminal state within `recovery.timeout_seconds`.
 
 The signer must be a **testnet** account holding the corridor's bridge asset
 (`USDC` from the issuer the anchor quotes) with a trustline for it. The runner
