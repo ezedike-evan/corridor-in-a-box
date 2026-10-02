@@ -18,6 +18,7 @@ export interface Quote {
   readonly expiresAt: number;
   readonly sourceAmount: Money;
   readonly destAmount: Money;
+  readonly fee?: Money;
   readonly firm: boolean;
 }
 

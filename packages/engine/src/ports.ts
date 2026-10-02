@@ -13,6 +13,8 @@ import { fail, ok, type Money, type Outcome } from "@corridor/types";
 export interface SettlementRef {
   readonly stellarTxHash: string;
   readonly ledger?: number;
+  /** Network fee actually charged, in stroops, as Horizon's `fee_charged` reports it. */
+  readonly feeCharged?: string;
 }
 
 export interface SettlementRequest {

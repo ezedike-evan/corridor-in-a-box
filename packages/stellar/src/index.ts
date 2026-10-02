@@ -261,7 +261,11 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
 
       const confirmed = await this.confirm(hash as string);
       if (!confirmed.ok) return confirmed;
-      return ok<SettlementRef>({ stellarTxHash: hash as string, ledger: confirmed.value });
+      return ok<SettlementRef>({
+        stellarTxHash: hash as string,
+        ledger: confirmed.value.ledger,
+        feeCharged: confirmed.value.feeCharged,
+      });
     } catch (cause) {
       if (!submitAttempted || cause instanceof TransactionFailedError) {
         // Either nothing ever reached Horizon (build/sign/lock failure — always
@@ -280,7 +284,11 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
       // network blip becomes a double payment, so check before deciding.
       const landed = await this.confirm(hash as string);
       if (landed.ok) {
-        return ok<SettlementRef>({ stellarTxHash: hash as string, ledger: landed.value });
+        return ok<SettlementRef>({
+          stellarTxHash: hash as string,
+          ledger: landed.value.ledger,
+          feeCharged: landed.value.feeCharged,
+        });
       }
       return fail(
         landed.error.code,
@@ -366,13 +374,20 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
     );
   }
 
-  /** Poll Horizon until the tx is in a ledger or we time out. Returns the ledger. */
-  private async confirm(hash: string): Promise<Outcome<number>> {
+  /** Poll Horizon until the tx is in a ledger or we time out. Returns the ledger and feeCharged. */
+  private async confirm(
+    hash: string,
+  ): Promise<Outcome<{ ledger?: number; feeCharged?: string }>> {
     const deadline = this.now() + this.confirmTimeoutMs;
     for (;;) {
       try {
         const tx = await this.server.transactions().transaction(hash).call();
-        if (tx.successful) return ok(tx.ledger_attr ?? tx.ledger);
+        if (tx.successful) {
+          return ok({
+            ledger: tx.ledger_attr ?? tx.ledger,
+            feeCharged: tx.fee_charged != null ? tx.fee_charged.toString() : undefined,
+          });
+        }
         return fail("SETTLEMENT_FAILED", `tx ${hash} failed on-chain`);
       } catch {
         // not yet visible

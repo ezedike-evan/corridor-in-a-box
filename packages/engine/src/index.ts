@@ -29,6 +29,7 @@ export {
   open,
   settle,
   buildSettlementRequest,
+  settleQuoteProblem,
   reconcile,
   reconcileUntil,
   anchorTerminalStatus,

@@ -1257,3 +1257,93 @@ describe("refund_pending producer", () => {
     expect((await h.store.get("rp-4"))?.state).toBe("held");
   });
 });
+
+describe("Quote fee and settlement amount validation", () => {
+  it("fails with AMOUNT_INVALID before settling when quote sell_amount exceeds STROOP_SCALE precision", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const adapter = createMockAdapter();
+    // Override requestQuote to return 8 decimal places
+    adapter.requestQuote = async () =>
+      ok({
+        id: "q-8dp",
+        price: "1.0",
+        expiresAt: Date.now() + 60_000,
+        sourceAmount: { asset: "USDC", amount: "100.12345678" },
+        destAmount: { asset: "ARS", amount: "100" },
+        firm: true,
+      });
+
+    let submitted = 0;
+    const mockSubmitter = createMockSubmitter();
+    const deps: EngineDeps = {
+      resolver: new StaticRouteResolver(() => adapter, {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: {
+        ...mockSubmitter,
+        submit: async (req) => {
+          submitted += 1;
+          return mockSubmitter.submit(req);
+        },
+      },
+      idempotency: store,
+      trustManifestWithoutAttestation: true,
+    };
+
+    const r = await execute(intent("invalid-dp-quote"), corridor(), deps);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("AMOUNT_INVALID");
+    }
+
+    const stored = await store.get("invalid-dp-quote");
+    expect(stored?.state).toBe("failed");
+    // It died before anything was submitted: the 8dp amount was never rounded or sent.
+    expect(submitted).toBe(0);
+    expect(stored?.lastError).toContain("AMOUNT_INVALID");
+  });
+
+  it("records quoteFee and networkFee in the settled audit entry", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const audit = new InMemoryAuditLog();
+    const adapter = createMockAdapter({ settled: true });
+    adapter.requestQuote = async () =>
+      ok({
+        id: "q-with-fee",
+        price: "1.0",
+        expiresAt: Date.now() + 60_000,
+        sourceAmount: { asset: "USDC", amount: "100.00" },
+        destAmount: { asset: "ARS", amount: "100.00" },
+        fee: { asset: "USDC", amount: "0.50" },
+        firm: true,
+      });
+
+    const submitter: SettlementSubmitter = {
+      submit: async () =>
+        ok({
+          stellarTxHash: "tx-fee-hash",
+          ledger: 12345,
+          feeCharged: "100",
+        }),
+      refund: async () => fail("REFUND_UNSUPPORTED", "no"),
+    };
+
+    const deps: EngineDeps = {
+      resolver: new StaticRouteResolver(() => adapter, {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      idempotency: store,
+      audit,
+      trustManifestWithoutAttestation: true,
+    };
+
+    const r = await execute(intent("audit-fee-key"), corridor(), deps);
+    expect(r.ok).toBe(true);
+
+    const settledEntry = audit.entries.find((e) => e.to === "settled");
+    expect(settledEntry).toBeDefined();
+    expect(settledEntry?.quoteFee).toEqual({ asset: "USDC", amount: "0.50" });
+    expect(settledEntry?.networkFee).toBe("100");
+  });
+});

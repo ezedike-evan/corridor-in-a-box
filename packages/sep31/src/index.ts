@@ -424,12 +424,31 @@ export class Sep31Adapter implements AnchorAdapter {
         }
       }
 
+      // The fee has to be in exactly the asset we asked to sell: a SEP-38 asset id, issuer included
+      // (the same code from another issuer is a different asset). Anything else would change what
+      // must be sent, so the quote is refused until someone proves the semantics of that case.
+      let fee: Money | undefined;
+      if (j.fee) {
+        const sellAsset = sep38SellAsset(corridor);
+        if (j.fee.asset !== sellAsset) {
+          return fail(
+            "QUOTE_UNAVAILABLE",
+            `${this.name}: quote fee asset "${j.fee.asset}" does not match sell asset "${sellAsset}"`,
+          );
+        }
+        // A malformed total is dropped rather than guessed at.
+        if (isValidAmount(j.fee.total)) {
+          fee = { asset: intent.sourceAmount.asset, amount: j.fee.total };
+        }
+      }
+
       return ok<Quote>({
         id: j.id,
         price: j.price,
         expiresAt: Date.parse(j.expires_at),
         sourceAmount: { asset: intent.sourceAmount.asset, amount: sellAmount },
         destAmount: { asset: this.anchor.asset, amount: j.buy_amount },
+        ...(fee && { fee }),
         firm: true,
       });
     } catch (cause) {

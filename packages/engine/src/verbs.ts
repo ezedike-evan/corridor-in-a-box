@@ -4,7 +4,14 @@
 // right size while there's a single corridor exercising them.
 
 import type { Corridor } from "@corridor/manifest";
-import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
+import {
+  fail,
+  ok,
+  type Outcome,
+  type PaymentIntent,
+  isSettleableAmount,
+  STROOP_SCALE,
+} from "@corridor/types";
 import type {
   AnchorAdapter,
   KycResult,
@@ -79,6 +86,28 @@ export function buildSettlementRequest(
   };
 }
 
+/**
+ * Why a quote must NOT be settled as-is, or null when it can be. `Quote.sourceAmount.asset` is the intent's
+ * asset, while the on-chain leg pays the corridor's bridge asset: that relabel is only legitimate when the two
+ * are the same asset, and the amount has to be exactly representable at 7 decimal places (stroops).
+ */
+export function settleQuoteProblem(q: Quote, corridor: Corridor): string | null {
+  const bridge = corridor.settlement.bridge_asset;
+  const sellAsset = q.sourceAmount.asset;
+  const isMatch =
+    sellAsset === bridge ||
+    sellAsset === `stellar:${bridge}:${corridor.settlement.asset_issuer}` ||
+    (bridge.toUpperCase() === "XLM" &&
+      (sellAsset === "native" || sellAsset === "stellar:native"));
+  if (!isMatch) {
+    return `quote source asset "${sellAsset}" does not match settlement bridge asset "${bridge}"`;
+  }
+  if (!isSettleableAmount(q.sourceAmount.amount, STROOP_SCALE)) {
+    return `settle amount "${q.sourceAmount.amount}" is not a valid settleable amount at ${STROOP_SCALE} decimal places`;
+  }
+  return null;
+}
+
 // 3b. SETTLE — the native on-chain payment of the bridge asset to the anchor.
 export async function settle(
   submitter: SettlementSubmitter,
@@ -86,6 +115,9 @@ export async function settle(
   q: Quote,
   corridor: Corridor,
 ): Promise<Outcome<SettlementRef>> {
+  // Refuse before anything is submitted: never relabel an asset or round an amount silently.
+  const problem = settleQuoteProblem(q, corridor);
+  if (problem) return fail("AMOUNT_INVALID", problem);
   return submitter.submit(buildSettlementRequest(opened, q, corridor));
 }
 

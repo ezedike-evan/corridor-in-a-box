@@ -3,6 +3,7 @@
 // the fact, so every state transition is both logged and recorded as an immutable
 // audit entry. Both sinks are injected; the engine never reaches for a global.
 
+import type { Money } from "@corridor/types";
 import type { CorridorState } from "./state";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
@@ -30,7 +31,7 @@ export const consoleLogger: Logger = {
 export const silentLogger: Logger = { log() {} };
 
 /** One immutable record of a single state transition. */
-export interface AuditEntry {
+export interface AuditEntry extends LogFields {
   readonly idempotencyKey: string;
   readonly corridorId: string;
   readonly from: CorridorState;
@@ -39,6 +40,10 @@ export interface AuditEntry {
   readonly at: number;
   readonly error?: string;
   readonly routeTrust?: "attested" | "manifest";
+  /** The anchor's SEP-38 fee, in the sell asset. Present on the `settled` entry when the quote carried one. */
+  readonly quoteFee?: Money;
+  /** Stellar network fee charged for the settlement, in stroops (Horizon `fee_charged`). */
+  readonly networkFee?: string;
 }
 
 export interface AuditSink {

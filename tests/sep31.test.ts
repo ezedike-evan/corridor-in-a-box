@@ -201,6 +201,94 @@ describe("SEP-38 quote request shape", () => {
   });
 });
 
+describe("SEP-38 quote fee handling", () => {
+  const endpoints = {
+    transfer_server_sep31: "https://d.example/sep31",
+    quote_server: "https://d.example/sep38",
+  };
+
+  it("parses valid fee when fee asset matches sell asset", async () => {
+    const { fn } = fakeFetch({
+      "POST /sep38/quote": res({
+        id: "q-fee-1",
+        price: "1.0",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        sell_amount: "100",
+        buy_amount: "100",
+        fee: { total: "1.50", asset: "stellar:USDC:GISSUER" },
+      }),
+    });
+    const c = corridor(endpoints);
+    const q = await new Sep31Adapter(c, { fetchImpl: fn }).requestQuote(intent, c);
+    expect(q.ok).toBe(true);
+    if (q.ok) {
+      expect(q.value.fee).toEqual({ asset: "USDC", amount: "1.50" });
+    }
+  });
+
+  it("omits fee when fee total is malformed", async () => {
+    const { fn } = fakeFetch({
+      "POST /sep38/quote": res({
+        id: "q-fee-2",
+        price: "1.0",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        sell_amount: "100",
+        buy_amount: "100",
+        fee: { total: "not-a-number", asset: "stellar:USDC:GISSUER" },
+      }),
+    });
+    const c = corridor(endpoints);
+    const q = await new Sep31Adapter(c, { fetchImpl: fn }).requestQuote(intent, c);
+    expect(q.ok).toBe(true);
+    if (q.ok) {
+      expect(q.value.fee).toBeUndefined();
+    }
+  });
+
+  it.each([
+    ["the same code from a different issuer", "stellar:USDC:GOTHERISSUER"],
+    ["a bare code with no issuer", "USDC"],
+  ])("rejects a fee in %s: it is not the asset being sold", async (_label, feeAsset) => {
+    const { fn } = fakeFetch({
+      "POST /sep38/quote": res({
+        id: "q-fee-asset",
+        price: "1.0",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        sell_amount: "100",
+        buy_amount: "100",
+        fee: { total: "1.00", asset: feeAsset },
+      }),
+    });
+    const c = corridor(endpoints);
+    const q = await new Sep31Adapter(c, { fetchImpl: fn }).requestQuote(intent, c);
+    expect(q.ok).toBe(false);
+    if (!q.ok) {
+      expect(q.error.code).toBe("QUOTE_UNAVAILABLE");
+      expect(q.error.message).toContain("does not match sell asset");
+    }
+  });
+
+  it("rejects quote when fee asset is in a foreign asset", async () => {
+    const { fn } = fakeFetch({
+      "POST /sep38/quote": res({
+        id: "q-fee-3",
+        price: "1.0",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        sell_amount: "100",
+        buy_amount: "100",
+        fee: { total: "1.00", asset: "iso4217:EUR" },
+      }),
+    });
+    const c = corridor(endpoints);
+    const q = await new Sep31Adapter(c, { fetchImpl: fn }).requestQuote(intent, c);
+    expect(q.ok).toBe(false);
+    if (!q.ok) {
+      expect(q.error.code).toBe("QUOTE_UNAVAILABLE");
+      expect(q.error.message).toContain("does not match sell asset");
+    }
+  });
+});
+
 describe("SEP-31 status mapping", () => {
   it("classifies `completed` as settled and nothing else", () => {
     expect(mapSep31Status("completed")).toEqual({

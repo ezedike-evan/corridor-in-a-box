@@ -348,7 +348,12 @@ describe("SEP-38 quotes", () => {
       expires_at: new Date(Date.now() + 60_000).toISOString(),
       sell_amount: "10",
       buy_amount: "8.57",
-      fee: { total: "1.00", asset: "stellar:USDC:GBBD47IF" },
+      // A real SEP-38 server reports the fee in the asset it was asked to sell: the full
+      // `stellar:CODE:ISSUER` id, issuer included.
+      fee: {
+        total: "1.00",
+        asset: `stellar:${CORRIDOR.settlement.bridge_asset}:${CORRIDOR.settlement.asset_issuer}`,
+      },
       ...over,
     });
 

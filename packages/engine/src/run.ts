@@ -12,6 +12,7 @@ import {
   isSettleableAmount,
   ok,
   type CorridorError,
+  type Money,
   type Outcome,
   type PaymentIntent,
 } from "@corridor/types";
@@ -39,10 +40,12 @@ import {
   recover,
   reconcileUntil,
   settle,
+  settleQuoteProblem,
 } from "./verbs";
 import {
   noopMetrics,
   silentLogger,
+  type AuditEntry,
   type AuditSink,
   type Logger,
   type Metrics,
@@ -208,7 +211,10 @@ export async function execute(
   const routeTrust = route.trust;
   const adapter = route.receiving;
 
-  const advance = async (to: CorridorState): Promise<Outcome<void>> => {
+  const advance = async (
+    to: CorridorState,
+    meta?: { quoteFee?: Money; networkFee?: string },
+  ): Promise<Outcome<void>> => {
     if (!canTransition(run.state, to)) {
       return fail("SETTLEMENT_FAILED", `illegal transition ${run.state} -> ${to}`);
     }
@@ -217,7 +223,7 @@ export async function execute(
     run.version += 1;
     trail.push(to);
     await store.put(run);
-    await emitTransition(deps, run, from, now(), undefined, routeTrust);
+    await emitTransition(deps, run, from, now(), undefined, routeTrust, meta);
     return ok(undefined);
   };
 
@@ -372,6 +378,13 @@ export async function execute(
       });
     }
 
+    // The same check settle() makes, done here too so a bad quote dies before the run ever reaches
+    // "verifying" or "settling" (one implementation: settleQuoteProblem in verbs.ts).
+    const settleProblem = settleQuoteProblem(q.value, corridor);
+    if (settleProblem) {
+      return die({ code: "AMOUNT_INVALID", message: settleProblem, retryable: false });
+    }
+
     {
       const t = await advance("verifying");
       if (!t.ok) return die(t.error);
@@ -462,7 +475,10 @@ export async function execute(
     }
     run.stellarTxHash = s.value.stellarTxHash;
     {
-      const t = await advance("settled");
+      const t = await advance("settled", {
+        quoteFee: q.value.fee,
+        networkFee: s.value.feeCharged,
+      });
       if (!t.ok) return die(t.error);
     }
 
@@ -517,16 +533,19 @@ async function emitTransition(
   at: number,
   error?: string,
   routeTrust?: "attested" | "manifest",
+  meta?: { quoteFee?: Money; networkFee?: string },
 ): Promise<void> {
-  const entry = {
+  const entry: AuditEntry = {
     idempotencyKey: run.idempotencyKey,
     corridorId: run.corridorId,
     from,
     to: run.state,
     version: run.version,
     at,
-    error,
+    ...(error && { error }),
     ...(routeTrust && { routeTrust }),
+    ...(meta?.quoteFee && { quoteFee: meta.quoteFee }),
+    ...(meta?.networkFee && { networkFee: meta.networkFee }),
   };
   (deps.logger ?? silentLogger).log(error ? "error" : "info", "corridor.transition", entry);
   const metrics = deps.metrics ?? noopMetrics;
