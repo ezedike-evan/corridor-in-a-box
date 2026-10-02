@@ -17,6 +17,9 @@ export interface StoredRun {
   transactionId?: string;
   quoteId?: string;
   stellarTxHash?: string;
+  depositAddress?: string;
+  memo?: string;
+  memoType?: "text" | "hash" | "id";
   /**
    * Identifier of a refund already requested for this run — the refund leg's
    * own reference, not the settlement's.

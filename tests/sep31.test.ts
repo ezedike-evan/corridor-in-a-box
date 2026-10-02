@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
-import { Sep31Adapter, mapSep31Status, parseRefunds, type Sep10Signer } from "@corridor/sep31";
+import {
+  Sep31Adapter,
+  mapSep31Status,
+  openedTxCheck,
+  parseRefunds,
+  sep31InfoCheck,
+  type ReportedTransactionFields,
+  type Sep10Signer,
+  type Sep31InfoCheckResult,
+} from "@corridor/sep31";
 import type { PaymentIntent } from "@corridor/types";
+import type { GateContext } from "@corridor/engine";
+import type { TransactionStatus } from "@corridor/adapter-kit";
 
 const PASSPHRASE = "Test SDF Network ; September 2015";
 
@@ -534,5 +545,362 @@ describe("refund initiation (deliberately unsupported)", () => {
     }
     // Fail-closed means CLOSED: no bespoke HTTP call dressed up as SEP-31.
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("openedTxCheck gate check (anchor.tx.match)", () => {
+  const DEST = "GDEPOSIT";
+
+  function gateCtx(): GateContext {
+    return {
+      intent,
+      corridor: corridor({ transfer_server_sep31: "https://d.example/sep31" }),
+      quote: {
+        id: "q1",
+        sourceAmount: { asset: "USDC", amount: "10" },
+        destAmount: { asset: "iso4217:ARS", amount: "10000" },
+        price: "1000",
+        expiresAt: Date.now() + 60_000,
+        firm: true,
+      },
+      opened: {
+        transactionId: "tx-1",
+        depositAddress: DEST,
+        memo: "memo-abc-123",
+        memoType: "text",
+      },
+      now: Date.now(),
+      attempt: 1,
+    };
+  }
+
+  type Reported = TransactionStatus & ReportedTransactionFields;
+  function adapterReporting(status: Reported) {
+    return { getTransaction: async () => ({ ok: true as const, value: status }) };
+  }
+
+  const matching: Reported = {
+    status: "pending_sender",
+    settled: false,
+    amount: "10",
+    asset: "USDC",
+    depositAddress: DEST,
+    memo: "memo-abc-123",
+    memoType: "text",
+  };
+
+  it("has the name 'anchor.tx.match'", () => {
+    expect(openedTxCheck(adapterReporting(matching)).name).toBe("anchor.tx.match");
+  });
+
+  it("passes on an exact match", async () => {
+    const result = await openedTxCheck(adapterReporting(matching)).run(gateCtx());
+    expect(result.passed).toBe(true);
+    expect(result.detail).toContain("matches on every field");
+  });
+
+  it('passes when the anchor writes "10.00" for our "10"', async () => {
+    const result = await openedTxCheck(adapterReporting({ ...matching, amount: "10.00" })).run(
+      gateCtx(),
+    );
+    expect(result.passed).toBe(true);
+  });
+
+  it("fails on status pending_receiver", async () => {
+    const result = await openedTxCheck(
+      adapterReporting({ ...matching, status: "pending_receiver" }),
+    ).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_TX_MISMATCH");
+    expect(result.detail).toContain("pending_receiver");
+  });
+
+  it("fails on a different deposit account", async () => {
+    const result = await openedTxCheck(
+      adapterReporting({ ...matching, depositAddress: "GOTHER" }),
+    ).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_TX_MISMATCH");
+    expect(result.detail).toContain("depositAddress");
+  });
+
+  it("fails on a wrong memo without ever logging the full memo", async () => {
+    const result = await openedTxCheck(
+      adapterReporting({ ...matching, memo: "memo-zzz-999" }),
+    ).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_TX_MISMATCH");
+    expect(result.detail).toContain("memo");
+    // Only the type and a 6-char prefix appear — never either full memo.
+    expect(result.detail).not.toContain("memo-abc-123");
+    expect(result.detail).not.toContain("memo-zzz-999");
+  });
+
+  it("fails on a wrong memo type", async () => {
+    const result = await openedTxCheck(
+      adapterReporting({ ...matching, memoType: "hash" }),
+    ).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.detail).toContain("memoType");
+  });
+
+  it("fails on a wrong amount", async () => {
+    const result = await openedTxCheck(adapterReporting({ ...matching, amount: "11" })).run(
+      gateCtx(),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.detail).toContain("amount");
+  });
+
+  it("records an omitted field as unverified without failing", async () => {
+    const { amount: _a, ...rest } = matching;
+    const result = await openedTxCheck(adapterReporting(rest as Reported)).run(gateCtx());
+    expect(result.passed).toBe(true);
+    expect(result.detail).toContain("unverified: amount");
+  });
+
+  it("strict: true fails when a field is omitted", async () => {
+    const { memo: _m, ...rest } = matching;
+    const result = await openedTxCheck(adapterReporting(rest as Reported), {
+      strict: true,
+    }).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_TX_MISMATCH");
+    expect(result.detail).toContain("did not report memo");
+  });
+
+  it("fails closed when the re-read itself fails", async () => {
+    const adapter = {
+      getTransaction: async () => ({
+        ok: false as const,
+        error: { code: "ANCHOR_UNAVAILABLE" as const, message: "boom", retryable: true },
+      }),
+    };
+    const result = await openedTxCheck(adapter).run(gateCtx());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("SETTLEMENT_FAILED");
+  });
+});
+
+describe("SEP-31 getInfo", () => {
+  it("parses a realistic /info body with string amounts", async () => {
+    const infoPayload = {
+      receive: {
+        USDC: {
+          enabled: true,
+          fee_fixed: "0.50",
+          fee_percent: "0.01",
+          min_amount: "1.00",
+          max_amount: "10000.00",
+          sender_sep12_type: "sep31-sender",
+          receiver_sep12_type: "sep31-receiver",
+          fields: {
+            transaction: {
+              account_number: { description: "bank account number" },
+            },
+          },
+        },
+      },
+    };
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn } = fakeFetch({ "GET /sep31/info": res(infoPayload) });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+
+    const outcome = await adapter.getInfo();
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+
+    expect(outcome.value.receive.USDC).toEqual({
+      enabled: true,
+      minAmount: "1.00",
+      maxAmount: "10000.00",
+      feeFixed: "0.50",
+      feePercent: "0.01",
+      senderSep12Type: "sep31-sender",
+      receiverSep12Type: "sep31-receiver",
+      fields: {
+        transaction: {
+          account_number: { description: "bank account number" },
+        },
+      },
+    });
+  });
+
+  it("rejects numeric amounts, keeping them undefined to avoid precision loss", async () => {
+    const infoPayload = {
+      receive: {
+        USDC: {
+          enabled: true,
+          min_amount: 10.5,
+          max_amount: 5000,
+          fee_fixed: 0.25,
+        },
+      },
+    };
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn } = fakeFetch({ "GET /sep31/info": res(infoPayload) });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+
+    const outcome = await adapter.getInfo();
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+
+    expect(outcome.value.receive.USDC?.enabled).toBe(true);
+    expect(outcome.value.receive.USDC?.minAmount).toBeUndefined();
+    expect(outcome.value.receive.USDC?.maxAmount).toBeUndefined();
+    expect(outcome.value.receive.USDC?.feeFixed).toBeUndefined();
+  });
+
+  it("attaches SEP-10 JWT if configured", async () => {
+    const token = jwt(900);
+    const signer: Sep10Signer = {
+      account: "GSIGNER",
+      signChallenge: async (xdr) => `signed(${xdr})`,
+    };
+    const { fn, calls } = fakeFetch({
+      "GET /auth": res({ transaction: "CHALLENGE_XDR", network_passphrase: PASSPHRASE }),
+      "POST /auth": res({ token }),
+      "GET /sep31/info": res({ receive: { USDC: { enabled: true } } }),
+    });
+    const c = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      web_auth: "https://d.example/auth",
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn, sep10: signer });
+
+    const outcome = await adapter.getInfo();
+    expect(outcome.ok).toBe(true);
+
+    const infoCall = calls.find((x) => x.url.includes("/sep31/info"));
+    expect(infoCall?.headers.authorization).toBe(`Bearer ${token}`);
+  });
+});
+
+describe("sep31InfoCheck gate check (sep31.info.asset)", () => {
+  function makeGateContext(c: Corridor, bridgeAsset = "USDC"): GateContext {
+    return {
+      intent,
+      corridor: {
+        ...c,
+        settlement: {
+          ...c.settlement,
+          bridge_asset: bridgeAsset,
+        },
+      },
+      quote: {
+        id: "q1",
+        sourceAmount: { asset: bridgeAsset, amount: "100" },
+        destAmount: { asset: "iso4217:ARS", amount: "10000" },
+        price: "100",
+        expiresAt: Date.now() + 60_000,
+        firm: true,
+      },
+      opened: {
+        transactionId: "tx-1",
+        depositAddress: "GDEPOSIT",
+        memo: "memo123",
+        memoType: "text",
+      },
+      now: Date.now(),
+      attempt: 1,
+    };
+  }
+
+  it("passes against Anchor Platform reference stack fixture and exposes parsed info", async () => {
+    const refStackFixture = {
+      receive: {
+        USDC: {
+          enabled: true,
+          fee_fixed: "0.00",
+          fee_percent: "0.00",
+          min_amount: "1.00",
+          max_amount: "100000.00",
+          sender_sep12_type: "sep31-sender",
+          receiver_sep12_type: "sep31-receiver",
+        },
+      },
+    };
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn } = fakeFetch({ "GET /sep31/info": res(refStackFixture) });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+
+    const check = sep31InfoCheck(adapter);
+    expect(check.name).toBe("sep31.info.asset");
+
+    const result = (await check.run(makeGateContext(c, "USDC"))) as Sep31InfoCheckResult;
+    expect(result.passed).toBe(true);
+    expect(result.detail).toContain('active bridge asset "USDC"');
+    expect(result.info?.receive.USDC?.enabled).toBe(true);
+  });
+
+  it("fails on empty receive with PRESETTLE_ANCHOR_DRIFT", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn } = fakeFetch({ "GET /sep31/info": res({ receive: {} }) });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+
+    const check = sep31InfoCheck(adapter);
+    const result = await check.run(makeGateContext(c, "USDC"));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_ANCHOR_DRIFT");
+    expect(result.detail).toContain("receive list is empty");
+  });
+
+  it("fails when bridge asset is missing with PRESETTLE_ANCHOR_DRIFT", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn } = fakeFetch({
+      "GET /sep31/info": res({ receive: { EURC: { enabled: true } } }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+
+    const check = sep31InfoCheck(adapter);
+    const result = await check.run(makeGateContext(c, "USDC"));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_ANCHOR_DRIFT");
+    expect(result.detail).toContain('does not list bridge asset "USDC"');
+  });
+
+  it("fails when bridge asset enabled is false with PRESETTLE_ANCHOR_DRIFT", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn } = fakeFetch({
+      "GET /sep31/info": res({ receive: { USDC: { enabled: false } } }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+
+    const check = sep31InfoCheck(adapter);
+    const result = await check.run(makeGateContext(c, "USDC"));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_ANCHOR_DRIFT");
+    expect(result.detail).toContain("disabled (enabled: false)");
+  });
+
+  it("fails on HTTP 500 error with PRESETTLE_ANCHOR_DRIFT", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn } = fakeFetch({ "GET /sep31/info": res({}, false, 500) });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+
+    const check = sep31InfoCheck(adapter);
+    const result = await check.run(makeGateContext(c, "USDC"));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_ANCHOR_DRIFT");
+    expect(result.detail).toContain("HTTP 500");
+  });
+
+  it("fails on network error with PRESETTLE_ANCHOR_DRIFT", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const failingFetch = (async () => {
+      throw new Error("connection reset by peer");
+    }) as unknown as typeof fetch;
+    const adapter = new Sep31Adapter(c, { fetchImpl: failingFetch });
+
+    const check = sep31InfoCheck(adapter);
+    const result = await check.run(makeGateContext(c, "USDC"));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_ANCHOR_DRIFT");
+    expect(result.detail).toContain("get-info request failed");
   });
 });

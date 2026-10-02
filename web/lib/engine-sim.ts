@@ -11,6 +11,7 @@ export type CorridorState =
   | "quoted"
   | "compliant"
   | "opened"
+  | "verifying"
   | "settling"
   | "settled"
   | "reconciled"
@@ -102,6 +103,8 @@ export function runPayment(
     return outcome;
   }
   trail.push("opened");
+  // pre-settle gate
+  trail.push("verifying");
   // settle + reconcile
   trail.push("settling");
   trail.push("settled");

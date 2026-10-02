@@ -34,6 +34,12 @@ export interface RefundRequest {
 }
 
 export interface SettlementSubmitter {
+  /**
+   * Check whether a matching settlement payment already exists on-chain before
+   * submitting or re-submitting. Returns the existing ref if found, or undefined
+   * if no matching payment exists.
+   */
+  findExisting?(req: SettlementRequest): Promise<Outcome<SettlementRef | undefined>>;
   submit(req: SettlementRequest): Promise<Outcome<SettlementRef>>;
   /**
    * Reverse a previously-submitted settlement (send the bridge asset back).
@@ -107,11 +113,17 @@ export class UnimplementedSubmitter implements SettlementSubmitter {
 }
 
 /** Test/example submitter: pretends the on-chain payment succeeded. */
-export function createMockSubmitter(opts: { failSubmit?: boolean } = {}): SettlementSubmitter {
+export function createMockSubmitter(
+  opts: { failSubmit?: boolean; existingRef?: SettlementRef } = {},
+): SettlementSubmitter {
   let n = 0;
   const hash = (prefix: string) =>
     `${prefix}${(++n).toString().padStart(64 - prefix.length, "0")}`;
   return {
+    async findExisting(req) {
+      void req;
+      return ok<SettlementRef | undefined>(opts.existingRef);
+    },
     async submit(req) {
       void req;
       if (opts.failSubmit) {

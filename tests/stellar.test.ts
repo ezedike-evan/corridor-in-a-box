@@ -12,11 +12,14 @@ import {
 import {
   AccountInspector,
   balanceCheck,
+  destinationCheck,
   LocalKeypairSigner,
   StellarSep10Signer,
   StellarSettlementSubmitter,
   type AccountFacts,
+  type AccountInspectorServerLike,
   type ExternalSigner,
+  type HorizonPaymentRecordLike,
 } from "@corridor/stellar";
 import type { GateContext, RefundRequest, SettlementRequest } from "@corridor/engine";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
@@ -56,7 +59,9 @@ describe("StellarSep10Signer", () => {
     const signed = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET);
     expect(signed.signatures.length).toBe(1);
     // the attached signature must verify against the signer's key over the tx hash
-    expect(kp.verify(signed.hash(), Buffer.from(signed.signatures[0].signature()))).toBe(true);
+    expect(
+      kp.verify(signed.hash(), Buffer.from(signed.signatures[0].signature.toBytes())),
+    ).toBe(true);
   });
 
   it("works through the ExternalSigner port (KMS-style)", async () => {
@@ -69,7 +74,9 @@ describe("StellarSep10Signer", () => {
     const signer = new StellarSep10Signer(external);
     const signedXdr = await signer.signChallenge(challengeXdr(kp), Networks.TESTNET);
     const signed = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET);
-    expect(kp.verify(signed.hash(), Buffer.from(signed.signatures[0].signature()))).toBe(true);
+    expect(
+      kp.verify(signed.hash(), Buffer.from(signed.signatures[0].signature.toBytes())),
+    ).toBe(true);
   });
 });
 
@@ -707,5 +714,370 @@ describe("balanceCheck gate check (chain.balance)", () => {
       expect(res.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
       expect(res.detail).toContain("minimum reserve 3");
     });
+  });
+});
+
+describe("AccountInspector.paymentsFrom", () => {
+  it("fetches payments and extracts memo and tx info", async () => {
+    const fakePaymentsCall = {
+      forAccount: () => fakePaymentsCall,
+      order: () => fakePaymentsCall,
+      limit: () => fakePaymentsCall,
+      call: async () => ({
+        records: [
+          {
+            id: "pay-1",
+            transaction_hash: "tx-hash-1",
+            from: "GSENDER",
+            to: "GDEST",
+            asset_type: "credit_alphanum4",
+            asset_code: "USDC",
+            asset_issuer: ISSUER,
+            amount: "100.0000000",
+            transaction: async () => ({
+              memo: "test-memo",
+              memo_type: "text",
+              ledger_attr: 1234,
+            }),
+          },
+        ],
+      }),
+    };
+
+    const fakeServer = {
+      loadAccount: async () => ({}),
+      payments: () => fakePaymentsCall,
+    } as unknown as AccountInspectorServerLike;
+
+    const inspector = new AccountInspector({
+      horizonServer: fakeServer,
+    });
+
+    const res = await inspector.paymentsFrom("GSENDER");
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toHaveLength(1);
+      expect(res.value[0].transaction_hash).toBe("tx-hash-1");
+      expect(res.value[0].from).toBe("GSENDER");
+      expect(res.value[0].to).toBe("GDEST");
+      expect(res.value[0].amount).toBe("100.0000000");
+      expect(res.value[0].memo).toBe("test-memo");
+      expect(res.value[0].memo_type).toBe("text");
+      expect(res.value[0].ledger).toBe(1234);
+    }
+  });
+
+  it("returns empty array if payments is not supported or returns empty", async () => {
+    const fakeServer = {
+      loadAccount: async () => ({}),
+    } as unknown as AccountInspectorServerLike;
+    const inspector = new AccountInspector({
+      horizonServer: fakeServer,
+    });
+    const res = await inspector.paymentsFrom("GSENDER");
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toEqual([]);
+    }
+  });
+});
+
+describe("StellarSettlementSubmitter.findExisting", () => {
+  const kp = Keypair.random();
+  const destKp = Keypair.random();
+
+  function createSubmitterWithPayments(payments: HorizonPaymentRecordLike[]) {
+    const fakePaymentsCall = {
+      forAccount: () => fakePaymentsCall,
+      order: () => fakePaymentsCall,
+      limit: () => fakePaymentsCall,
+      call: async () => ({ records: payments }),
+    };
+    const server = {
+      loadAccount: async () => new Account(kp.publicKey(), "100"),
+      submitTransaction: async () => ({}),
+      transactions: () => ({
+        transaction: () => ({ call: async () => ({ successful: true }) }),
+      }),
+      payments: () => fakePaymentsCall,
+    };
+    return new StellarSettlementSubmitter({
+      signerSecret: kp.secret(),
+      horizonUrl: "unused",
+      horizonServer: server as unknown as Horizon.Server,
+    });
+  }
+
+  it("finds an existing settlement with exact text memo and amount match", async () => {
+    const sub = createSubmitterWithPayments([
+      {
+        id: "p1",
+        transaction_hash: "existing-tx-1",
+        from: kp.publicKey(),
+        to: destKp.publicKey(),
+        asset_type: "credit_alphanum4",
+        asset_code: "USDC",
+        asset_issuer: ISSUER,
+        amount: "10.0000000",
+        memo: "memo-abc",
+        memo_type: "text",
+        ledger: 500,
+      },
+    ]);
+
+    const req: SettlementRequest = {
+      to: destKp.publicKey(),
+      amount: { asset: "USDC", amount: "10" },
+      memo: "memo-abc",
+      memoType: "text",
+      corridor: testCorridor(),
+    };
+
+    const res = await sub.findExisting(req);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toBeDefined();
+      expect(res.value?.stellarTxHash).toBe("existing-tx-1");
+      expect(res.value?.ledger).toBe(500);
+    }
+  });
+
+  it("finds an existing settlement with hash memo (normalizing hex vs base64)", async () => {
+    // 32-byte hash
+    const hexHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const base64Hash = Buffer.from(hexHash, "hex").toString("base64");
+
+    const sub = createSubmitterWithPayments([
+      {
+        id: "p1",
+        transaction_hash: "hash-tx-1",
+        from: kp.publicKey(),
+        to: destKp.publicKey(),
+        asset_type: "credit_alphanum4",
+        asset_code: "USDC",
+        asset_issuer: ISSUER,
+        amount: "10.0000000",
+        memo: base64Hash,
+        memo_type: "hash",
+        ledger: 600,
+      },
+    ]);
+
+    const req: SettlementRequest = {
+      to: destKp.publicKey(),
+      amount: { asset: "USDC", amount: "10.00" },
+      memo: hexHash,
+      memoType: "hash",
+      corridor: testCorridor(),
+    };
+
+    const res = await sub.findExisting(req);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value?.stellarTxHash).toBe("hash-tx-1");
+      expect(res.value?.ledger).toBe(600);
+    }
+  });
+
+  it("finds an existing XLM native settlement", async () => {
+    const xlmCorridor = parseCorridor({
+      id: "test-xlm",
+      source: { name: "S", asset: "XLM", endpoints: { home_domain: "s.example" } },
+      dest: {
+        name: "D",
+        asset: "iso4217:ARS",
+        endpoints: {
+          home_domain: "d.example",
+          transfer_server_sep31: "https://d.example/sep31",
+        },
+      },
+      fx: { path: ["ARS", "XLM", "ARS"], who_holds_risk: "receiving_anchor" },
+      compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
+      settlement: { network: "testnet", bridge_asset: "native", asset_issuer: ISSUER },
+      recovery: { max_retries: 2 },
+    });
+    if (!xlmCorridor.ok) throw new Error(`bad corridor: ${JSON.stringify(xlmCorridor.error)}`);
+
+    const sub = createSubmitterWithPayments([
+      {
+        id: "p1",
+        transaction_hash: "xlm-tx-1",
+        from: kp.publicKey(),
+        to: destKp.publicKey(),
+        asset_type: "native",
+        amount: "5.0000000",
+        memo: "12345",
+        memo_type: "id",
+        ledger: 700,
+      },
+    ]);
+
+    const req: SettlementRequest = {
+      to: destKp.publicKey(),
+      amount: { asset: "XLM", amount: "5" },
+      memo: "12345",
+      memoType: "id",
+      corridor: xlmCorridor.value,
+    };
+
+    const res = await sub.findExisting(req);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value?.stellarTxHash).toBe("xlm-tx-1");
+    }
+  });
+
+  it("returns ok(undefined) when destination, amount, or memo does not match", async () => {
+    const sub = createSubmitterWithPayments([
+      {
+        id: "p1",
+        transaction_hash: "tx-diff-memo",
+        from: kp.publicKey(),
+        to: destKp.publicKey(),
+        asset_type: "credit_alphanum4",
+        asset_code: "USDC",
+        asset_issuer: ISSUER,
+        amount: "10.0000000",
+        memo: "different-memo",
+        memo_type: "text",
+      },
+    ]);
+
+    const req: SettlementRequest = {
+      to: destKp.publicKey(),
+      amount: { asset: "USDC", amount: "10" },
+      memo: "expected-memo",
+      memoType: "text",
+      corridor: testCorridor(),
+    };
+
+    const res = await sub.findExisting(req);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toBeUndefined();
+    }
+  });
+});
+
+describe("destinationCheck gate check (chain.destination)", () => {
+  const SIGNER = Keypair.random().publicKey();
+  const DEST = Keypair.random().publicKey();
+
+  function destContext(
+    opts: { bridgeAsset?: string; destination?: string } = {},
+  ): GateContext {
+    const base = testCorridor();
+    const bridge_asset = opts.bridgeAsset ?? "USDC";
+    return {
+      intent: {
+        idempotencyKey: "test-key-1",
+        corridorId: "test",
+        sender: { id: "sender-1" },
+        recipient: { id: "recip-1" },
+        sourceAmount: { asset: bridge_asset, amount: "100" },
+      },
+      corridor: {
+        ...base,
+        settlement: { ...base.settlement, bridge_asset },
+      },
+      quote: {
+        id: "q-test-1",
+        sourceAmount: { asset: bridge_asset, amount: "100" },
+        destAmount: { asset: "iso4217:ARS", amount: "10000" },
+        price: "100",
+        expiresAt: Date.now() + 60_000,
+        firm: true,
+      },
+      opened: {
+        transactionId: "tx-1",
+        depositAddress: opts.destination ?? DEST,
+        memo: "memo123",
+        memoType: "text",
+      },
+      now: Date.now(),
+      attempt: 1,
+    };
+  }
+
+  function destFacts(balances: AccountFacts["balances"], id: string = DEST): AccountFacts {
+    return { id, subentry_count: 0, num_sponsoring: 0, num_sponsored: 0, balances };
+  }
+
+  function mockInspector(facts: AccountFacts | undefined) {
+    return { account: async () => ({ ok: true as const, value: facts }) };
+  }
+
+  const usdcTrustline = (is_authorized: boolean) => ({
+    asset_type: "credit_alphanum4",
+    asset_code: "USDC",
+    asset_issuer: ISSUER,
+    balance: "0.0000000",
+    is_authorized,
+  });
+
+  it("has the name 'chain.destination'", () => {
+    expect(destinationCheck(mockInspector(undefined), SIGNER).name).toBe("chain.destination");
+  });
+
+  it("fails when the destination account does not exist", async () => {
+    const result = await destinationCheck(mockInspector(undefined), SIGNER).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("exists");
+  });
+
+  it("fails when the destination has no trustline for the bridge asset", async () => {
+    const facts = destFacts([{ asset_type: "native", balance: "10.0000000" }]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("no USDC trustline");
+  });
+
+  it("fails when the trustline exists but is not authorized", async () => {
+    const facts = destFacts([usdcTrustline(false)]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("not authorized");
+  });
+
+  it("fails a self-payment before ever touching Horizon", async () => {
+    const inspector = {
+      account: async () => {
+        throw new Error("must not be called for a self-payment");
+      },
+    };
+    const result = await destinationCheck(inspector, SIGNER).run(
+      destContext({ destination: SIGNER }),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("self-payment");
+  });
+
+  it("fails an operator-denylisted destination", async () => {
+    const facts = destFacts([usdcTrustline(true)]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER, {
+      denylist: (g) => g === DEST,
+    }).run(destContext());
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_DESTINATION_UNSAFE");
+    expect(result.detail).toContain("denylist");
+  });
+
+  it("passes native XLM with no trustline", async () => {
+    const facts = destFacts([{ asset_type: "native", balance: "10.0000000" }]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(
+      destContext({ bridgeAsset: "XLM" }),
+    );
+    expect(result.passed).toBe(true);
+    expect(result.detail).toContain("no trustline");
+  });
+
+  it("passes an existing destination with an authorized trustline", async () => {
+    const facts = destFacts([usdcTrustline(true)]);
+    const result = await destinationCheck(mockInspector(facts), SIGNER).run(destContext());
+    expect(result.passed).toBe(true);
   });
 });

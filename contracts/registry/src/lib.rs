@@ -2,9 +2,9 @@
 //! # corridor-registry
 //!
 //! An on-chain, permissionless-to-READ registry of SEP conformance facts about
-//! Stellar anchors: which SEPs a domain actually serves, the hash of the
-//! `stellar.toml` those facts were read from, which conformance probes passed,
-//! and — critically — the ledger at which someone last checked.
+//! Stellar anchors: which SEPs a domain's `stellar.toml` advertises, which
+//! conformance probes it actually passed, the hash of the toml they were read
+//! from, and — critically — the ledger at which someone last checked.
 //!
 //! ## Why this exists
 //!
