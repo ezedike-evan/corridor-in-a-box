@@ -82,12 +82,21 @@ packages/
   manifest/      Zod schema for a corridor + loader
   adapter-kit/   AnchorAdapter port + conformance probes + mock adapter
   sep31/         ONE generic adapter (SEP-10 auth + SEP-12 KYC)
-  stellar/       the ONLY chain-touching package: settlement submitter + SEP-10 signer
+  stellar/       the only money-path package that touches the chain:
+                 settlement submitter + SEP-10 signer
   router/        RouteResolver seam — open interface + static default
   engine/        orchestration: state machine, crash-resume, recovery, audit, metrics
   service/       thin HTTP API over the engine (auth + rate limiting)
   cli/           validate a manifest; print an offline runnability plan
+  probe/         probe an anchor's SEP conformance from its stellar.toml
+  registry/      read conformance attestations from the on-chain registry
+  attester/      submit probe results to the registry via the attester contract
+contracts/       Soroban registry + attester contracts
 \`\`\`
+
+\`stellar/\` is the only package on the money path that touches the chain.
+\`probe/\`, \`registry/\` and \`attester/\` read and write the conformance
+registry; they never move funds.
 
 ## The five verbs
 
@@ -99,9 +108,33 @@ packages/
 | 4 | settle | native Stellar payment of the bridge asset |
 | 5 | reconcile | SEP-31 \`GET /transactions/:id\` |
 
+## The state machine
+
 A persisted state machine drives \`created → quoted → compliant → opened →
-settling → settled → reconciled → completed\`, with \`recovering → refunded / held\`
-for failures. Every transition is logged, audited, and counted.
+settling → settled → reconciled → completed\`. Every transition is logged,
+audited, and counted. The full table, from \`packages/engine/src/state.ts\`:
+
+| State | Possible next states |
+|---|---|
+| \`created\` | \`quoted\`, \`failed\` |
+| \`quoted\` | \`compliant\`, \`recovering\`, \`failed\` |
+| \`compliant\` | \`opened\`, \`recovering\`, \`failed\` |
+| \`opened\` | \`settling\`, \`recovering\`, \`failed\` |
+| \`settling\` | \`settled\`, \`retrying\`, \`recovering\`, \`failed\` |
+| \`retrying\` | \`settling\`, \`recovering\`, \`failed\` |
+| \`settled\` | \`reconciled\`, \`recovering\`, \`failed\` |
+| \`reconciled\` | \`completed\`, \`failed\` |
+| \`recovering\` | \`refund_pending\`, \`refunded\`, \`held\`, \`failed\` |
+| \`refund_pending\` | \`refunded\`, \`held\`, \`failed\` |
+| \`completed\` | terminal |
+| \`refunded\` | terminal |
+| \`held\` | terminal |
+| \`failed\` | terminal |
+
+\`retrying\` is entered only when a settle attempt failed before money moved,
+and is the only state that may re-enter \`settling\`. \`recovering\` and
+\`refund_pending\` can be entered after settlement, so neither can reach
+\`settling\` — a double-spend is unreachable by construction.
 `,
   },
   {
