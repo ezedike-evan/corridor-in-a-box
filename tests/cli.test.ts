@@ -8,12 +8,7 @@ import { describe, expect, it } from "vitest";
 // test a CLI's actual argv/exit-code/stdio contract.
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const TSX = fileURLToPath(
-  new URL(
-    process.platform === "win32" ? "../node_modules/.bin/tsx.cmd" : "../node_modules/.bin/tsx",
-    import.meta.url,
-  ),
-);
+const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
 const CLI = fileURLToPath(new URL("../packages/cli/src/index.ts", import.meta.url));
 
 function run(args: string[]) {
