@@ -111,10 +111,17 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     return true;
   }
 
-  async listByState(state: CorridorState, options: ListRunsOptions = {}): Promise<StoredRun[]> {
+  async listByState(
+    state: CorridorState,
+    options: ListRunsOptions = {},
+  ): Promise<StoredRun[]> {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 1000));
     return [...this.map.values()]
-      .filter((run) => run.state === state && (!options.corridorId || run.corridorId === options.corridorId))
+      .filter(
+        (run) =>
+          run.state === state &&
+          (!options.corridorId || run.corridorId === options.corridorId),
+      )
       .sort((a, b) => a.idempotencyKey.localeCompare(b.idempotencyKey))
       .slice(0, limit)
       .map((run) => ({ ...run }));
@@ -129,7 +136,8 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     if (
       this.resolutions.has(resolution.idempotencyKey) ||
       this.map.get(resolution.idempotencyKey)?.state !== "held"
-    ) return false;
+    )
+      return false;
     this.resolutions.set(resolution.idempotencyKey, { ...resolution });
     return true;
   }

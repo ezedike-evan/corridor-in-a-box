@@ -135,7 +135,12 @@ describe("held run resolution", () => {
     const store = new InMemoryIdempotencyStore();
     await store.put({ idempotencyKey: "held-a", corridorId: "a", state: "held", version: 4 });
     await store.put({ idempotencyKey: "held-b", corridorId: "b", state: "held", version: 2 });
-    await store.put({ idempotencyKey: "done", corridorId: "a", state: "completed", version: 8 });
+    await store.put({
+      idempotencyKey: "done",
+      corridorId: "a",
+      state: "completed",
+      version: 8,
+    });
 
     expect(await store.listByState("held", { corridorId: "a" })).toMatchObject([
       { idempotencyKey: "held-a", state: "held" },
@@ -146,7 +151,12 @@ describe("held run resolution", () => {
   it("records one append-only resolution for a held run only", async () => {
     const store = new InMemoryIdempotencyStore();
     await store.put({ idempotencyKey: "held", corridorId: "a", state: "held", version: 4 });
-    await store.put({ idempotencyKey: "done", corridorId: "a", state: "completed", version: 8 });
+    await store.put({
+      idempotencyKey: "done",
+      corridorId: "a",
+      state: "completed",
+      version: 8,
+    });
     const resolution = {
       idempotencyKey: "held",
       outcome: "refunded-offchain" as const,
@@ -157,7 +167,9 @@ describe("held run resolution", () => {
 
     expect(await store.recordResolution(resolution)).toBe(true);
     expect(await store.recordResolution(resolution)).toBe(false);
-    expect(await store.recordResolution({ ...resolution, idempotencyKey: "done" })).toBe(false);
+    expect(await store.recordResolution({ ...resolution, idempotencyKey: "done" })).toBe(
+      false,
+    );
     expect(await store.getResolution("held")).toEqual(resolution);
     expect((await store.get("held"))?.state).toBe("held");
   });
@@ -346,7 +358,9 @@ describe("refund state round-trips", () => {
       },
     });
     expect(seen[0]).toContain("refund_id");
-    expect(seen.some((sql) => sql.includes("create table if not exists corridor_resolutions"))).toBe(true);
+    expect(
+      seen.some((sql) => sql.includes("create table if not exists corridor_resolutions")),
+    ).toBe(true);
     expect(seen.slice(1).join("\n")).toContain("add column if not exists refund_id");
   });
 });
@@ -358,18 +372,20 @@ describe("PostgresIdempotencyStore", () => {
       async query(text, params = []) {
         captured = { text, params };
         return {
-          rows: [{
-            idempotency_key: "held-1",
-            corridor_id: "corridor-a",
-            state: "held",
-            version: 4,
-            transaction_id: null,
-            quote_id: null,
-            stellar_tx_hash: "tx-hash",
-            refund_id: null,
-            last_error: "needs operator",
-            owner: null,
-          }],
+          rows: [
+            {
+              idempotency_key: "held-1",
+              corridor_id: "corridor-a",
+              state: "held",
+              version: 4,
+              transaction_id: null,
+              quote_id: null,
+              stellar_tx_hash: "tx-hash",
+              refund_id: null,
+              last_error: "needs operator",
+              owner: null,
+            },
+          ] as never,
         };
       },
     };
@@ -386,7 +402,7 @@ describe("PostgresIdempotencyStore", () => {
     const db: Queryable = {
       async query(text) {
         captured = text;
-        return { rows: [{ idempotency_key: "held-1" }] };
+        return { rows: [{ idempotency_key: "held-1" }] as never };
       },
     };
     const store = new PostgresIdempotencyStore(db);

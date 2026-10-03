@@ -10,25 +10,26 @@
 // reduced to one command.
 
 import { liveness, loadCorridor, type Corridor } from "@corridor/manifest";
+import { PostgresIdempotencyStore, migrate } from "@corridor/engine";
 import {
-  PostgresIdempotencyStore,
-  migrate,
-  type ResolutionOutcome,
-  type StoredRun,
-} from "@corridor/engine";
-
-const RESOLUTION_OUTCOMES = new Set<ResolutionOutcome>([
-  "refunded-offchain",
-  "paid-out-manually",
-  "written-off",
-]);
+  RESOLVE_USAGE,
+  listHeldRuns,
+  parseListArgs,
+  parseResolveArgs,
+  resolveHeldRun,
+} from "./runs.js";
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, file] = argv;
-  if (cmd === "runs") return listHeldRuns(argv.slice(1));
-  if (cmd === "resolve") return resolveHeldRun(argv.slice(1));
+  if (cmd === "runs") {
+    const parsed = parseListArgs(argv.slice(1));
+    return parsed ? withStore((store) => listHeldRuns(store, parsed)) : 2;
+  }
+  if (cmd === "resolve") return resolveCommand(argv.slice(1));
   if (!cmd || (cmd !== "validate" && cmd !== "plan")) {
-    console.error("usage: corridor <validate|plan> <file.corridor.yaml> | runs list --state held | resolve <key> --outcome <outcome> --note <text>");
+    console.error(
+      "usage: corridor <validate|plan> <file.corridor.yaml> | runs list --state held | resolve <key> --outcome <outcome> --note <text>",
+    );
     return 2;
   }
   if (!file) {
@@ -52,7 +53,9 @@ async function main(argv: string[]): Promise<number> {
   return 0;
 }
 
-async function openStore(): Promise<{ store: PostgresIdempotencyStore; close: () => Promise<void> } | undefined> {
+async function openStore(): Promise<
+  { store: PostgresIdempotencyStore; close: () => Promise<void> } | undefined
+> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
     console.error("✗ DATABASE_URL is required for corridor run operations");
@@ -64,79 +67,27 @@ async function openStore(): Promise<{ store: PostgresIdempotencyStore; close: ()
   return { store: new PostgresIdempotencyStore(pool), close: () => pool.end() };
 }
 
-function option(args: string[], name: string): string | undefined {
-  const index = args.indexOf(name);
-  return index < 0 ? undefined : args[index + 1];
-}
-
-function formatRun(run: StoredRun): string {
-  return `${run.idempotencyKey}\t${run.corridorId}\t${run.state}\t${run.version}\t${run.stellarTxHash ?? "-"}\t${run.lastError ?? "-"}`;
-}
-
-async function listHeldRuns(args: string[]): Promise<number> {
-  if (args[0] !== "list" || option(args, "--state") !== "held") {
-    console.error("usage: corridor runs list --state held [--limit N] [--corridor ID]");
+async function resolveCommand(args: string[]): Promise<number> {
+  const parsed = parseResolveArgs(args);
+  if (!parsed) {
+    console.error(RESOLVE_USAGE);
     return 2;
   }
-  const limitText = option(args, "--limit");
-  const limit = limitText === undefined ? 100 : Number(limitText);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
-    console.error("✗ --limit must be an integer between 1 and 1000");
-    return 2;
-  }
-  const opened = await openStore();
-  if (!opened) return 1;
-  try {
-    const runs = await opened.store.listByState("held", {
-      limit,
-      corridorId: option(args, "--corridor"),
-    });
-    console.log("idempotency_key\tcorridor_id\tstate\tversion\tstellar_tx_hash\tlast_error");
-    for (const run of runs) console.log(formatRun(run));
-    return 0;
-  } finally {
-    await opened.close();
-  }
-}
-
-async function resolveHeldRun(args: string[]): Promise<number> {
-  const [key] = args;
-  const outcome = option(args, "--outcome") as ResolutionOutcome | undefined;
-  const note = option(args, "--note");
   const resolvedBy = process.env.CORRIDOR_OPERATOR_ID?.trim();
-  if (!key || !outcome || !RESOLUTION_OUTCOMES.has(outcome) || !note?.trim()) {
-    console.error("usage: corridor resolve <key> --outcome <refunded-offchain|paid-out-manually|written-off> --note <text>");
-    return 2;
-  }
   if (!resolvedBy) {
     console.error("✗ CORRIDOR_OPERATOR_ID is required to record who resolved the run");
     return 1;
   }
+  return withStore((store) => resolveHeldRun(store, parsed, resolvedBy));
+}
+
+async function withStore(
+  fn: (store: PostgresIdempotencyStore) => Promise<number>,
+): Promise<number> {
   const opened = await openStore();
   if (!opened) return 1;
   try {
-    const run = await opened.store.get(key);
-    if (!run || run.state !== "held") {
-      console.error("✗ only an existing held run can be resolved; the run state was not changed");
-      return 1;
-    }
-    if (await opened.store.getResolution(key)) {
-      console.error("✗ this held run already has an out-of-band resolution");
-      return 1;
-    }
-    const inserted = await opened.store.recordResolution({
-      idempotencyKey: key,
-      outcome,
-      note: note.trim(),
-      resolvedBy,
-      resolvedAt: Date.now(),
-    });
-    if (!inserted) {
-      console.error("✗ run is not held or another operator already resolved it");
-      return 1;
-    }
-    console.log(`✓ recorded ${outcome} for ${key}; held run retained as an audit record`);
-    return 0;
+    return await fn(opened.store);
   } finally {
     await opened.close();
   }
@@ -188,6 +139,8 @@ function printPlan(c: Corridor): void {
 void main(process.argv.slice(2))
   .then((code) => process.exit(code))
   .catch((error: unknown) => {
-    console.error(`✗ corridor command failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `✗ corridor command failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
     process.exit(1);
   });

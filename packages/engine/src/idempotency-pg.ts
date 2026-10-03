@@ -7,7 +7,12 @@
 // open library doesn't force a driver on consumers — pass your `pg.Pool` (it
 // satisfies this structurally) or any compatible client.
 
-import type { IdempotencyStore, ListRunsOptions, OutOfBandResolution, StoredRun } from "./idempotency";
+import type {
+  IdempotencyStore,
+  ListRunsOptions,
+  OutOfBandResolution,
+  StoredRun,
+} from "./idempotency";
 import type { CorridorState } from "./state";
 
 export interface QueryResult<R = Record<string, unknown>> {
@@ -138,7 +143,10 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
     return row ? toRun(row) : undefined;
   }
 
-  async listByState(state: CorridorState, options: ListRunsOptions = {}): Promise<StoredRun[]> {
+  async listByState(
+    state: CorridorState,
+    options: ListRunsOptions = {},
+  ): Promise<StoredRun[]> {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 1000));
     const params: unknown[] = [state];
     const corridor = options.corridorId ? "and corridor_id = $2" : "";
@@ -188,7 +196,13 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
         )
        on conflict (idempotency_key) do nothing
        returning idempotency_key`,
-      [resolution.idempotencyKey, resolution.outcome, resolution.note, resolution.resolvedBy, resolution.resolvedAt],
+      [
+        resolution.idempotencyKey,
+        resolution.outcome,
+        resolution.note,
+        resolution.resolvedBy,
+        resolution.resolvedAt,
+      ],
     );
     return result.rows.length > 0;
   }
