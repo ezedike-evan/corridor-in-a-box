@@ -24,7 +24,7 @@ const CORRIDOR: Corridor = {
   dest: {
     ...loaded.value.dest,
     endpoints: { ...loaded.value.dest.endpoints, endpoints_verified_at: "1970-01-01" },
-  },
+  } as Corridor["dest"],
   proof: {
     canary_completed_at: "1970-01-01T00:00:00Z",
     stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",

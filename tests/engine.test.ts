@@ -482,7 +482,7 @@ describe("engine pre-settle gate", () => {
       dest: {
         ...corridor().dest,
         endpoints: { ...corridor().dest.endpoints, endpoints_verified_at: undefined },
-      },
+      } as Corridor["dest"],
     };
     const i = intent("public-unverified");
 
