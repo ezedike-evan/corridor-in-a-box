@@ -19,7 +19,7 @@ import type {
   Quote,
   TransactionStatus,
 } from "@corridor/adapter-kit";
-import type { SettlementRef, SettlementRequest, SettlementSubmitter } from "./ports";
+import type { SettlementRef, SettlementRequest, SettlementStrategy } from "./ports";
 import type { Logger, Metrics } from "./observability";
 
 // 1. QUOTE — SEP-38. Get a price and verify the firm-quote window hasn't already
@@ -109,8 +109,16 @@ export function settleQuoteProblem(q: Quote, corridor: Corridor): string | null 
 }
 
 // 3b. SETTLE — the native on-chain payment of the bridge asset to the anchor.
+//     Dispatches to the first strategy whose `kind` matches the deposit
+//     instructions kind on the opened transaction. Today only "stellar_payment"
+//     is issued by the adapters, so the dispatch always routes to
+//     StellarPaymentStrategy. When issue #183 lands and adapters return
+//     additional kinds, add a strategy — no engine changes required.
+//
+//     Unknown kind → non-retryable SETTLEMENT_FAILED so no money moves on an
+//     unhandled path.
 export async function settle(
-  submitter: SettlementSubmitter,
+  strategies: readonly SettlementStrategy[],
   opened: OpenTransaction,
   q: Quote,
   corridor: Corridor,
@@ -118,7 +126,19 @@ export async function settle(
   // Refuse before anything is submitted: never relabel an asset or round an amount silently.
   const problem = settleQuoteProblem(q, corridor);
   if (problem) return fail("AMOUNT_INVALID", problem);
-  return submitter.submit(buildSettlementRequest(opened, q, corridor));
+  // The current OpenTransaction shape has a flat depositAddress field (pre-#183).
+  // We resolve the kind conservatively: if the adapter sets it explicitly we
+  // respect it; otherwise we assume stellar_payment (the only kind today).
+  const kind = (opened as { kind?: string }).kind ?? "stellar_payment";
+  const strategy = strategies.find((s) => s.kind === kind);
+  if (!strategy) {
+    return fail(
+      "SETTLEMENT_FAILED",
+      `no settlement strategy registered for kind "${kind}" — add a SettlementStrategy with kind="${kind}" to EngineDeps.strategies`,
+      { retryable: false },
+    );
+  }
+  return strategy.settle({ opened, quote: q, corridor });
 }
 
 // 4. RECONCILE — match the on-chain leg against the anchor's view of the payout.
