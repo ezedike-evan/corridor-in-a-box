@@ -16,6 +16,20 @@ export {
   type QueryResult,
 } from "./idempotency-pg";
 export {
+  BREAKER_METRICS,
+  DEFAULT_BREAKER_THRESHOLD,
+  InMemoryCorridorHealthStore,
+  MeteredCorridorHealthStore,
+  breakerOutcomeFor,
+  justTripped,
+  type BreakerOutcome,
+  type BreakerRecord,
+  type BreakerState,
+  type CorridorHealthStore,
+  type RecordOutcomeOptions,
+} from "./breaker";
+export { PostgresCorridorHealthStore, CREATE_BREAKERS_TABLE_SQL } from "./breaker-pg";
+export {
   UnimplementedSubmitter,
   createMockSubmitter,
   type SettlementSubmitter,

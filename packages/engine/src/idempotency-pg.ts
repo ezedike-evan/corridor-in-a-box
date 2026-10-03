@@ -9,6 +9,10 @@
 
 import type { IdempotencyStore, StoredRun } from "./idempotency";
 import type { CorridorState } from "./state";
+// A value import, and the DDL for the breaker table lives with the store that
+// uses it rather than being duplicated here. This file does not import
+// breaker-pg's types, so there is no module cycle at runtime.
+import { CREATE_BREAKERS_TABLE_SQL } from "./breaker-pg";
 
 export interface QueryResult<R = Record<string, unknown>> {
   rows: R[];
@@ -60,6 +64,11 @@ const ALTER_TABLE_SQL = [
 export async function migrate(db: Queryable): Promise<void> {
   await db.query(CREATE_TABLE_SQL);
   for (const sql of ALTER_TABLE_SQL) await db.query(sql);
+  // The circuit-breaker table ships from the same entry point on purpose. It is
+  // one more `create table if not exists`, so a deployment that has not run
+  // migrate() since upgrading would get breaker errors on every payment — the
+  // kind of missing-migration failure that is only discovered in production.
+  await db.query(CREATE_BREAKERS_TABLE_SQL);
 }
 
 interface Row {

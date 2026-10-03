@@ -37,7 +37,16 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@corridor/engine": "workspace:*",
     "@corridor/manifest": "workspace:*",
     "tsup": "^8.5.1"
+  },
+  "peerDependencies": {
+    "pg": ">=8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    }
   }
 }

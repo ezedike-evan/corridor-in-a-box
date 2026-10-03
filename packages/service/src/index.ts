@@ -112,6 +112,10 @@ const STATUS_BY_CODE: Record<CorridorErrorCode, number> = {
   PRESETTLE_AMOUNT_OUT_OF_RANGE: 422,
   PRESETTLE_RECEIVER_NOT_ACCEPTED: 403,
   CORRIDOR_UNPROVEN: 422,
+  // The lane halted itself after repeated failures. 503 rather than 409: the
+  // request was well-formed and the same one would be accepted again once the
+  // lane is reset, so this is a dependency being unavailable, not a conflict
+  // the caller can resolve.
   CORRIDOR_HALTED: 503,
 };
 

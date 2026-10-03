@@ -158,11 +158,31 @@ export const ReconcileSchema = z.object({
   stall_polls: z.number().int().nonnegative().optional(),
 });
 
+export const BreakerSchema = z.object({
+  /**
+   * Consecutive lane-level failures after which the corridor halts.
+   *
+   * This is a *lane* circuit breaker, not a per-payment one: it counts whole
+   * runs that failed for settlement/reconcile reasons (see
+   * `breakerOutcomeFor` in @corridor/engine) and ignores failures that never
+   * got the money moving, so a bad quote or a rejected KYC cannot take a lane
+   * down. A successful run clears the count.
+   *
+   * Once it trips, new runs are refused with `CORRIDOR_HALTED` until a human
+   * resets it (`corridor breaker reset <id> --reason "…"`). There is no
+   * automatic half-open: the whole point is that reopening is a decision, not
+   * a timeout.
+   */
+  consecutive_failures: z.number().int().positive().default(3),
+});
+
 export const RecoverySchema = z.object({
   max_retries: z.number().int().nonnegative().default(3),
   timeout_seconds: z.number().int().positive().default(900),
   rollback: z.enum(["refund_sender", "hold", "manual"]).default("refund_sender"),
   reconcile: ReconcileSchema.optional(),
+  /** Omit the whole block to take the defaults (halt after 3 consecutive failures). */
+  breaker: BreakerSchema.default({}),
 });
 
 export const CorridorSchema = z.object({

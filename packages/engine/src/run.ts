@@ -31,6 +31,12 @@ import type {
   SettlementSubmitter,
 } from "./ports";
 import {
+  BREAKER_METRICS,
+  MeteredCorridorHealthStore,
+  breakerOutcomeFor,
+  type CorridorHealthStore,
+} from "./breaker";
+import {
   anchorTerminalStatus,
   backoffMs,
   comply,
@@ -70,6 +76,18 @@ export interface EngineDeps {
   audit?: AuditSink;
   /** Counter/timing sink. Defaults to a no-op. */
   metrics?: Metrics;
+  /**
+   * Per-corridor circuit breaker. Once `recovery.breaker.consecutive_failures`
+   * lane-level failures land in a row, new runs on that corridor are refused
+   * with `CORRIDOR_HALTED` until someone runs
+   * `corridor breaker reset <id> --reason "…"`.
+   *
+   * Omit it and the breaker is simply absent — the engine is unchanged, so this
+   * stays opt-in like every other store. In production this must be the shared
+   * `PostgresCorridorHealthStore`, not the in-memory one: a per-replica count
+   * lets a peer replica keep taking payments on a lane another has halted.
+   */
+  health?: CorridorHealthStore;
   /**
    * Explicit opt-in allowing manifest-trusted routes on a public network without
    * on-chain attestation.
@@ -117,6 +135,29 @@ export async function execute(
   const stallThreshold = rc?.stall_polls ?? deps.stallThreshold ?? 10;
   const metrics = deps.metrics ?? noopMetrics;
   const startedAt = now();
+
+  // Wrap once, here, so every trip and reset is counted even when the embedding
+  // application never met the meter. An already-metered store is left alone so
+  // that an app which wired the meter itself does not double-count.
+  const health = meteredHealth(deps);
+  const breakerOpts = { threshold: corridor.recovery.breaker.consecutive_failures };
+
+  /**
+   * Fold a finished run into the lane's breaker. The run's terminal state and
+   * the error that produced it are the only inputs: whether a failure says
+   * anything about the LANE (rather than about this one request) is decided by
+   * `breakerOutcomeFor`, not here.
+   */
+  const recordOutcome = async (state: CorridorState, e?: CorridorError): Promise<void> => {
+    if (!health) return;
+    const outcome = breakerOutcomeFor(state, e?.code);
+    if (outcome === "neutral") return;
+    await health.recordOutcome(corridor.id, outcome, now(), {
+      ...breakerOpts,
+      // Stored verbatim, so it is exactly what the run's own `lastError` shows.
+      ...(e && { error: `${e.code}: ${e.message}` }),
+    });
+  };
 
   // Time a verb call and emit a `corridor.verb.<name>` histogram sample.
   const timed = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
@@ -170,6 +211,7 @@ export async function execute(
         sleep,
         pollMs,
         stallThreshold,
+        recordOutcome,
       );
     }
     // settling / created / quoted / … : ambiguous (did the payment go out?) or
@@ -189,6 +231,39 @@ export async function execute(
     owner: opts.owner,
   };
   const trail: CorridorState[] = ["created"];
+
+  // --- circuit breaker: refuse NEW work on a halted lane ----------------
+  // Deliberately AFTER the resume path above and BEFORE the idempotency claim.
+  //
+  // After, because a run that already reached `settled` has money on the chain
+  // that this engine still has to reconcile. Blocking its resume would strand
+  // that payment behind a breaker whose whole purpose is to stop *new* money —
+  // the opposite of what §2 of the runbook asks for. The breaker is a gate on
+  // new work, never a gate on recovery.
+  //
+  // Before the claim, so a refused run leaves no row: nothing to reconcile,
+  // nothing to expire, and the caller can retry the identical idempotency key
+  // after the reset and get a real attempt.
+  if (health) {
+    const breaker = await health.get(corridor.id);
+    if (breaker?.state === "open") {
+      metrics.increment(BREAKER_METRICS.refused, { corridor: corridor.id });
+      (deps.logger ?? silentLogger).log("warn", "corridor.halted", {
+        corridor: corridor.id,
+        consecutiveFailures: breaker.consecutiveFailures,
+        trippedAt: breaker.trippedAt,
+        lastError: breaker.lastError,
+      });
+      return fail(
+        "CORRIDOR_HALTED",
+        `corridor ${corridor.id} is halted after ${breaker.consecutiveFailures} consecutive failures` +
+          (breaker.lastError ? ` (last: ${truncate(breaker.lastError, 200)})` : "") +
+          `. This is a deliberate stop, not a payment problem: investigate the lane, then reopen it with` +
+          ` \`corridor breaker reset ${corridor.id} --reason "…"\`.`,
+        { retryable: false },
+      );
+    }
+  }
 
   // Atomically claim the key before doing any work. `get()` above can't be the
   // gate on its own: two concurrent callers can both see "no existing run" and
@@ -229,6 +304,7 @@ export async function execute(
     trail.push("failed");
     await store.put(run);
     await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`, routeTrust);
+    await recordOutcome("failed", e);
     return { ok: false, error: e };
   };
 
@@ -323,7 +399,10 @@ export async function execute(
       const rf = await deps.submitter.refund(req);
       if (!rf.ok) {
         // Couldn't reverse the chain payment — escalate to a manual hold.
-        return holdAndStop(rf.error);
+        // `e`, not `rf.error`, is what the breaker judges: the refund port
+        // refusing is a design invariant, while `e` is the reconcile/settlement
+        // outage that put us here. See LANE_FAILURE_CODES in breaker.ts.
+        return holdAndStop(rf.error, e);
       }
       // Recorded before the state advance that persists it, so the very next
       // write carries the id. Set once and never rewritten — see the coalesce
@@ -333,10 +412,14 @@ export async function execute(
     run.lastError = `${e.code}: ${e.message}`;
     const done = await advance("refunded");
     if (!done.ok) return die(done.error);
+    await recordOutcome("refunded", e);
     return { ok: false, error: e };
   };
 
-  const holdAndStop = async (e: CorridorError): Promise<Err> => {
+  const holdAndStop = async (
+    e: CorridorError,
+    breakerCause: CorridorError = e,
+  ): Promise<Err> => {
     if (run.state !== "recovering") {
       const back = await advance("recovering");
       if (!back.ok) return die(back.error);
@@ -344,6 +427,7 @@ export async function execute(
     run.lastError = `${e.code}: ${e.message}`;
     const held = await advance("held");
     if (!held.ok) return die(held.error);
+    await recordOutcome("held", breakerCause);
     return { ok: false, error: e };
   };
 
@@ -493,6 +577,8 @@ export async function execute(
     const t = await advance("completed");
     if (!t.ok) return die(t.error);
   }
+  // The one outcome that clears a lane's consecutive-failure count.
+  await recordOutcome("completed");
   metrics.timing("corridor.duration", now() - startedAt, { corridor: corridor.id });
   return ok(toResult(run, trail));
 }
@@ -540,8 +626,14 @@ async function emitTransition(
 /**
  * Resume a persisted run that crashed after the money moved. From `settled` we
  * re-poll the anchor (the payment already went out — we must NOT re-settle) and,
- * once confirmed, complete. From `reconciled` we just finish. A failed re-poll is
- * surfaced for ops rather than auto-refunded, since funds are already in flight.
+ * once confirmed, complete. From `reconciled` we just finish. A failed re-poll
+ * is surfaced for ops rather than auto-refunded, since funds are already in flight.
+ *
+ * A resumed run reports its outcome to the breaker too: a reconcile that fails
+ * again here is the same lane-level failure as one that fails live, and a
+ * successful completion is the same evidence that the lane works. This is also
+ * the only path that reaches a terminal state for a run the breaker gate has
+ * already let past — a resumed run is never blocked, by design.
  */
 async function resumeRun(
   existing: StoredRun,
@@ -553,6 +645,7 @@ async function resumeRun(
   sleep: (ms: number) => Promise<void>,
   pollMs: number,
   stallThreshold: number,
+  recordOutcome: (state: CorridorState, e?: CorridorError) => Promise<void>,
 ): Promise<Outcome<RunResult>> {
   const run: StoredRun = { ...existing };
   const trail: CorridorState[] = [run.state];
@@ -596,6 +689,7 @@ async function resumeRun(
       trail.push("failed");
       await store.put(run);
       await emitTransition(deps, run, from, now(), `${r.error.code}: ${r.error.message}`);
+      await recordOutcome("failed", r.error);
       return { ok: false, error: r.error };
     }
     const t = await advance("reconciled");
@@ -604,5 +698,20 @@ async function resumeRun(
 
   const done = await advance("completed");
   if (!done.ok) return done;
+  await recordOutcome("completed");
   return ok(toResult(run, trail));
+}
+
+/** Wrap `deps.health` so breaker events reach `deps.metrics` exactly once. */
+function meteredHealth(deps: EngineDeps): CorridorHealthStore | undefined {
+  if (!deps.health) return undefined;
+  // Already wrapped by the application: return it untouched rather than
+  // double-counting every trip and reset.
+  if (deps.health instanceof MeteredCorridorHealthStore) return deps.health;
+  return new MeteredCorridorHealthStore(deps.health, deps.metrics ?? noopMetrics);
+}
+
+/** Keep a stored `lastError` readable in a one-line refusal message. */
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
