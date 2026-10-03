@@ -29,25 +29,22 @@
 //   AMOUNT=...                    default 10.00
 //   SKIP_DOCTOR=1                 skip the preflight (stack managed elsewhere)
 
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadCorridor } from "@corridor/manifest";
-import type { Corridor } from "@corridor/manifest";
-import { StaticRouteResolver } from "@corridor/router";
-import { Sep31Adapter } from "@corridor/sep31";
-import {
-  LocalKeypairSigner,
-  StellarSep10Signer,
-  StellarSettlementSubmitter,
-} from "@corridor/stellar";
-import {
-  InMemoryAuditLog,
-  InMemoryIdempotencyStore,
-  consoleLogger,
-  execute,
-  type EngineDeps,
-} from "@corridor/engine";
+import { execute } from "@corridor/engine";
 import type { PaymentIntent } from "@corridor/types";
+import {
+  assertAssetQuotable,
+  pinToReferenceAnchor,
+  preflightDoctor,
+  registerSep12Customer,
+  wireCorridorDeps,
+  EXIT_MANIFEST,
+  EXIT_MISSING_ENV,
+  EXIT_REFUSED,
+  EXIT_STACK_UNFIT,
+  EXIT_NOT_COMPLETED,
+} from "../packages/cli/src/wire.js";
 
 const ANCHOR = (process.env.REFERENCE_ANCHOR_URL ?? "http://localhost:8080").replace(
   /\/+$/,
@@ -55,14 +52,6 @@ const ANCHOR = (process.env.REFERENCE_ANCHOR_URL ?? "http://localhost:8080").rep
 );
 const HORIZON = process.env.HORIZON_URL ?? "https://horizon-testnet.stellar.org";
 const AMOUNT = process.env.AMOUNT ?? "10.00";
-
-// Exit codes, so a CI job can tell "the stack was not ready" from "the corridor
-// ran and did not complete".
-const EXIT_MANIFEST = 1;
-const EXIT_MISSING_ENV = 2;
-const EXIT_REFUSED = 3;
-const EXIT_STACK_UNFIT = 4;
-const EXIT_NOT_COMPLETED = 5;
 
 function env(name: string): string {
   const v = process.env[name];
@@ -78,92 +67,6 @@ function env(name: string): string {
 function resolveManifestPath(): string {
   const p = process.env.MANIFEST ?? "corridors/reference.corridor.yaml";
   return p.startsWith("/") ? p : fileURLToPath(new URL(`../${p}`, import.meta.url));
-}
-
-/** Point every leg at the local reference server, whatever the manifest says.
- *  This runner exists to test THAT counterparty; silently driving a payment at
- *  a remote anchor because a manifest was edited is not a failure mode worth
- *  leaving open. */
-function pinToReferenceAnchor(corridor: Corridor): Corridor {
-  const host = ANCHOR.replace(/^https?:\/\//, "");
-  return {
-    ...corridor,
-    dest: {
-      ...corridor.dest,
-      endpoints: {
-        ...corridor.dest.endpoints,
-        home_domain: host,
-        transfer_server_sep31: `${ANCHOR}/sep31`,
-        web_auth: `${ANCHOR}/auth`,
-        kyc_server: `${ANCHOR}/sep12`,
-        quote_server: `${ANCHOR}/sep38`,
-      },
-    },
-  };
-}
-
-/** `reference-anchor.sh doctor`, so "the stack is not up" is a named failure a
- *  second in rather than a SETTLEMENT_TIMEOUT fifteen minutes in. */
-function preflightDoctor(): void {
-  if (process.env.SKIP_DOCTOR === "1") {
-    console.log("• preflight: skipped (SKIP_DOCTOR=1)\n");
-    return;
-  }
-  const script = fileURLToPath(new URL("../scripts/reference-anchor.sh", import.meta.url));
-  const run = spawnSync(script, ["doctor"], { stdio: "inherit" });
-  if (run.error) {
-    console.error(`✗ could not run ${script}: ${run.error.message}`);
-    console.error(
-      `  Start the stack with 'scripts/reference-anchor.sh up', or set SKIP_DOCTOR=1`,
-    );
-    console.error(`  if it is managed elsewhere.`);
-    process.exit(EXIT_STACK_UNFIT);
-  }
-  if (run.status !== 0) {
-    console.error(
-      `\n✗ the reference anchor is not fit to run a corridor (doctor exit ${run.status}).`,
-    );
-    console.error(
-      `  Fix the checks above — 'scripts/reference-anchor.sh up' reseeds the observer`,
-    );
-    console.error(`  cursor, which is the usual culprit.`);
-    process.exit(EXIT_STACK_UNFIT);
-  }
-  console.log();
-}
-
-/** SEP-38 `/info` is the anchor's own statement of which assets it will quote,
- *  as `stellar:CODE:ISSUER`. A bridge asset it does not list fails well after
- *  the quote with nothing pointing at the cause, so name it up front. */
-async function assertAssetQuotable(corridor: Corridor): Promise<void> {
-  const issuer = corridor.settlement.asset_issuer;
-  if (!issuer) return;
-  const code = corridor.settlement.bridge_asset;
-  const want = `stellar:${code}:${issuer}`;
-
-  let body: { assets?: { asset?: string }[] };
-  try {
-    const res = await fetch(`${ANCHOR}/sep38/info`);
-    body = (await res.json()) as { assets?: { asset?: string }[] };
-  } catch (e) {
-    console.error(`✗ could not read ${ANCHOR}/sep38/info: ${String(e)}`);
-    process.exit(EXIT_STACK_UNFIT);
-  }
-
-  const assets = (body.assets ?? []).map((a) => a.asset ?? "");
-  if (assets.includes(want)) return;
-
-  console.error(`✗ ${ANCHOR} does not quote ${want}.`);
-  const sameCode = assets.filter((a) => a.startsWith(`stellar:${code}:`));
-  if (sameCode.length > 0) {
-    console.error(`  It quotes: ${sameCode.join(", ")}`);
-    console.error(`  Set settlement.asset_issuer in the manifest to one of those issuers.`);
-  } else {
-    console.error(
-      `  It quotes no ${code} at all. Available: ${assets.join(", ") || "(none)"}`,
-    );
-  }
-  process.exit(EXIT_REFUSED);
 }
 
 async function main(): Promise<void> {
@@ -184,43 +87,42 @@ async function main(): Promise<void> {
     process.exit(EXIT_REFUSED);
   }
 
-  const corridor = pinToReferenceAnchor(loaded.value);
+  const corridor = pinToReferenceAnchor(loaded.value, ANCHOR);
 
-  preflightDoctor();
-  await assertAssetQuotable(corridor);
+  const doc = preflightDoctor();
+  if (!doc.ok) {
+    if (doc.error) {
+      console.error(`✗ ${doc.error}`);
+    } else {
+      console.error(
+        `\n✗ the reference anchor is not fit to run a corridor (doctor exit ${doc.status}).`,
+      );
+      console.error(
+        `  Fix the checks above — 'scripts/reference-anchor.sh up' reseeds the observer`,
+      );
+      console.error(`  cursor, which is the usual culprit.`);
+    }
+    process.exit(EXIT_STACK_UNFIT);
+  }
 
-  const signer = LocalKeypairSigner.fromSecret(env("CORRIDOR_SIGNER_SECRET"));
-  const adapter = new Sep31Adapter(corridor, { sep10: new StellarSep10Signer(signer) });
-  const audit = new InMemoryAuditLog();
-  const store = new InMemoryIdempotencyStore();
+  const quotable = await assertAssetQuotable(corridor, ANCHOR);
+  if (!quotable.ok) {
+    console.error(`✗ ${quotable.error}`);
+    process.exit(quotable.refused ? EXIT_REFUSED : EXIT_STACK_UNFIT);
+  }
 
-  const deps: EngineDeps = {
-    resolver: new StaticRouteResolver(() => adapter, {
-      trustManifestWithoutAttestation: true,
-    }),
-    submitter: new StellarSettlementSubmitter({ signer, horizonUrl: HORIZON }),
-    idempotency: store,
-    audit,
-    logger: consoleLogger,
-    trustManifestWithoutAttestation: true,
-  };
+  const signerSecret = env("CORRIDOR_SIGNER_SECRET");
+  const wired = wireCorridorDeps(corridor, {
+    signerSecret,
+    horizonUrl: HORIZON,
+  });
+  const { deps, signer, adapter, store, audit } = wired;
 
   // SEP-12 identifies both parties to the receiving anchor. The sending side
   // holds the PII and registers; the engine only ever carries the returned ids.
   const register = async (role: "receiver" | "sender", type: string): Promise<string> => {
     console.log(`registering ${role} (SEP-12)…`);
-    const reg = await adapter.registerCustomer(
-      {
-        first_name: "Alice",
-        last_name: "Example",
-        email_address: `${role}@example.com`,
-        bank_account_number: "12345678901234",
-        bank_number: "021000021",
-        bank_account_type: "checking",
-        clabe_number: "032180000118359719",
-      },
-      { type },
-    );
+    const reg = await registerSep12Customer(adapter, role, type);
     if (!reg.ok) {
       console.error(
         `✗ SEP-12 ${role} registration failed: ${reg.error.code} — ${reg.error.message}`,

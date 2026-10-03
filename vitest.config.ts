@@ -14,6 +14,8 @@ export default defineConfig({
       "@corridor/engine": r("./packages/engine/src/index.ts"),
       "@corridor/stellar": r("./packages/stellar/src/index.ts"),
       "@corridor/service": r("./packages/service/src/index.ts"),
+      "@corridor/cli/wire": r("./packages/cli/src/wire.ts"),
+      "@corridor/cli": r("./packages/cli/src/index.ts"),
     },
   },
   test: { include: ["tests/**/*.test.ts"] },

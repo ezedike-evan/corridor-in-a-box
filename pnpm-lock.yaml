@@ -102,6 +102,30 @@ importers:
 
   packages/cli:
     dependencies:
+      '@corridor/adapter-kit':
+        specifier: workspace:*
+        version: link:../adapter-kit
+      '@corridor/engine':
+        specifier: workspace:*
+        version: link:../engine
+      '@corridor/manifest':
+        specifier: workspace:*
+        version: link:../manifest
+      '@corridor/registry':
+        specifier: workspace:*
+        version: link:../registry
+      '@corridor/router':
+        specifier: workspace:*
+        version: link:../router
+      '@corridor/sep31':
+        specifier: workspace:*
+        version: link:../sep31
+      '@corridor/stellar':
+        specifier: workspace:*
+        version: link:../stellar
+      '@corridor/types':
+        specifier: workspace:*
+        version: link:../types
       yaml:
         specifier: ^2.6.0
         version: 2.9.0
@@ -109,9 +133,6 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
-      '@corridor/manifest':
-        specifier: workspace:*
-        version: link:../manifest
       tsup:
         specifier: ^8.5.1
         version: 8.5.1(postcss@8.5.15)(tsx@4.23.13)(typescript@6.0.3)(yaml@2.9.0)

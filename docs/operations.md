@@ -211,6 +211,33 @@ XLM; this one settles the asset the anchor actually quotes.
 `QUOTE_UNAVAILABLE: quote HTTP 502`. `AMOUNT=1.00` reproduces it; the default of
 `10.00` does not.
 
+### `corridor canary` — single real payment canary CLI command
+
+```bash
+scripts/reference-anchor.sh up
+CORRIDOR_SIGNER_SECRET=S… corridor canary <file.corridor.yaml> --amount 10.00 [--network public]
+```
+
+Drives one full, gated payment through the real stack (`Sep31Adapter`,
+`StellarSettlementSubmitter`, pre-settle gate, `RegistryRouteResolver`) and reports
+whether it reached `completed`.
+
+**Safety guards:**
+
+- **Canary cap**: Amount must not exceed `proof.canary_max_amount` in the corridor manifest (defaults to `10.00` if unspecified).
+- **Liveness requirement**: Corridor liveness must be at least `verified` (refuses `unverified` corridors).
+- **Mainnet guard**: Running against mainnet manifests requires `--network public` to be passed explicitly.
+- **Pre-settle gate**: `balanceCheck` gate validates sender balance and trustlines before funds move on-chain.
+
+**Exit codes** mirror `verify:corridor`:
+
+- `0`: OK (`completed` reached)
+- `1`: Manifest parse/validation error
+- `2`: Missing arguments or missing `CORRIDOR_SIGNER_SECRET`
+- `3`: Refused (mainnet without `--network public`, over canary cap, or unverified liveness)
+- `4`: Stack unfit (`doctor` check failed)
+- `5`: Not completed (payment failed or did not reach `completed`)
+
 ## 2. Recovering a stuck payment
 
 The engine drives recovery automatically per the manifest's `recovery.rollback`

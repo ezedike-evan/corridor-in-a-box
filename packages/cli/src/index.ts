@@ -1,22 +1,106 @@
 #!/usr/bin/env node
-// corridor — a tiny CLI to validate manifests and dry-run the plan offline.
+// corridor — a tiny CLI to validate manifests, dry-run the plan offline,
+// and drive live gated canary payments through the real stack.
 //
 //   corridor validate <file.corridor.yaml>
 //   corridor plan     <file.corridor.yaml>
+//   corridor canary   <file.corridor.yaml> --amount <amount> [--network <public|testnet>]
 //
 // `plan` is the cheap pre-flight: it tells you whether a corridor is actually
 // runnable (does the dest anchor expose SEP-31? a SEP-38 quote server?) before
-// you ever touch the network. This is the off-ramp check from the conversation,
-// reduced to one command.
+// you ever touch the network.
+//
+// `canary` drives one tiny real payment through the full, gated stack:
+// Sep31Adapter + StellarSettlementSubmitter + the default gate + RegistryRouteResolver.
 
 import { liveness, loadCorridor, type Corridor } from "@corridor/manifest";
+import { isSettleableAmount } from "@corridor/types";
+import { executeCanary } from "./wire.js";
 
-function main(argv: string[]): number {
-  const [cmd, file] = argv;
-  if (!cmd || (cmd !== "validate" && cmd !== "plan")) {
-    console.error("usage: corridor <validate|plan> <file.corridor.yaml>");
+async function main(argv: string[]): Promise<number> {
+  const [cmd] = argv;
+  if (!cmd || (cmd !== "validate" && cmd !== "plan" && cmd !== "canary")) {
+    console.error("usage: corridor <validate|plan|canary> <file.corridor.yaml> [options]");
     return 2;
   }
+
+  if (cmd === "canary") {
+    let file: string | undefined;
+    let amount: string | undefined;
+    let network: string | undefined;
+    let skipDoctor = false;
+
+    const rest = argv.slice(1);
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (arg === "--amount") {
+        if (i + 1 >= rest.length || rest[i + 1].startsWith("--")) {
+          console.error("error: --amount requires a value");
+          return 2;
+        }
+        amount = rest[++i];
+      } else if (arg.startsWith("--amount=")) {
+        amount = arg.slice("--amount=".length);
+      } else if (arg === "--network") {
+        if (i + 1 >= rest.length || rest[i + 1].startsWith("--")) {
+          console.error("error: --network requires a value");
+          return 2;
+        }
+        network = rest[++i];
+      } else if (arg.startsWith("--network=")) {
+        network = arg.slice("--network=".length);
+      } else if (arg === "--skip-doctor") {
+        skipDoctor = true;
+      } else if (arg.startsWith("--")) {
+        console.error(`error: unknown option "${arg}"`);
+        return 2;
+      } else {
+        if (!file) {
+          file = arg;
+        } else {
+          console.error(`error: unexpected argument "${arg}"`);
+          return 2;
+        }
+      }
+    }
+
+    if (!file) {
+      console.error(
+        "usage: corridor canary <file.corridor.yaml> --amount <amount> [--network <public|testnet>]",
+      );
+      return 2;
+    }
+
+    if (amount === undefined || amount === "") {
+      console.error("error: --amount <amount> is required for canary");
+      return 2;
+    }
+
+    if (!isSettleableAmount(amount)) {
+      console.error(`error: --amount must be a positive decimal amount (got "${amount}")`);
+      return 2;
+    }
+
+    if (network !== undefined && network !== "public" && network !== "testnet") {
+      console.error(`error: --network must be "public" or "testnet" (got "${network}")`);
+      return 2;
+    }
+
+    const loaded = loadCorridor(file);
+    if (!loaded.ok) {
+      console.error(`✗ ${loaded.error.code}: ${loaded.error.message}`);
+      return 1;
+    }
+
+    const runResult = await executeCanary(loaded.value, {
+      amount,
+      network,
+      skipDoctor,
+    });
+    return runResult.exitCode;
+  }
+
+  const file = argv[1];
   if (!file) {
     console.error(`usage: corridor ${cmd} <file.corridor.yaml>`);
     return 2;
@@ -63,9 +147,7 @@ function printPlan(c: Corridor): void {
   line();
 
   // Liveness comes from @corridor/manifest so this command and the web dashboard
-  // can never describe the same corridor differently. Note the three states: a
-  // lane whose endpoints exist but have never been checked reports UNVERIFIED,
-  // not runnable — the presence of a URL is not evidence the anchor is real.
+  // can never describe the same corridor differently.
   const live = liveness(c);
 
   if (live.state === "proven" && live.proof) {
@@ -107,4 +189,11 @@ function printPlan(c: Corridor): void {
   }
 }
 
-process.exit(main(process.argv.slice(2)));
+main(process.argv.slice(2))
+  .then((code) => {
+    process.exit(code);
+  })
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });

@@ -23,7 +23,7 @@ describe("corridor CLI", () => {
   it("prints usage and exits 2 with no args", () => {
     const r = run([]);
     expect(r.status).toBe(2);
-    expect(r.stderr).toContain("usage: corridor <validate|plan>");
+    expect(r.stderr).toContain("usage: corridor <validate|plan|canary>");
   });
 
   it("exits 2 on an unknown subcommand", () => {
@@ -124,5 +124,83 @@ describe("corridor CLI", () => {
   it("plan: prints the status_note when present", () => {
     const r = run(["plan", "corridors/ng-cn.corridor.yaml"]);
     expect(r.stdout).toContain("PENDING");
+  });
+
+  describe("canary subcommand", () => {
+    it("prints usage and exits 2 when the file arg is missing", () => {
+      const r = run(["canary"]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("usage: corridor canary");
+    });
+
+    it("argument validation: exits 2 when --amount is missing", () => {
+      const r = run(["canary", "corridors/reference.corridor.yaml"]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("--amount <amount> is required");
+    });
+
+    it("argument validation: exits 2 when --amount has no value", () => {
+      const r = run(["canary", "corridors/reference.corridor.yaml", "--amount"]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("--amount requires a value");
+    });
+
+    it("argument validation: exits 2 when --amount is non-positive or malformed", () => {
+      const r1 = run(["canary", "corridors/reference.corridor.yaml", "--amount", "abc"]);
+      expect(r1.status).toBe(2);
+      expect(r1.stderr).toContain("positive decimal amount");
+
+      const r2 = run(["canary", "corridors/reference.corridor.yaml", "--amount", "-1.00"]);
+      expect(r2.status).toBe(2);
+      expect(r2.stderr).toContain("positive decimal amount");
+
+      const r3 = run(["canary", "corridors/reference.corridor.yaml", "--amount", "0"]);
+      expect(r3.status).toBe(2);
+      expect(r3.stderr).toContain("positive decimal amount");
+    });
+
+    it("argument validation: exits 2 when --network is invalid", () => {
+      const r = run([
+        "canary",
+        "corridors/reference.corridor.yaml",
+        "--amount",
+        "1.00",
+        "--network",
+        "regtest",
+      ]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('--network must be "public" or "testnet"');
+    });
+
+    it("mainnet refusal without flag: exits 3 when --network public is omitted", () => {
+      const r = run(["canary", "corridors/ng-cowrie.corridor.yaml", "--amount", "1.00"]);
+      expect(r.status).toBe(3);
+      expect(r.stderr).toContain("settles on MAINNET");
+      expect(r.stderr).toContain("Pass --network public explicitly");
+    });
+
+    it("over-cap refusal: exits 3 when amount exceeds default canary cap", () => {
+      const r = run(["canary", "tests/fixtures/verified.corridor.yaml", "--amount", "25.00"]);
+      expect(r.status).toBe(3);
+      expect(r.stderr).toContain("exceeds canary cap");
+    });
+
+    it("over-cap refusal: exits 3 when amount exceeds proof.canary_max_amount", () => {
+      const r = run([
+        "canary",
+        "tests/fixtures/canary-capped.corridor.yaml",
+        "--amount",
+        "6.00",
+      ]);
+      expect(r.status).toBe(3);
+      expect(r.stderr).toContain('exceeds canary cap "5.00"');
+    });
+
+    it("liveness refusal: exits 3 when corridor endpoints are UNVERIFIED", () => {
+      const r = run(["canary", "corridors/reference.corridor.yaml", "--amount", "1.00"]);
+      expect(r.status).toBe(3);
+      expect(r.stderr).toContain("liveness is UNVERIFIED");
+      expect(r.stderr).toContain("must be VERIFIED to run canary");
+    });
   });
 });
