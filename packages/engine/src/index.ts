@@ -7,11 +7,15 @@ export {
   hasRequestedRefund,
   type IdempotencyStore,
   type StoredRun,
+  type ResolutionOutcome,
+  type OutOfBandResolution,
+  type ListRunsOptions,
 } from "./idempotency";
 export {
   PostgresIdempotencyStore,
   migrate,
   CREATE_TABLE_SQL,
+  CREATE_RESOLUTIONS_TABLE_SQL,
   type Queryable,
   type QueryResult,
 } from "./idempotency-pg";

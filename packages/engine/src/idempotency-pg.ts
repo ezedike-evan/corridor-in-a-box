@@ -7,7 +7,12 @@
 // open library doesn't force a driver on consumers — pass your `pg.Pool` (it
 // satisfies this structurally) or any compatible client.
 
-import type { IdempotencyStore, StoredRun } from "./idempotency";
+import type {
+  IdempotencyStore,
+  ListRunsOptions,
+  OutOfBandResolution,
+  StoredRun,
+} from "./idempotency";
 import type { CorridorState } from "./state";
 
 export interface QueryResult<R = Record<string, unknown>> {
@@ -40,6 +45,15 @@ create table if not exists corridor_runs (
   updated_at      timestamptz not null default now()
 );`;
 
+export const CREATE_RESOLUTIONS_TABLE_SQL = `
+create table if not exists corridor_resolutions (
+  idempotency_key text primary key references corridor_runs(idempotency_key),
+  outcome         text not null check (outcome in ('refunded-offchain', 'paid-out-manually', 'written-off')),
+  note            text not null,
+  resolved_by     text not null,
+  resolved_at     timestamptz not null
+);`;
+
 /** Additive migrations for tables created by an earlier version. `add column if
  *  not exists` is a no-op on a fresh table and the upgrade path on an existing
  *  one — without this, a deployment that predates run ownership would keep
@@ -59,6 +73,7 @@ const ALTER_TABLE_SQL = [
 
 export async function migrate(db: Queryable): Promise<void> {
   await db.query(CREATE_TABLE_SQL);
+  await db.query(CREATE_RESOLUTIONS_TABLE_SQL);
   for (const sql of ALTER_TABLE_SQL) await db.query(sql);
 }
 
@@ -145,6 +160,70 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
     );
     const row = res.rows[0];
     return row ? toRun(row) : undefined;
+  }
+
+  async listByState(
+    state: CorridorState,
+    options: ListRunsOptions = {},
+  ): Promise<StoredRun[]> {
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 1000));
+    const params: unknown[] = [state];
+    const corridor = options.corridorId ? "and corridor_id = $2" : "";
+    if (options.corridorId) params.push(options.corridorId);
+    params.push(limit);
+    const limitParam = `$${params.length}`;
+    const result = await this.db.query<Row>(
+      `select idempotency_key, corridor_id, state, version, transaction_id,
+              quote_id, stellar_tx_hash, refund_id, last_error, owner
+         from corridor_runs where state = $1 ${corridor}
+        order by updated_at desc, idempotency_key asc limit ${limitParam}`,
+      params,
+    );
+    return result.rows.map(toRun);
+  }
+
+  async getResolution(key: string): Promise<OutOfBandResolution | undefined> {
+    const result = await this.db.query<{
+      idempotency_key: string;
+      outcome: OutOfBandResolution["outcome"];
+      note: string;
+      resolved_by: string;
+      resolved_at: Date | string;
+    }>(
+      `select idempotency_key, outcome, note, resolved_by, resolved_at
+         from corridor_resolutions where idempotency_key = $1`,
+      [key],
+    );
+    const row = result.rows[0];
+    return row
+      ? {
+          idempotencyKey: row.idempotency_key,
+          outcome: row.outcome,
+          note: row.note,
+          resolvedBy: row.resolved_by,
+          resolvedAt: new Date(row.resolved_at).getTime(),
+        }
+      : undefined;
+  }
+
+  async recordResolution(resolution: OutOfBandResolution): Promise<boolean> {
+    const result = await this.db.query<{ idempotency_key: string }>(
+      `insert into corridor_resolutions (idempotency_key, outcome, note, resolved_by, resolved_at)
+       select $1, $2, $3, $4, to_timestamp($5 / 1000.0)
+        where exists (
+          select 1 from corridor_runs where idempotency_key = $1 and state = 'held'
+        )
+       on conflict (idempotency_key) do nothing
+       returning idempotency_key`,
+      [
+        resolution.idempotencyKey,
+        resolution.outcome,
+        resolution.note,
+        resolution.resolvedBy,
+        resolution.resolvedAt,
+      ],
+    );
+    return result.rows.length > 0;
   }
 
   /**

@@ -46,6 +46,21 @@ export interface StoredRun {
   readonly owner?: string;
 }
 
+export type ResolutionOutcome = "refunded-offchain" | "paid-out-manually" | "written-off";
+
+export interface OutOfBandResolution {
+  readonly idempotencyKey: string;
+  readonly outcome: ResolutionOutcome;
+  readonly note: string;
+  readonly resolvedBy: string;
+  readonly resolvedAt: number;
+}
+
+export interface ListRunsOptions {
+  readonly limit?: number;
+  readonly corridorId?: string;
+}
+
 /**
  * True when a refund has already been requested for this run.
  *
@@ -73,10 +88,14 @@ export interface IdempotencyStore {
    * `create()` does.
    */
   create(run: StoredRun): Promise<boolean>;
+  listByState(state: CorridorState, options?: ListRunsOptions): Promise<StoredRun[]>;
+  getResolution(key: string): Promise<OutOfBandResolution | undefined>;
+  recordResolution(resolution: OutOfBandResolution): Promise<boolean>;
 }
 
 export class InMemoryIdempotencyStore implements IdempotencyStore {
   private readonly map = new Map<string, StoredRun>();
+  private readonly resolutions = new Map<string, OutOfBandResolution>();
 
   async get(key: string): Promise<StoredRun | undefined> {
     const r = this.map.get(key);
@@ -92,6 +111,37 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
   async create(run: StoredRun): Promise<boolean> {
     if (this.map.has(run.idempotencyKey)) return false;
     this.map.set(run.idempotencyKey, { ...run });
+    return true;
+  }
+
+  async listByState(
+    state: CorridorState,
+    options: ListRunsOptions = {},
+  ): Promise<StoredRun[]> {
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 1000));
+    return [...this.map.values()]
+      .filter(
+        (run) =>
+          run.state === state &&
+          (!options.corridorId || run.corridorId === options.corridorId),
+      )
+      .sort((a, b) => a.idempotencyKey.localeCompare(b.idempotencyKey))
+      .slice(0, limit)
+      .map((run) => ({ ...run }));
+  }
+
+  async getResolution(key: string): Promise<OutOfBandResolution | undefined> {
+    const resolution = this.resolutions.get(key);
+    return resolution ? { ...resolution } : undefined;
+  }
+
+  async recordResolution(resolution: OutOfBandResolution): Promise<boolean> {
+    if (
+      this.resolutions.has(resolution.idempotencyKey) ||
+      this.map.get(resolution.idempotencyKey)?.state !== "held"
+    )
+      return false;
+    this.resolutions.set(resolution.idempotencyKey, { ...resolution });
     return true;
   }
 }
