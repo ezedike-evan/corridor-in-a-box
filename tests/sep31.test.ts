@@ -66,6 +66,7 @@ function fakeFetch(routes: Record<string, FakeResponse>) {
 function corridor(
   endpoints: Record<string, string>,
   settlement: Record<string, string> = {},
+  limits?: { min_amount?: string; max_amount?: string },
 ): Corridor {
   const r = parseCorridor({
     id: "test",
@@ -79,6 +80,7 @@ function corridor(
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER", ...settlement },
     recovery: {},
+    limits,
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;

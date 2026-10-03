@@ -150,6 +150,19 @@ export async function execute(
     }
   }
 
+  // Per-corridor floor.
+  const min = corridor.limits?.min_amount;
+  if (min) {
+    const cmp = compareAmounts(intent.sourceAmount.amount, min);
+    if (!cmp.ok) return cmp;
+    if (cmp.value < 0) {
+      return fail(
+        "AMOUNT_INVALID",
+        `sourceAmount "${intent.sourceAmount.amount}" is below corridor ${corridor.id} min_amount ${min}`,
+      );
+    }
+  }
+
   // --- idempotency gate + crash resume ---------------------------------
   // A persisted run lets a crashed process pick up where it left off. We only
   // auto-resume from states where resuming is provably safe — never from a state

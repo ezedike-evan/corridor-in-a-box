@@ -146,6 +146,11 @@ export const LimitsSchema = z.object({
     .string()
     .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
     .optional(),
+  /** Smallest single payment this corridor will accept. Omit for no floor. */
+  min_amount: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
+    .optional(),
 });
 
 /** How patiently this corridor polls the receiving anchor after settling. Both
