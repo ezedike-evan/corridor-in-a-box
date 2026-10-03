@@ -26,6 +26,7 @@ source:
 dest:
   name: Mexico Off-Ramp (example — not a real anchor)
   asset: "iso4217:MXN"
+  protocol: sep31
   endpoints:
     home_domain: anchor.example.mx # ← FICTIONAL. Replace with a real anchor home domain.
     transfer_server_sep31: https://anchor.example.mx/sep31

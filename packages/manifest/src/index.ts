@@ -11,10 +11,17 @@
 import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { ok, fail, type Outcome } from "@corridor/types";
+import { fail, type CorridorError } from "@corridor/types";
 
-/** SEP endpoints an anchor exposes. Only home_domain is mandatory; the rest are
- *  discovered from its stellar.toml in practice, but may be pinned here. */
+// Shared verified-at schema to avoid repetition.
+const endpointsVerifiedAtSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "expected an ISO date, YYYY-MM-DD")
+  .optional();
+
+/** SEP-31 endpoints schema (DIRECT_PAYMENT_SERVER and friends).
+ *  Only home_domain is mandatory; the rest are discovered from the anchor's
+ *  stellar.toml in practice, but may be pinned here. */
 export const AnchorEndpointsSchema = z.object({
   home_domain: z.string().min(1),
   /** SEP-31 DIRECT_PAYMENT_SERVER */
@@ -36,12 +43,49 @@ export const AnchorEndpointsSchema = z.object({
    * will report a corridor as verified. Leave it unset until you have actually
    * looked. Never set it speculatively.
    */
-  endpoints_verified_at: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, "expected an ISO date, YYYY-MM-DD")
-    .optional(),
+  endpoints_verified_at: endpointsVerifiedAtSchema,
 });
 
+/** Backward-compat alias — SEP-31 endpoints are the only shape currently in use. */
+export const Sep31EndpointsSchema = AnchorEndpointsSchema;
+
+/**
+ * Destination anchor schema with explicit protocol discriminator.
+ *
+ * The `protocol` field declares how the destination anchor is reached:
+ * - `"sep31"` — standard SEP-31 DIRECT_PAYMENT_SERVER anchor.
+ *
+ * Manifests that omit `protocol` default to `"sep31"` for backward
+ * compatibility (legacy flat endpoint shape). New manifests must declare
+ * `protocol: sep31` explicitly to suppress a deprecation warning.
+ */
+export const DestAnchorSchema = z.preprocess(
+  (raw: unknown) => {
+    if (typeof raw !== "object" || raw === null) return raw;
+    const obj = raw as Record<string, unknown>;
+    // Backward compat: manifests without protocol default to sep31.
+    if (!("protocol" in obj)) {
+      return { protocol: "sep31", ...obj, _legacyProtocol: true };
+    }
+    return obj;
+  },
+  z.object({
+    name: z.string().min(1),
+    /** Asset this anchor deals in at this leg, e.g. "iso4217:NGN". */
+    asset: z.string().min(1),
+    /**
+     * How the destination anchor is reached. Must be "sep31" (the only
+     * protocol supported today). Omitting `protocol` is deprecated — set it
+     * explicitly to suppress the deprecation warning emitted by parseCorridor.
+     */
+    protocol: z.literal("sep31"),
+    endpoints: AnchorEndpointsSchema,
+    /** Internal marker: true when protocol was defaulted (not explicitly set). */
+    _legacyProtocol: z.boolean().optional(),
+  }),
+);
+
+/** Source anchor schema (source-side protocol is unversioned/thin for now). */
 export const AnchorSchema = z.object({
   name: z.string().min(1),
   endpoints: AnchorEndpointsSchema,
@@ -99,6 +143,8 @@ export const SourceAnchorSchema = z.preprocess(
       : raw,
   z.union([PrefundedSourceSchema, Sep6SourceSchema, Sep24SourceSchema, CustomSourceSchema]),
 );
+export type DestProtocol = "sep31";
+export type AnchorConfig = z.infer<typeof DestAnchorSchema>;
 
 export const FxSchema = z.object({
   /** The conversion path, in order. e.g. ["NGN","USDC","ARS"]. >= 2 hops. */
@@ -207,7 +253,8 @@ export const CorridorSchema = z.object({
   /** Human note. Use it to record liveness, e.g. "pending: no RMB SEP-31 anchor". */
   status_note: z.string().optional(),
   source: SourceAnchorSchema,
-  dest: AnchorSchema,
+  /** Destination anchor. Must declare `protocol: sep31` explicitly (omitting is deprecated). */
+  dest: DestAnchorSchema,
   fx: FxSchema,
   compliance: ComplianceSchema,
   settlement: SettlementSchema,
@@ -217,21 +264,53 @@ export const CorridorSchema = z.object({
 });
 
 export type Corridor = z.infer<typeof CorridorSchema>;
-export type AnchorConfig = z.infer<typeof AnchorSchema>;
 export type SourceAnchorConfig = z.infer<typeof SourceAnchorSchema>;
 export type Proof = z.infer<typeof ProofSchema>;
 
-/** Parse + validate a corridor manifest from an object already in memory. */
-export function parseCorridor(raw: unknown): Outcome<Corridor> {
+/**
+ * Result of `parseCorridor` / `loadCorridor`.
+ * On success, `warnings` carries any deprecation notices (currently: missing
+ * `dest.protocol`, which defaults to `"sep31"` for backward compat).
+ */
+export type ParseCorridorResult =
+  { ok: true; value: Corridor; warnings: string[] } | { ok: false; error: CorridorError };
+
+/** Parse + validate a corridor manifest from an object already in memory.
+ *
+ * Returns a `ParseCorridorResult` — on success, check `.warnings` for
+ * deprecation notices (e.g. missing explicit `dest.protocol`).
+ */
+export function parseCorridor(raw: unknown): ParseCorridorResult {
+  const warnings: string[] = [];
+
+  // Detect missing dest.protocol before Zod fills the default, so we can warn.
+  if (typeof raw === "object" && raw !== null && "dest" in raw) {
+    const dest = (raw as Record<string, unknown>).dest;
+    if (typeof dest === "object" && dest !== null && !("protocol" in dest)) {
+      warnings.push(
+        "dest.protocol is not set — defaulting to 'sep31'. " +
+          "Set `protocol: sep31` explicitly under dest: to silence this warning.",
+      );
+    }
+  }
+
   const parsed = CorridorSchema.safeParse(raw);
   if (!parsed.success) {
     return fail("MANIFEST_INVALID", formatZodError(parsed.error), { cause: parsed.error });
   }
-  return ok(parsed.data);
+
+  // Strip the internal _legacyProtocol marker before returning the clean value.
+  const value = parsed.data;
+  if (value.dest._legacyProtocol) {
+    const { _legacyProtocol: _, ...cleanDest } = value.dest;
+    return { ok: true, value: { ...value, dest: cleanDest as typeof value.dest }, warnings };
+  }
+
+  return { ok: true, value, warnings };
 }
 
 /** Read + validate a *.corridor.yaml file from disk. */
-export function loadCorridor(path: string): Outcome<Corridor> {
+export function loadCorridor(path: string): ParseCorridorResult {
   let raw: unknown;
   try {
     raw = parseYaml(readFileSync(path, "utf8"));
