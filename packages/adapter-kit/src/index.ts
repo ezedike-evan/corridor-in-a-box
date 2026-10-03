@@ -120,6 +120,21 @@ export interface TransactionStatus {
    * than "said nothing".
    */
   readonly refunds?: RefundInfo;
+  /**
+   * The anchor's own record of what it expects to receive, read back off the
+   * transaction (SEP-31 `amount_in` / `amount_in_asset`, `stellar_account_id`,
+   * `stellar_memo`, `stellar_memo_type`).
+   *
+   * These exist so a caller can cross-check the opened transaction against the
+   * payment it is about to submit before any money moves. Each is independent
+   * and optional: absent whenever the anchor omits it or reports something that
+   * cannot be read — never a guess. An adapter that cannot see them leaves them
+   * all undefined.
+   */
+  readonly amountIn?: Money;
+  readonly depositAddress?: string;
+  readonly memo?: string;
+  readonly memoType?: "text" | "hash" | "id";
 }
 
 /**
@@ -237,6 +252,12 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
   const name = opts.name ?? "mock-anchor";
   const price = opts.price ?? "1.00";
   let counter = 0;
+  // What each opened transaction was told to expect, so getTransaction can
+  // report it back the way a real anchor's record would.
+  const opened = new Map<
+    string,
+    Pick<TransactionStatus, "amountIn" | "depositAddress" | "memo" | "memoType">
+  >();
   return {
     name,
     async requestQuote(intent) {
@@ -253,26 +274,36 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
     async ensureCompliance() {
       return ok<KycResult>({ status: opts.kyc ?? "accepted", customerId: "cust_mock" });
     },
-    async openTransaction() {
-      return ok<OpenTransaction>({
+    async openTransaction(_intent, quote) {
+      const tx: OpenTransaction = {
         transactionId: `tx_${++counter}`,
         depositAddress: "GMOCK000000000000000000000000000000000000000000000000",
         memo: "mock-memo",
+      };
+      opened.set(tx.transactionId, {
+        amountIn: quote.sourceAmount,
+        depositAddress: tx.depositAddress,
+        memo: tx.memo,
+        memoType: tx.memoType,
       });
+      return ok(tx);
     },
-    async getTransaction() {
+    async getTransaction(transactionId) {
+      const expected = opened.get(transactionId);
       if (opts.terminalFailure) {
         return ok<TransactionStatus>({
           status: "error",
           settled: false,
           terminalFailure: true,
           refunds: opts.refundStatus,
+          ...expected,
         });
       }
       return ok<TransactionStatus>({
         status: opts.settled === false ? "pending_receiver" : "completed",
         settled: opts.settled !== false,
         refunds: opts.refundStatus,
+        ...expected,
       });
     },
     async requestRefund(transactionId, amount, reason) {

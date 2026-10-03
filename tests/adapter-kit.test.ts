@@ -109,6 +109,46 @@ describe("createMockAdapter", () => {
     expect(r.ok && r.value).toEqual({ status: "pending_receiver", settled: false });
   });
 
+  it("getTransaction: reports back what an opened transaction expects", async () => {
+    const adapter = createMockAdapter();
+    const q = await adapter.requestQuote(intent, corridor());
+    if (!q.ok) throw new Error("expected quote to succeed");
+    const tx = await adapter.openTransaction(intent, q.value, corridor());
+    if (!tx.ok) throw new Error("expected open to succeed");
+
+    const r = await adapter.getTransaction(tx.value.transactionId);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.amountIn).toEqual(q.value.sourceAmount);
+    expect(r.value.depositAddress).toBe(tx.value.depositAddress);
+    expect(r.value.memo).toBe(tx.value.memo);
+    expect(r.value.memoType).toBe(tx.value.memoType);
+    // Classification is unchanged by the extra fields.
+    expect(r.value.status).toBe("completed");
+    expect(r.value.settled).toBe(true);
+  });
+
+  it("getTransaction: carries the opened fields on a terminal failure too", async () => {
+    const adapter = createMockAdapter({ terminalFailure: true });
+    const q = await adapter.requestQuote(intent, corridor());
+    if (!q.ok) throw new Error("expected quote to succeed");
+    const tx = await adapter.openTransaction(intent, q.value, corridor());
+    if (!tx.ok) throw new Error("expected open to succeed");
+
+    const r = await adapter.getTransaction(tx.value.transactionId);
+    expect(r.ok && r.value.terminalFailure).toBe(true);
+    expect(r.ok && r.value.depositAddress).toBe(tx.value.depositAddress);
+  });
+
+  it("getTransaction: leaves the fields absent for a transaction never opened", async () => {
+    const r = await createMockAdapter().getTransaction("tx_unknown");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.amountIn).toBeUndefined();
+    expect(r.value.depositAddress).toBeUndefined();
+    expect(r.value.memo).toBeUndefined();
+  });
+
   it("getTransaction: includes refund details when configured", async () => {
     const refundStatus = {
       amountRefunded: { asset: "USDC", amount: "100.00" },

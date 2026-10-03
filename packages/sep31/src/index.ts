@@ -154,6 +154,24 @@ function amountString(v: unknown): string | undefined {
   return typeof v === "string" && isValidAmount(v.trim()) ? v.trim() : undefined;
 }
 
+/** A non-empty string, or undefined if the anchor sent anything else. */
+function nonEmptyString(v: unknown): string | undefined {
+  return typeof v === "string" && v ? v : undefined;
+}
+
+/**
+ * SEP-31's `stellar_memo_type`, case-insensitively, or undefined when absent or
+ * not one of the three memo encodings Stellar supports. Never defaulted to
+ * "text" here: a hash memo encoded as text is corrupted, so an unknown type is
+ * reported as unknown.
+ */
+function parseMemoType(v: unknown): "text" | "hash" | "id" | undefined {
+  const memoType = typeof v === "string" ? v.toLowerCase() : undefined;
+  return memoType === "hash" || memoType === "id" || memoType === "text"
+    ? memoType
+    : undefined;
+}
+
 /**
  * Parse SEP-31's `refunds` object off a transaction record.
  *
@@ -645,17 +663,13 @@ export class Sep31Adapter implements AnchorAdapter {
         stellar_memo?: string;
         stellar_memo_type?: string;
       };
-      const memoType = j.stellar_memo_type?.toLowerCase();
       return ok<OpenTransaction>({
         transactionId: j.id,
         depositAddress: j.stellar_account_id,
         memo: j.stellar_memo,
         // Carry the anchor's memo TYPE through. Assuming "text" corrupts a hash
         // memo (32 bytes, over the 28-byte text cap) and the submit fails.
-        memoType:
-          memoType === "hash" || memoType === "id" || memoType === "text"
-            ? memoType
-            : undefined,
+        memoType: parseMemoType(j.stellar_memo_type),
       });
     } catch (cause) {
       return fail("ANCHOR_UNAVAILABLE", `${this.name}: open-tx failed`, {
@@ -681,6 +695,9 @@ export class Sep31Adapter implements AnchorAdapter {
           amount_in?: unknown;
           amount_in_asset?: unknown;
           refunds?: unknown;
+          stellar_account_id?: unknown;
+          stellar_memo?: unknown;
+          stellar_memo_type?: unknown;
         };
       };
       const tx = j.transaction;
@@ -700,7 +717,24 @@ export class Sep31Adapter implements AnchorAdapter {
       // must never turn a readable status into an error.
       const refunds = parseRefunds(tx.refunds, asset, settledAmount);
 
-      return ok<TransactionStatus>(refunds ? { ...mapped, refunds } : mapped);
+      // The anchor's own record of what it expects to receive, for a pre-settle
+      // cross-check against what we are about to send. Same rule as refunds:
+      // each field is read on its own, and anything malformed is left out
+      // rather than guessed — including a numeric amount_in, which has already
+      // been through a float64.
+      const amountIn = amountString(tx.amount_in);
+      const depositAddress = nonEmptyString(tx.stellar_account_id);
+      const memo = nonEmptyString(tx.stellar_memo);
+      const memoType = parseMemoType(tx.stellar_memo_type);
+
+      return ok<TransactionStatus>({
+        ...mapped,
+        ...(refunds ? { refunds } : {}),
+        ...(amountIn !== undefined ? { amountIn: { asset, amount: amountIn } } : {}),
+        ...(depositAddress !== undefined ? { depositAddress } : {}),
+        ...(memo !== undefined ? { memo } : {}),
+        ...(memoType !== undefined ? { memoType } : {}),
+      });
     } catch (cause) {
       return fail("ANCHOR_UNAVAILABLE", `${this.name}: get-tx failed`, {
         retryable: true,

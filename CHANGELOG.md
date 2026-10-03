@@ -76,6 +76,20 @@ Added 9 dedicated pre-settle gate and circuit breaker error codes to `CorridorEr
 
 Added helper `isPreSettleCode(code): boolean` in `@corridor/types` and mapped the error codes in `@corridor/service` HTTP router.
 
+### Added — `TransactionStatus` carries the anchor's expected amount, deposit account and memo (2026-09-26)
+
+`Sep31Adapter.getTransaction` read only `status`, `amount_in`,
+`amount_in_asset` and `refunds` off `GET /transactions/:id`, so the opened
+transaction could not be cross-checked against the payment about to be sent.
+
+`TransactionStatus` now has optional `amountIn` (`Money`), `depositAddress`,
+`memo` and `memoType`, parsed from `amount_in`/`amount_in_asset`,
+`stellar_account_id`, `stellar_memo` and `stellar_memo_type`. As with
+`refunds`, each is read on its own and anything malformed — including a numeric
+`amount_in` — is omitted, never guessed; status classification is unchanged.
+`createMockAdapter` reports back what each opened transaction was given. The
+change is additive: other adapters may leave the fields undefined.
+
 ### Changed — attester rejections carry a typed contract error code (2026-09-24)
 
 `AnchorAttester.attest` turned an attester-contract revert into a message such
