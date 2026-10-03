@@ -51,6 +51,25 @@ Schema only; the engine does not act on it yet. Manifests that omit `protocol`
 parse as `prefunded`, so existing corridors are unchanged. `corridor plan` now
 prints the source protocol.
 
+### Added — `corridor canary` records a chain-verified proof in the manifest (2026-09-27)
+
+`corridor canary <file> --amount <decimal> [--write]` drives one tiny real
+payment and, on `completed`, prints the `proof:` block it earned. With
+`--write` it also records that block in the manifest through the `yaml` Document
+API, so every hand-written comment in the file survives the edit.
+
+The proof is chain-verified, not engine-asserted: before any write,
+`AccountInspector.transaction()` reads the settlement back from Horizon and
+`AccountInspector.verifyPayment()` checks destination, amount, asset and memo
+against the run. A `failed`, `held` or `refunded` run returns before the
+manifest is even read, leaving it byte-identical.
+
+Liveness gains a fourth state, `PROVEN`, for a corridor whose `proof` is still
+inside `proof.max_age_days` (default 30). A stale proof drops the lane back to
+`VERIFIED` with a warning; a proof on a lane whose endpoints were never verified
+never promotes it. `canary_max_amount` (default `1.00` until recorded) caps
+future canaries. `proof` is optional, so every existing manifest still parses.
+
 ### Maintenance — ESLint 10 landed
 
 - `eslint` 10 landed in [#37](https://github.com/ezedike-evan/corridor-in-a-box/pull/37).

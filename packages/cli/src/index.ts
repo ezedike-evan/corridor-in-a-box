@@ -1,25 +1,74 @@
 #!/usr/bin/env node
-// corridor — a tiny CLI to validate manifests and dry-run the plan offline.
+// corridor — manifest validation, offline planning, and a real canary run.
 //
 //   corridor validate <file.corridor.yaml>
 //   corridor plan     <file.corridor.yaml>
+//   corridor canary   <file.corridor.yaml> --amount <decimal> [--write]
 //
 // `plan` is the cheap pre-flight: it tells you whether a corridor is actually
 // runnable (does the dest anchor expose SEP-31? a SEP-38 quote server?) before
-// you ever touch the network. This is the off-ramp check from the conversation,
-// reduced to one command.
+// you ever touch the network. `canary` is the opt-in real payment: it only
+// records a proof after the completed settlement has been read back from
+// Horizon.
 
 import { liveness, loadCorridor, type Corridor } from "@corridor/manifest";
+import { canaryUsage, runCanary } from "./canary";
 
-function main(argv: string[]): number {
-  const [cmd, file] = argv;
-  if (!cmd || (cmd !== "validate" && cmd !== "plan")) {
-    console.error("usage: corridor <validate|plan> <file.corridor.yaml>");
+const USAGE = "usage: corridor <validate|plan|canary> <file.corridor.yaml>";
+
+async function main(argv: string[]): Promise<number> {
+  const [cmd, file, ...rest] = argv;
+  if (!cmd || (cmd !== "validate" && cmd !== "plan" && cmd !== "canary")) {
+    console.error(USAGE);
     return 2;
   }
   if (!file) {
     console.error(`usage: corridor ${cmd} <file.corridor.yaml>`);
     return 2;
+  }
+
+  if (cmd === "canary") {
+    let amount: string | undefined;
+    let write = false;
+    let network: "public" | "testnet" | undefined;
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (arg === "--write") {
+        if (write) {
+          console.error("✗ --write may only be supplied once");
+          return 2;
+        }
+        write = true;
+        continue;
+      }
+      if (arg === "--amount" || arg === "--network") {
+        const value = rest[++i];
+        if (!value || value.startsWith("--")) {
+          console.error(`✗ ${arg} requires a value`);
+          return 2;
+        }
+        if (arg === "--amount") amount = value;
+        else if (value === "public" || value === "testnet") network = value;
+        else {
+          console.error("✗ --network must be public or testnet");
+          return 2;
+        }
+        continue;
+      }
+      console.error(`✗ unknown canary option: ${arg}`);
+      return 2;
+    }
+    if (!amount) {
+      console.error(canaryUsage());
+      return 2;
+    }
+
+    const loaded = loadCorridor(file);
+    if (!loaded.ok) {
+      console.error(`✗ ${loaded.error.code}: ${loaded.error.message}`);
+      return 1;
+    }
+    return runCanary(loaded.value, { manifestPath: file, amount, write, network });
   }
 
   const loaded = loadCorridor(file);
@@ -63,9 +112,8 @@ function printPlan(c: Corridor): void {
   line();
 
   // Liveness comes from @corridor/manifest so this command and the web dashboard
-  // can never describe the same corridor differently. Note the three states: a
-  // lane whose endpoints exist but have never been checked reports UNVERIFIED,
-  // not runnable — the presence of a URL is not evidence the anchor is real.
+  // can never describe the same corridor differently. A proven lane has a fresh
+  // chain-verified canary; a merely verified lane has only endpoint evidence.
   const live = liveness(c);
 
   if (live.state === "proven" && live.proof) {
@@ -107,4 +155,9 @@ function printPlan(c: Corridor): void {
   }
 }
 
-process.exit(main(process.argv.slice(2)));
+main(process.argv.slice(2))
+  .then((code) => process.exit(code))
+  .catch((error: unknown) => {
+    console.error(error);
+    process.exit(1);
+  });

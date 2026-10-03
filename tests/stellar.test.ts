@@ -409,6 +409,87 @@ describe("AccountInspector", () => {
     expect(fee.ok).toBe(true);
     if (fee.ok) expect(fee.value).toBe("0.00001");
   });
+
+  it("reads a transaction and verifies destination, amount, asset and memo", async () => {
+    const hash = "a".repeat(64);
+    const destination = Keypair.random().publicKey();
+    const tx = {
+      hash,
+      successful: true,
+      ledger_attr: 42,
+      memo: "memo-1",
+      memo_type: "text",
+      operations: [
+        {
+          type: "payment",
+          to: destination,
+          amount: "10.0000000",
+          asset_type: "credit_alphanum4",
+          asset_code: "USDC",
+          asset_issuer: ISSUER,
+        },
+      ],
+    };
+    const inspector = new AccountInspector({
+      horizonServer: {
+        loadAccount: async () => ({}) as unknown as Horizon.AccountResponse,
+        transactions: () => ({ transaction: () => ({ call: async () => tx }) }),
+      } as unknown as Horizon.Server,
+    });
+
+    const result = await inspector.verifyPayment({
+      hash,
+      to: destination,
+      amount: "10",
+      memo: "memo-1",
+      memoType: "text",
+      assetCode: "USDC",
+      assetIssuer: ISSUER,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.ledger).toBe(42);
+      expect(result.value.operations).toHaveLength(1);
+    }
+  });
+
+  it("refuses a chain payment whose memo or amount does not match the run", async () => {
+    const hash = "b".repeat(64);
+    const destination = Keypair.random().publicKey();
+    const inspector = new AccountInspector({
+      horizonServer: {
+        loadAccount: async () => ({}) as unknown as Horizon.AccountResponse,
+        transactions: () => ({
+          transaction: () => ({
+            call: async () => ({
+              hash,
+              successful: true,
+              memo: "expected",
+              memo_type: "text",
+              operations: [
+                {
+                  type: "payment",
+                  to: destination,
+                  amount: "9.0000000",
+                  asset_type: "native",
+                },
+              ],
+            }),
+          }),
+        }),
+      } as unknown as Horizon.Server,
+    });
+
+    const result = await inspector.verifyPayment({
+      hash,
+      to: destination,
+      amount: "10",
+      memo: "expected",
+      memoType: "text",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain("no payment");
+  });
 });
 
 describe("balanceCheck gate check (chain.balance)", () => {

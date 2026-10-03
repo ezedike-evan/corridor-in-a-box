@@ -22,6 +22,18 @@ export interface Corridor {
   compliance: { source_jurisdiction: string; dest_jurisdiction: string };
   settlement: { bridge_asset: string; network: "public" | "testnet"; asset_issuer: string };
   recovery: { max_retries: number; timeout_seconds: number; rollback: string };
+  /** Recorded by `corridor canary --write` after a Horizon re-read. Optional. */
+  proof?: Proof;
+}
+
+/** A canary payment that completed on this lane, as recorded in the manifest. */
+export interface Proof {
+  canary_completed_at: string;
+  stellar_tx_hash: string;
+  anchor_transaction_id: string;
+  amount: string;
+  max_age_days: number;
+  canary_max_amount: string;
 }
 
 export const corridors: Corridor[] = [
@@ -113,17 +125,18 @@ export function getCorridor(id: string): Corridor | undefined {
   return corridors.find((c) => c.id === id);
 }
 
-export type LivenessState = "verified" | "unverified" | "not-runnable";
+export type LivenessState = "proven" | "verified" | "unverified" | "not-runnable";
 
 export interface Liveness {
   state: LivenessState;
-  /** True only for "verified". Never gate a UI affordance on an endpoint URL existing. */
+  /** True for "verified" and "proven". Never gate a UI affordance on an endpoint URL existing. */
   runnable: boolean;
   verifiedAt?: string;
   warnings: string[];
 }
 
 export const LIVENESS_LABEL: Record<LivenessState, string> = {
+  proven: "proven",
   verified: "verified",
   unverified: "unverified",
   "not-runnable": "not runnable",
@@ -133,10 +146,12 @@ export const LIVENESS_LABEL: Record<LivenessState, string> = {
 // app is deliberately outside the pnpm workspace (see web/README.md) so it cannot
 // import the package directly.
 //
-// Three states, not two. A manifest naming an endpoint is not evidence the
+// Four states, not two. A manifest naming an endpoint is not evidence the
 // endpoint exists; a lane whose URLs have never been checked is UNVERIFIED and
-// must never render green.
-export function liveness(c: Corridor): Liveness {
+// must never render green. `proven` additionally needs a `proof` block — written
+// by `corridor canary --write` after a Horizon re-read — that is still inside
+// proof.max_age_days.
+export function liveness(c: Corridor, now: Date = new Date()): Liveness {
   const warnings: string[] = [];
   const endpoints = c.dest.endpoints;
   const verifiedAt = endpoints.endpoints_verified_at;
@@ -155,13 +170,41 @@ export function liveness(c: Corridor): Liveness {
     warnings.push("dest has no SEP-12 KYC server — assuming 1:1 delivery with no per-customer KYC.");
   }
 
+  // Mirrors the manifest package: a proof only counts while it is fresh, and a
+  // stale one drops the lane back to VERIFIED rather than quietly staying green.
+  const proof = c.proof;
+  const proofTime = proof ? Date.parse(`${proof.canary_completed_at}T00:00:00Z`) : NaN;
+  const proofAgeMs = now.getTime() - proofTime;
+  const proofFresh =
+    proof !== undefined &&
+    Number.isFinite(proofTime) &&
+    proofAgeMs >= 0 &&
+    proofAgeMs <= proof.max_age_days * 86_400_000;
+
+  if (proof && !verifiedAt) {
+    warnings.push(
+      "canary proof is present but dest endpoints are UNVERIFIED — a payment cannot promote an unchecked corridor to proven.",
+    );
+  } else if (proof && !proofFresh) {
+    warnings.push(
+      `canary proof is stale (completed ${proof.canary_completed_at}, max age ${proof.max_age_days} days) — corridor remains verified, not proven.`,
+    );
+  }
+
   const state: LivenessState = !endpoints.transfer_server_sep31
     ? "not-runnable"
-    : verifiedAt
-      ? "verified"
-      : "unverified";
+    : !verifiedAt
+      ? "unverified"
+      : proofFresh
+        ? "proven"
+        : "verified";
 
-  return { state, runnable: state === "verified", verifiedAt, warnings };
+  return {
+    state,
+    runnable: state === "verified" || state === "proven",
+    verifiedAt,
+    warnings,
+  };
 }
 
 export const VERBS = [

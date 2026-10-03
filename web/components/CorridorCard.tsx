@@ -8,6 +8,7 @@ import { liveness, type Corridor } from "@/lib/corridors";
 // A lane with plausible-looking URLs that nobody has confirmed is amber, not
 // green — the badge reports what we know, not what the YAML claims.
 const BADGE = {
+  proven: { variant: "success", Icon: CircleCheck, label: "proven" },
   verified: { variant: "success", Icon: CircleCheck, label: "verified" },
   unverified: { variant: "warning", Icon: CircleHelp, label: "unverified" },
   "not-runnable": { variant: "default", Icon: CircleSlash, label: "not runnable" },

@@ -14,7 +14,10 @@ export const revalidate = 3600;
 
 export default async function Home() {
   const attestations = await fetchAttestations();
-  const verifiedCount = corridors.filter((c) => liveness(c).state === "verified").length;
+  const verifiedCount = corridors.filter((c) => {
+    const state = liveness(c).state;
+    return state === "verified" || state === "proven";
+  }).length;
   return (
     <div className="flex flex-col gap-16">
       {/* Hero */}

@@ -18,7 +18,7 @@ challenge, SEP-12 answered, and SEP-31 `/info` returned a non-empty receive
 list — so it renders `VERIFIED`. That means endpoints were checked, not that
 money moved: Cowrie publishes no SEP-38 quote server, no payment has been
 attempted, and no business relationship is in place. Every other shipped
-manifest renders `UNVERIFIED` or `NOT RUNNABLE` (see [Liveness](#liveness-has-three-states-and-green-has-to-be-earned)).
+manifest renders `UNVERIFIED` or `NOT RUNNABLE` (see [Liveness](#liveness-has-four-states-and-green-has-to-be-earned)).
 
 This repo contains the **open, runnable corridor engine** and the `RouteResolver`
 seam. The intended open-core design leaves room for a proprietary anchor
@@ -41,6 +41,8 @@ pnpm typecheck          # whole monorepo, one tsc pass
 pnpm test               # vitest: engine, manifest, money, sep31, stellar, …
 pnpm example            # run a payment end-to-end (mocked anchor + settle)
 pnpm cli plan corridors/reference.corridor.yaml   # offline pre-flight / liveness check
+CORRIDOR_SIGNER_SECRET=S… pnpm cli canary corridors/reference.corridor.yaml \
+  --amount 1.00 --write                            # MOVES MONEY: canary + proof
 ```
 
 See [CONTRIBUTING](./CONTRIBUTING.md), [SECURITY](./SECURITY.md), and the
@@ -130,7 +132,7 @@ liveness warnings:
 That warning _is_ the off-ramp scarcity, surfaced at build time instead of in
 production.
 
-### Liveness has three states, and green has to be earned
+### Liveness has four states, and green has to be earned
 
 A manifest naming an endpoint is not evidence the endpoint exists — anyone can
 type a URL into a YAML file. So `corridor plan` and the dashboard report:
@@ -140,6 +142,7 @@ type a URL into a YAML file. So `corridor plan` and the dashboard report:
 | `NOT RUNNABLE` | A required endpoint is missing outright. The lane cannot settle.                         |
 | `UNVERIFIED`   | Endpoints are present but **nobody has confirmed they resolve**. Not runnable.           |
 | `VERIFIED`     | Endpoints were checked against the anchor's published `stellar.toml` on a recorded date. |
+| `PROVEN`       | A canary payment also completed through the lane, and that proof is still fresh.         |
 
 `VERIFIED` requires `dest.endpoints.endpoints_verified_at` — a date a human sets
 only after actually looking. `ng-cowrie` is `VERIFIED`: its endpoints were
@@ -148,6 +151,28 @@ mean money moved — Cowrie publishes no SEP-38 quote server, no payment has
 been attempted, and no business relationship is in place. Every other shipped
 manifest is currently `UNVERIFIED` or `NOT RUNNABLE`. Green has to be earned;
 here, `VERIFIED` means endpoints were checked, not that a payment was made.
+
+`PROVEN` additionally requires a `proof:` block, and it is the one field nobody
+should hand-type: `corridor canary … --write` writes it only after the settlement
+is read back from Horizon and its destination, amount and memo match the run.
+
+```
+$ pnpm cli canary corridors/ng-cowrie.corridor.yaml --amount 1.00 --write
+canary: ng-cowrie on public
+trail: created -> quoted -> compliant -> opened -> settling -> settled -> reconciled -> completed
+proof:
+  canary_completed_at: "2026-09-27"
+  stellar_tx_hash: 9f2c…
+  anchor_transaction_id: 7b1e…
+  amount: "1.00"
+  max_age_days: 30
+  canary_max_amount: "1.00"
+wrote proof to corridors/ng-cowrie.corridor.yaml
+```
+
+A failed, held or refunded run writes nothing at all — the manifest stays
+byte-identical — and a proof older than `proof.max_age_days` drops the lane back
+to `VERIFIED` with a staleness warning rather than quietly staying green.
 
 ## The anchor registry (on-chain)
 
@@ -189,7 +214,7 @@ usable SEP-31 off-ramps (attested + fresh): none
 That anchor **advertises SEP-31 in its toml and returns an empty receive list**.
 Anything reading the toml alone would call the lane runnable. `serves_sep31()`
 returns `NO` because it requires the capability to be both advertised _and_
-probed green — the same distinction the three-state liveness above enforces, now
+probed green — the same distinction the four-state liveness above enforces, now
 as a public artifact anyone can check rather than a claim in this repo.
 
 Every record carries `attested_ledger`, so staleness is visible on chain. An

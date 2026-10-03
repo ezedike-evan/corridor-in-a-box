@@ -211,6 +211,46 @@ XLM; this one settles the asset the anchor actually quotes.
 `QUOTE_UNAVAILABLE: quote HTTP 502`. `AMOUNT=1.00` reproduces it; the default of
 `10.00` does not.
 
+### `corridor canary` — one tiny real payment, and the proof it earns
+
+```bash
+CORRIDOR_SIGNER_SECRET=S… pnpm cli canary corridors/ng-cowrie.corridor.yaml \
+  --amount 1.00 --write
+```
+
+`verify:corridor` above is a PASS/FAIL gate. The canary is the other thing you
+actually want on a lane: it runs one real payment and records **chain-verified
+evidence** in the manifest, which promotes the lane from `VERIFIED` to `PROVEN`.
+
+Three rules make the evidence worth something:
+
+1. **Only `completed` writes.** A run that ends `failed`, `held` or `refunded`
+   leaves the file byte-identical — no partial edit, no stale proof.
+2. **The proof is chain-read, not engine-asserted.** Before touching the
+   manifest, `AccountInspector` re-reads the transaction from Horizon and checks
+   the destination, amount, asset and memo against what the engine actually got
+   confirmed. A mismatch refuses the write.
+3. **Comments survive.** The manifest is edited through the `yaml` Document API,
+   so every hand-written explanation in the file is still there afterwards.
+
+The recorded block:
+
+```yaml
+proof:
+  canary_completed_at: "2026-09-27"
+  stellar_tx_hash: 9f2c… # the settlement leg, not the anchor's own id
+  anchor_transaction_id: 7b1e… # the SEP-31 transaction
+  amount: "1.00"
+  max_age_days: 30
+  canary_max_amount: "1.00" # the ceiling future canaries must respect
+```
+
+`canary_max_amount` is a guard rail, not a suggestion: a canary above the
+recorded ceiling is refused outright, and until a lane records one the ceiling
+is `1.00`. `--network public` is required to canary a `network: public`
+corridor, and past `max_age_days` the lane drops back to `VERIFIED` with a
+staleness warning instead of quietly staying green.
+
 ## 2. Recovering a stuck payment
 
 The engine drives recovery automatically per the manifest's `recovery.rollback`

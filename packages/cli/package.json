@@ -37,7 +37,12 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@corridor/engine": "workspace:*",
     "@corridor/manifest": "workspace:*",
+    "@corridor/router": "workspace:*",
+    "@corridor/sep31": "workspace:*",
+    "@corridor/stellar": "workspace:*",
+    "@corridor/types": "workspace:*",
     "tsup": "^8.5.1"
   }
 }

@@ -537,6 +537,46 @@ export interface HorizonPaymentRecordLike {
 export type AccountInspectorServerLike = Pick<Horizon.Server, "loadAccount"> &
   Partial<Pick<Horizon.Server, "payments" | "transactions">>;
 
+export interface HorizonPaymentOperationLike {
+  readonly type?: string;
+  readonly to?: string;
+  readonly amount?: string;
+  readonly asset_type?: string;
+  readonly asset_code?: string;
+  readonly asset_issuer?: string;
+}
+
+export interface HorizonTransactionResponseLike {
+  readonly hash?: string;
+  readonly successful?: boolean;
+  readonly ledger?: number;
+  readonly ledger_attr?: number;
+  readonly created_at?: string;
+  readonly memo?: string;
+  readonly memo_type?: string;
+  readonly operations?: readonly HorizonPaymentOperationLike[];
+}
+
+export interface TransactionFacts {
+  readonly hash: string;
+  readonly successful: boolean;
+  readonly ledger?: number;
+  readonly createdAt?: string;
+  readonly memo?: string;
+  readonly memoType?: string;
+  readonly operations: readonly HorizonPaymentOperationLike[];
+}
+
+export interface PaymentExpectation {
+  readonly hash: string;
+  readonly to: string;
+  readonly amount: string;
+  readonly memo?: string;
+  readonly memoType?: "text" | "hash" | "id";
+  readonly assetCode?: string;
+  readonly assetIssuer?: string;
+}
+
 export interface AccountInspectorOptions {
   readonly horizonUrl?: string;
   readonly horizonServer?: AccountInspectorServerLike;
@@ -684,6 +724,119 @@ export class AccountInspector {
         { cause: err, retryable: true },
       );
     }
+  }
+
+  async transaction(hash: string): Promise<Outcome<TransactionFacts | undefined>> {
+    if (!this.server.transactions) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        "AccountInspector was constructed without a transaction reader",
+      );
+    }
+    try {
+      const res = (await this.server
+        .transactions()
+        .transaction(hash)
+        .call()) as unknown as HorizonTransactionResponseLike;
+      return ok({
+        hash: res.hash ?? hash,
+        successful: res.successful === true,
+        ledger: res.ledger_attr ?? res.ledger,
+        createdAt: res.created_at,
+        memo: res.memo,
+        memoType: res.memo_type,
+        operations: res.operations ?? [],
+      });
+    } catch (err: unknown) {
+      const anyErr = err as {
+        response?: { status?: number };
+        status?: number;
+        message?: string;
+      };
+      if (
+        anyErr?.response?.status === 404 ||
+        anyErr?.status === 404 ||
+        /not found/i.test(anyErr?.message ?? "")
+      ) {
+        return ok(undefined);
+      }
+      return fail(
+        "SETTLEMENT_FAILED",
+        `failed to load transaction ${hash}: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err, retryable: true },
+      );
+    }
+  }
+
+  /**
+   * Chain-verify the settlement leg before a canary proof is written. The
+   * engine's RunResult is a claim about what it submitted; this reads the
+   * transaction back from Horizon and checks the destination, amount, asset and
+   * memo that the engine actually got confirmed.
+   */
+  async verifyPayment(expected: PaymentExpectation): Promise<Outcome<TransactionFacts>> {
+    const read = await this.transaction(expected.hash);
+    if (!read.ok) return read;
+    if (!read.value) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        `transaction ${expected.hash} was not found on Horizon`,
+      );
+    }
+
+    const tx = read.value;
+    if (!tx.successful) {
+      return fail("SETTLEMENT_FAILED", `transaction ${expected.hash} failed on-chain`);
+    }
+
+    const expectedMemoType = expected.memoType ?? (expected.memo ? "text" : undefined);
+    if (expected.memo) {
+      if (
+        tx.memo !== expected.memo ||
+        (expectedMemoType && tx.memoType !== expectedMemoType)
+      ) {
+        return fail(
+          "SETTLEMENT_FAILED",
+          `transaction ${expected.hash} memo mismatch: expected ${expectedMemoType ?? "text"}/${expected.memo}, got ${tx.memoType ?? "none"}/${tx.memo ?? "none"}`,
+        );
+      }
+    } else if (tx.memo) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        `transaction ${expected.hash} has memo ${tx.memoType ?? "unknown"}/${tx.memo}, expected no memo`,
+      );
+    }
+
+    const payment = tx.operations.find((operation) => {
+      if (operation.type !== undefined && operation.type !== "payment") return false;
+      if (operation.to !== expected.to) return false;
+      const amount = compareAmounts(operation.amount ?? "", expected.amount);
+      if (!amount.ok || amount.value !== 0) return false;
+      if (
+        expected.assetCode &&
+        operation.asset_code &&
+        operation.asset_code.toUpperCase() !== expected.assetCode.toUpperCase()
+      ) {
+        return false;
+      }
+      if (
+        expected.assetIssuer &&
+        operation.asset_issuer &&
+        operation.asset_issuer !== expected.assetIssuer
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    if (!payment) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        `transaction ${expected.hash} has no payment to ${expected.to} for ${expected.amount}${expected.memo ? ` with memo ${expected.memo}` : ""}`,
+      );
+    }
+
+    return ok(tx);
   }
 
   async baseReserve(): Promise<Outcome<string>> {
