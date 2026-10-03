@@ -53,6 +53,7 @@ export interface EngineDeps {
   submitter: SettlementSubmitter;
   gate?: PreSettleGate;
   idempotency?: IdempotencyStore;
+  waker?: import("./ports").ReconcileWaker;
   now?: () => number;
   /** Injectable sleep so tests don't wait on real backoff/poll delays. */
   sleep?: (ms: number) => Promise<void>;
@@ -475,6 +476,7 @@ export async function execute(
         deadlineMs,
         pollMs,
         stallThreshold,
+        wake: deps.waker?.signal(opened.value.transactionId),
         corridorId: corridor.id,
         logger: deps.logger,
         metrics: deps.metrics,
@@ -584,6 +586,7 @@ async function resumeRun(
       deadlineMs: now() + corridor.recovery.timeout_seconds * 1000,
       pollMs,
       stallThreshold,
+      wake: deps.waker?.signal(run.transactionId),
       corridorId: corridor.id,
       logger: deps.logger,
       metrics: deps.metrics,

@@ -646,6 +646,37 @@ export class Sep31Adapter implements AnchorAdapter {
     }
   }
 
+  /** Not part of AnchorAdapter. Used by the engine/service to register for push notifications. */
+  async registerCallback(transactionId: string, url: string): Promise<Outcome<void>> {
+    const sep31 = this.anchor.endpoints.transfer_server_sep31;
+    if (!sep31) return fail("ANCHOR_UNAVAILABLE", `${this.name}: no SEP-31 server`);
+    const auth = await this.authToken();
+    if (!auth.ok) return auth;
+    try {
+      const res = await this.fetchImpl(`${sep31}/transactions/${transactionId}/callback`, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          ...this.authHeader(auth.value),
+        },
+        body: JSON.stringify({ url }),
+      });
+      if (!res.ok) {
+        return fail(
+          "ANCHOR_UNAVAILABLE",
+          `${this.name}: register callback HTTP ${res.status}`,
+          { retryable: res.status >= 500 },
+        );
+      }
+      return ok(undefined);
+    } catch (cause) {
+      return fail("ANCHOR_UNAVAILABLE", `${this.name}: register callback failed`, {
+        retryable: true,
+        cause,
+      });
+    }
+  }
+
   async getTransaction(transactionId: string): Promise<Outcome<TransactionStatus>> {
     const sep31 = this.anchor.endpoints.transfer_server_sep31;
     if (!sep31) return fail("ANCHOR_UNAVAILABLE", `${this.name}: no SEP-31 server`);

@@ -130,6 +130,8 @@ export interface PollOptions {
    * transitioning through intermediate states won't be misdiagnosed.
    */
   stallThreshold?: number;
+  /** Signal to cut the sleep short and poll immediately. */
+  wake?: { readonly aborted: boolean; addEventListener(type: "abort", cb: () => void): void; removeEventListener(type: "abort", cb: () => void): void };
   /** Corridor ID for metric tagging. Optional. */
   corridorId?: string;
   /** Logger for per-poll debug logs. Optional. */
@@ -222,7 +224,22 @@ export async function reconcileUntil(
         { retryable: false },
       );
     }
-    await opts.sleep(opts.pollMs);
+    if (opts.wake) {
+      if (opts.wake.aborted) continue;
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const complete = () => {
+          if (done) return;
+          done = true;
+          opts.wake?.removeEventListener("abort", complete);
+          resolve();
+        };
+        opts.wake?.addEventListener("abort", complete);
+        opts.sleep(opts.pollMs).then(complete).catch(complete);
+      });
+    } else {
+      await opts.sleep(opts.pollMs);
+    }
   }
 }
 

@@ -22,6 +22,8 @@ export {
   type SettlementRef,
   type SettlementRequest,
   type RefundRequest,
+  type ReconcileWaker,
+  InMemoryWaker,
 } from "./ports";
 export {
   quote,
