@@ -4,6 +4,7 @@ import { createMockAdapter } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
 import {
   InMemoryAuditLog,
+  InMemoryAlerting,
   InMemoryIdempotencyStore,
   InMemoryMetrics,
   createMockSubmitter,
@@ -98,6 +99,64 @@ describe("audit trail", () => {
     expect(r.ok).toBe(false);
     const failed = audit.entries.find((e) => e.to === "failed");
     expect(failed?.error).toContain("KYC_REJECTED");
+  });
+});
+
+describe("operational alerts", () => {
+  it("raises one alert when a run enters held", async () => {
+    const alerting = new InMemoryAlerting();
+    const deps: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false }), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: createMockSubmitter(),
+      idempotency: new InMemoryIdempotencyStore(),
+      alerting,
+      now: () => 1000,
+      sleep: async () => {},
+      reconcilePollMs: 1,
+      trustManifestWithoutAttestation: true,
+    };
+    const result = await execute(
+      { ...intent, idempotencyKey: "held-alert" },
+      corridor(),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(alerting.alerts).toHaveLength(1);
+    expect(alerting.alerts[0]).toMatchObject({
+      kind: "held",
+      corridorId: "test",
+      idempotencyKey: "held-alert",
+      at: expect.any(Number),
+    });
+  });
+
+  it("keeps the run outcome when the alert sink throws", async () => {
+    const logs: { level: string; msg: string }[] = [];
+    const deps: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter({ settled: false }), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: createMockSubmitter(),
+      idempotency: new InMemoryIdempotencyStore(),
+      alerting: { raise: () => { throw new Error("webhook unavailable"); } },
+      logger: { log: (level, msg) => logs.push({ level, msg }) },
+      now: () => 1000,
+      sleep: async () => {},
+      reconcilePollMs: 1,
+      trustManifestWithoutAttestation: true,
+    };
+    const result = await execute(
+      { ...intent, idempotencyKey: "held-alert-fails" },
+      corridor(),
+      deps,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(await deps.idempotency?.get("held-alert-fails")).toMatchObject({ state: "held" });
+    expect(logs).toContainEqual({ level: "warn", msg: "corridor.alert_failed" });
   });
 });
 

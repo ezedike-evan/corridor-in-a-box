@@ -44,6 +44,7 @@ import {
   noopMetrics,
   silentLogger,
   type AuditSink,
+  type Alerting,
   type Logger,
   type Metrics,
 } from "./observability";
@@ -68,6 +69,8 @@ export interface EngineDeps {
   logger?: Logger;
   /** Append-only audit sink; receives one entry per state transition. */
   audit?: AuditSink;
+  /** Best-effort operational alerts. Failures are logged and never alter a run. */
+  alerting?: Alerting;
   /** Counter/timing sink. Defaults to a no-op. */
   metrics?: Metrics;
   /**
@@ -535,6 +538,25 @@ async function emitTransition(
     metrics.increment("corridor.terminal", { state: run.state, corridor: run.corridorId });
   }
   await deps.audit?.record(entry);
+  if (run.state === "held" || run.state === "refund_pending") {
+    try {
+      await deps.alerting?.raise({
+        kind: run.state,
+        corridorId: run.corridorId,
+        idempotencyKey: run.idempotencyKey,
+        stellarTxHash: run.stellarTxHash,
+        lastError: run.lastError ?? error,
+        at,
+      });
+    } catch (alertError) {
+      (deps.logger ?? silentLogger).log("warn", "corridor.alert_failed", {
+        corridorId: run.corridorId,
+        idempotencyKey: run.idempotencyKey,
+        kind: run.state,
+        error: alertError instanceof Error ? alertError.message : String(alertError),
+      });
+    }
+  }
 }
 
 /**
