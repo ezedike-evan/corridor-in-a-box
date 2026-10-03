@@ -75,7 +75,7 @@ const CustomDestSchema = AnchorBaseSchema.extend({
   endpoints: z.object({
     home_domain: z.string().min(1),
     base_url: z.string().url(),
-    extra: z.record(z.string()).default({}),
+    extra: z.record(z.string(), z.string()).default({}),
     endpoints_verified_at: AnchorEndpointsSchema.shape.endpoints_verified_at,
   }),
 });
