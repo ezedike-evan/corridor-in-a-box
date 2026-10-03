@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PostgresCorridorHealthStore } from "../packages/engine/src/health-pg";
+import { migrate } from "../packages/engine/src/idempotency-pg";
 import type { Queryable, QueryResult } from "../packages/engine/src/idempotency-pg";
 
 function fakeHealthDb(): Queryable & { table: Map<string, Record<string, unknown>> } {
@@ -133,5 +134,24 @@ describe("PostgresCorridorHealthStore", () => {
     expect(state).toBeDefined();
     expect(state?.consecutiveFailures).toBe(1);
     expect(state?.state).toBe("down");
+  });
+
+  it("migrate() creates corridor_breakers and is idempotent when run twice", async () => {
+    const seen: string[] = [];
+    const db: Queryable = {
+      async query(text: string) {
+        seen.push(text);
+        return { rows: [] };
+      },
+    };
+    await migrate(db);
+    const first = [...seen];
+    await migrate(db);
+    expect(first.join("\n")).toContain("create table if not exists corridor_breakers");
+    expect(seen.length).toBe(first.length * 2);
+    expect(seen.slice(first.length)).toEqual(first);
+    for (const sql of seen) {
+      expect(sql).not.toMatch(/create table (?!if not exists)/i);
+    }
   });
 });
