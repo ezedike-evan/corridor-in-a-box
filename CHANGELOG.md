@@ -120,6 +120,7 @@ transaction could not be cross-checked against the payment about to be sent.
 `amount_in` — is omitted, never guessed; status classification is unchanged.
 `createMockAdapter` reports back what each opened transaction was given. The
 change is additive: other adapters may leave the fields undefined.
+
 ### Changed — web/ migrated to Next.js 16 and TypeScript 7 (#85) (2026-09-02)
 
 `web/`'s `next` 15 → 16 bump landed in #11 as a dependency change only; the
