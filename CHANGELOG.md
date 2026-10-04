@@ -7,6 +7,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — verify the settle payment on-chain before reconcile
+
+- New optional `EngineDeps.chainVerifier`. After `settled` (and on resume from
+  `settled`) the engine re-checks the payment; a mismatch is a non-retryable
+  `RECONCILE_MISMATCH` routed through the manifest's `hold` / `refund_sender`
+  policy. `@corridor/stellar` provides `createChainVerifier(new AccountInspector(...))`,
+  `AccountInspector.settlementFacts(hash)` and `verifySettlementFacts()` (one
+  payment op; destination, amount, asset and memo/memo type must match).
+- Runs now record the `settlement` request so a resumed run can re-verify;
+  Postgres stores add a nullable `settlement` column (added by `migrate()`).
+
 ### Fixed — operations.md §1 step 4 described output a reader could never see (closes #129)
 
 `docs/operations.md` step 4 instructed readers to run
@@ -51,6 +62,26 @@ Schema only; the engine does not act on it yet. Manifests that omit `protocol`
 parse as `prefunded`, so existing corridors are unchanged. `corridor plan` now
 prints the source protocol.
 
+### Docs — `web/README.md` matches the app again: three liveness states, six docs pages, own workspace root (#126) (2026-09-29)
+
+`web/README.md` described the app it documents in three stale ways: it called the
+dashboard's build-time liveness "runnable / not runnable" when the dashboard has
+three states — `verified` / `unverified` / `not runnable`, and only `verified`
+counts as runnable — it listed five of the six shipped docs pages (omitting "Why
+not Anchor Platform?"), and it called the app "not part of the pnpm workspace"
+although `web/` has been its own pnpm workspace root since #80
+(`web/pnpm-workspace.yaml`, with its own lockfile and its own CI job).
+Documentation only — no code, no behaviour change.
+
+### Added — Gate check: re-read receiver SEP-12 status and require ACCEPTED (#156) (2026-09-30)
+
+Added `receiverKycCheck(adapter)` GateCheck (name `sep12.receiver`) in `@corridor/sep31`:
+
+- Calls `adapter.ensureCompliance(intent, corridor)` right before settlement to verify receiver status is still accepted.
+- Fails closed with `PRESETTLE_RECEIVER_NOT_ACCEPTED` on `PROCESSING`, `NEEDS_INFO`, `REJECTED`, or anchor errors (e.g. HTTP 500).
+- For corridors without a `kyc_server`, passes with `detail: "no SEP-12 server"` so the audit trail clearly distinguishes unverified lanes from verified ones.
+- Added `PRESETTLE_RECEIVER_NOT_ACCEPTED` to `CorridorErrorCode` in `@corridor/types`.
+
 ### Maintenance — ESLint 10 landed
 
 - `eslint` 10 landed in [#37](https://github.com/ezedike-evan/corridor-in-a-box/pull/37).
@@ -89,6 +120,106 @@ transaction could not be cross-checked against the payment about to be sent.
 `amount_in` — is omitted, never guessed; status classification is unchanged.
 `createMockAdapter` reports back what each opened transaction was given. The
 change is additive: other adapters may leave the fields undefined.
+### Changed — web/ migrated to Next.js 16 and TypeScript 7 (#85) (2026-09-02)
+
+`web/`'s `next` 15 → 16 bump landed in #11 as a dependency change only; the
+migration itself is now done. `web/tsconfig.json` sets the React automatic
+runtime and the generated route-type include that Next 16 mandates (it was being
+rewritten by `next build` on every run, leaving the checked-in file out of step
+with what was compiled), and `web/next.config.ts` pins `outputFileTracingRoot`
+to the repo root so the workspace-root warning is gone with it. No application
+source changed.
+
+### Added — `reference-corridor` CI job runs a whole corridor (#75) (2026-09-02)
+
+`.github/workflows/reference-corridor.yml` drives one payment through every leg
+— quote → comply → open → settle → reconcile → completed — against the Anchor
+Platform reference stack, on its own schedule. `scripts/reference-anchor.sh
+doctor` and `pnpm verify:corridor` gate the job up front, so a missing or
+renamed prerequisite is reported in seconds rather than four minutes into a
+container.
+
+### Added — reconcile stall detection: `RECONCILE_STALLED` (HTTP 504) (#71) (2026-09-01)
+
+`reconcileUntil` can now tell an anchor that is slowly progressing apart from
+one whose observer is stuck on the same status. When `stallThreshold` is set
+(production default 10 consecutive polls; `0` disables it) and that many polls
+return an identical status, the engine fails early with the new public error
+code **`RECONCILE_STALLED`**, carrying the stuck status and the consecutive
+count, and recovers (refund / hold / give-up) instead of waiting out the whole
+corridor deadline. `RECONCILE_STALLED` maps to **HTTP 504** in
+`@corridor/service`, alongside `SETTLEMENT_TIMEOUT`.
+
+### Changed — every reconcile poll is logged and counted (#69) (2026-09-01)
+
+`reconcileUntil` was silent between "submitted" and "settled". The engine's
+injectable `Logger` and `Metrics` are now threaded through it, and each poll
+emits a `debug` log (`corridor.reconcile.poll` with `transactionId`,
+`status`, `poll` and `elapsedMs` — never full transaction bodies) plus a
+counter metric tagged with `corridor` and `status`. `LogLevel` gains
+`"debug"` for this.
+
+### Changed — `SETTLEMENT_TIMEOUT` carries poll count, elapsed, and first/last status (#70) (2026-09-01)
+
+The timeout error used to name only the last observed status, which made a slow
+anchor indistinguishable from one that never updated. It now carries the poll
+count, elapsed milliseconds, and both the first and last observed status, and
+stays non-retryable so a timeout can never re-settle a payment.
+
+### Added — anchor-driven refunds on the `AnchorAdapter` port (#72) (2026-09-01)
+
+A payment credited to a third-party anchor cannot be reversed unilaterally
+on-chain, so refunds are modelled as an anchor-driven operation.
+`AnchorAdapter` gains `requestRefund(transactionId, amount, reason)` and the
+`RefundPayment` / `RefundStatus` / `RefundRef` types; an anchor that does not
+support refunds rejects with `REFUND_UNSUPPORTED`. The engine wiring that polls
+an anchor-driven refund is deliberately not part of this change.
+
+### Added — mock adapter can simulate refund outcomes (#77) (2026-09-01)
+
+`MockAdapterOptions` gains a `refund` flag so tests can choose a branch: the
+anchor accepts and completes a refund, accepts and leaves it pending, or rejects
+it. Defaults are unchanged, so existing tests and engine behaviour are untouched.
+
+### Tests — live-anchor run asserts `completed`, not merely `settled` (#73) (2026-09-01)
+
+The SEP-31 live suite exercised SEP-10, SEP-38 and the conformance probes but
+never asserted the terminal state. A new env-gated case runs a full `execute()`
+for one payment and asserts the run reaches `completed` and that the trail
+contains `settled → reconciled → completed` in order. On failure it prints the
+stored state, trail, `lastError`, anchor transaction id and Stellar tx hash
+instead of a diff.
+
+### Tests — engine coverage for the refund path (#74) (2026-09-01)
+
+`refundAndStop` had no tests of its own even though every branch in it runs
+after something has already gone wrong. Six new cases cover which terminal state
+is reached, which reason is recorded, and whether the chain was touched. The
+anchor-driven `refund_pending` polling path stays uncovered until the engine
+wires it up.
+
+### Tests — crash-resume integration test never double-settles (#76) (2026-09-01)
+
+An env-gated integration test runs a payment to `completed`, simulates a crash
+by winding the persisted run back to `settled`, then resumes with the same
+idempotency key and asserts the run completes through
+`settled → reconciled → completed` with exactly one on-chain payment ever
+submitted.
+
+### Changed — `web/` is its own pnpm workspace root (#80) (2026-09-01)
+
+Dependabot could never update `web/pnpm-lock.yaml`: with no workspace marker of
+its own, a resolver starting in `web/` walked up to the root workspace, saw
+`web` was not an importer there, and wrote no lockfile, so every `/web` PR
+failed `ERR_PNPM_OUTDATED_LOCKFILE`. Adding `web/pnpm-workspace.yaml` makes
+`web/` a standalone workspace root.
+
+### Changed — dependency bumps (#78, #79, #81, #82, #11) (2026-09-01)
+
+Dependabot bumps: `github/codeql-action` to v4.37.6 (#78), `@types/node` to
+^26.4.0 in `/web` (#79), `react-markdown` 9.1.0 → 10.1.0 in `/web` (#81),
+`lucide-react` 0.456.0 → 1.24.0 in `/web` (#82), and the `next` 15.5.19 →
+16.3.3 bump in `/web` (#11, migration finished in #85).
 
 ### Changed — attester rejections carry a typed contract error code (2026-09-24)
 

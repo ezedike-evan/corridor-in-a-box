@@ -5,7 +5,7 @@
 // specific fact arrives via the validated manifest, every anchor-specific fact via
 // the injected RouteResolver/adapters. Add a corridor = add a manifest.
 
-import type { Corridor } from "@corridor/manifest";
+import { liveness, type Corridor, type LivenessState } from "@corridor/manifest";
 import {
   compareAmounts,
   fail,
@@ -26,6 +26,7 @@ import {
   type StoredRun,
 } from "./idempotency";
 import type {
+  ChainVerifier,
   RefundRequest,
   SettlementRef,
   SettlementRequest,
@@ -40,8 +41,10 @@ import {
   recover,
   reconcileUntil,
   settle,
+  watchRefund,
   settleQuoteProblem,
 } from "./verbs";
+import type { TransactionStatus } from "@corridor/adapter-kit";
 import {
   noopMetrics,
   silentLogger,
@@ -55,6 +58,14 @@ export interface EngineDeps {
   resolver: RouteResolver;
   submitter: SettlementSubmitter;
   gate?: PreSettleGate;
+  /**
+   * Optional independent check that the settle transaction really paid what
+   * was requested. Runs once after `settled` (and again on resume from
+   * `settled`), before the run may become `reconciled`. A failure is treated
+   * like any post-settle failure: money moved, so it goes to the manifest's
+   * `hold` / `refund_sender` path rather than `failed`.
+   */
+  chainVerifier?: ChainVerifier;
   idempotency?: IdempotencyStore;
   now?: () => number;
   /** Injectable sleep so tests don't wait on real backoff/poll delays. */
@@ -73,6 +84,8 @@ export interface EngineDeps {
   audit?: AuditSink;
   /** Counter/timing sink. Defaults to a no-op. */
   metrics?: Metrics;
+  /** Maximum payment amount while a corridor has no fresh canary proof. Defaults to "10". */
+  unprovenMaxAmount?: string;
   /**
    * Explicit opt-in allowing manifest-trusted routes on a public network without
    * on-chain attestation.
@@ -118,6 +131,7 @@ export async function execute(
   const pollMs =
     rc?.poll_seconds !== undefined ? rc.poll_seconds * 1000 : (deps.reconcilePollMs ?? 2_000);
   const stallThreshold = rc?.stall_polls ?? deps.stallThreshold ?? 10;
+  const externalStallMs = externalStallBudgetMs(corridor);
   const metrics = deps.metrics ?? noopMetrics;
   const startedAt = now();
 
@@ -139,9 +153,31 @@ export async function execute(
       `sourceAmount "${intent.sourceAmount.amount}" is not a positive decimal amount`,
     );
   }
+  const verificationAt = now();
+  const live = liveness(corridor, new Date(verificationAt));
+  const unproven = live.state !== "proven";
+  const canaryCap = corridor.proof?.canary_max_amount ?? deps.unprovenMaxAmount ?? "10";
   // Per-corridor ceiling. A manifest that declares max_amount caps any single
-  // payment on that lane; without one there is no upper bound at all.
+  // payment on that lane, including on a proven corridor.
   const max = corridor.limits?.max_amount;
+  let effectiveCap = unproven ? canaryCap : max;
+  if (unproven && max) {
+    const compared = compareAmounts(max, canaryCap);
+    if (!compared.ok) return compared;
+    effectiveCap = compared.value <= 0 ? max : canaryCap;
+  }
+  await emitVerification(deps, intent, corridor, verificationAt, live.state, effectiveCap);
+
+  if (
+    corridor.settlement.network === "public" &&
+    (live.state === "unverified" || live.state === "not-runnable")
+  ) {
+    return fail(
+      "CORRIDOR_UNPROVEN",
+      `corridor ${corridor.id} is ${live.state} on the public network and cannot accept payments`,
+    );
+  }
+
   if (max) {
     const cmp = compareAmounts(intent.sourceAmount.amount, max);
     if (!cmp.ok) return cmp;
@@ -149,6 +185,16 @@ export async function execute(
       return fail(
         "AMOUNT_INVALID",
         `sourceAmount "${intent.sourceAmount.amount}" exceeds corridor ${corridor.id} max_amount ${max}`,
+      );
+    }
+  }
+  if (unproven && effectiveCap) {
+    const cmp = compareAmounts(intent.sourceAmount.amount, effectiveCap);
+    if (!cmp.ok) return cmp;
+    if (cmp.value > 0) {
+      return fail(
+        "CORRIDOR_UNPROVEN",
+        `sourceAmount "${intent.sourceAmount.amount}" exceeds corridor ${corridor.id} unproven canary cap ${effectiveCap}`,
       );
     }
   }
@@ -213,7 +259,12 @@ export async function execute(
 
   const advance = async (
     to: CorridorState,
-    meta?: { quoteFee?: Money; networkFee?: string },
+    meta?: {
+      quoteFee?: Money;
+      networkFee?: string;
+      amountRefunded?: string;
+      amountFee?: string;
+    },
   ): Promise<Outcome<void>> => {
     if (!canTransition(run.state, to)) {
       return fail("SETTLEMENT_FAILED", `illegal transition ${run.state} -> ${to}`);
@@ -301,13 +352,34 @@ export async function execute(
     if (!back.ok) return die(back.error);
     // Money moved and the anchor itself reports a terminal failure: it is
     // already refunding (SEP-31 `refunds`), so we wait for its report instead of
-    // asking the chain to reverse a payment it cannot reverse. Watching the
-    // anchor from here is a separate step; this only parks the run correctly.
+    // asking the chain to reverse a payment it cannot reverse.
     if (run.stellarTxHash && anchorTerminalStatus(e)) {
       run.lastError = `${e.code}: ${e.message}`;
       const pending = await advance("refund_pending");
       if (!pending.ok) return die(pending.error);
-      return { ok: false, error: e };
+      const watched = await watchRefund(adapter, opened.value.transactionId, {
+        now,
+        sleep,
+        deadlineMs: now() + corridor.recovery.refund_wait_seconds * 1000,
+        pollMs,
+        corridorId: corridor.id,
+        logger: deps.logger,
+        metrics: deps.metrics,
+      });
+      if (watched.ok) {
+        const info = watched.value.refunds;
+        if (info && !hasRequestedRefund(run)) {
+          const firstPayment = info.payments[0];
+          if (firstPayment?.id) run.refundId = firstPayment.id;
+        }
+        const done = await advance("refunded", refundAudit(info));
+        if (!done.ok) return die(done.error);
+        return { ok: false, error: e };
+      }
+      // The run is held with the watch outcome in `lastError`; the caller still
+      // sees the anchor's own terminal failure that started the recovery.
+      const stopped = await holdAndStop(watched.error, statusFrom(watched.error.cause));
+      return stopped.error === watched.error ? { ok: false, error: e } : stopped;
     }
     // Only reverse the chain if a payment actually went out. If settlement never
     // succeeded, there is nothing on-chain to undo — the sending anchor returns
@@ -342,13 +414,15 @@ export async function execute(
     return { ok: false, error: e };
   };
 
-  const holdAndStop = async (e: CorridorError): Promise<Err> => {
-    if (run.state !== "recovering") {
+  const holdAndStop = async (e: CorridorError, status?: TransactionStatus): Promise<Err> => {
+    // `refund_pending` inherits `recovering`'s exits (state.ts), so it can be
+    // held directly; anything else steps back into `recovering` first.
+    if (run.state !== "recovering" && run.state !== "refund_pending") {
       const back = await advance("recovering");
       if (!back.ok) return die(back.error);
     }
     run.lastError = `${e.code}: ${e.message}`;
-    const held = await advance("held");
+    const held = await advance("held", refundAudit(status?.refunds));
     if (!held.ok) return die(held.error);
     return { ok: false, error: e };
   };
@@ -474,6 +548,13 @@ export async function execute(
       return finishFailure(s.error);
     }
     run.stellarTxHash = s.value.stellarTxHash;
+    const settleReq = settlementRequestFor(opened.value, q.value, corridor);
+    run.settlement = {
+      to: settleReq.to,
+      memo: settleReq.memo,
+      memoType: settleReq.memoType,
+      amount: settleReq.amount,
+    };
     {
       const t = await advance("settled", {
         quoteFee: q.value.fee,
@@ -481,6 +562,10 @@ export async function execute(
       });
       if (!t.ok) return die(t.error);
     }
+
+    // Verify our own payment on-chain before trusting the anchor's word on it.
+    const v = await timed("verify", () => verifyOnChain(deps, s.value, settleReq));
+    if (!v.ok) return finishFailure(v.error);
 
     // Poll until the anchor confirms payout or we hit the corridor timeout.
     // reconcileUntil returns a non-retryable error, so we never re-settle here.
@@ -491,6 +576,7 @@ export async function execute(
         deadlineMs,
         pollMs,
         stallThreshold,
+        externalStallMs,
         corridorId: corridor.id,
         logger: deps.logger,
         metrics: deps.metrics,
@@ -513,7 +599,54 @@ export async function execute(
   return ok(toResult(run, trail));
 }
 
+async function emitVerification(
+  deps: EngineDeps,
+  intent: PaymentIntent,
+  corridor: Corridor,
+  at: number,
+  state: LivenessState,
+  effectiveCap?: string,
+): Promise<void> {
+  const detail = { liveness: state, effectiveCap };
+  const entry = {
+    event: "verifying" as const,
+    idempotencyKey: intent.idempotencyKey,
+    corridorId: corridor.id,
+    at,
+    detail,
+  };
+  (deps.logger ?? silentLogger).log("info", "corridor.verifying", entry);
+  await deps.audit?.recordDetail?.(entry);
+}
+
 type Err = { ok: false; error: CorridorError };
+
+function settlementRequestFor(
+  opened: { depositAddress: string; memo?: string; memoType?: "text" | "hash" | "id" },
+  q: { sourceAmount: { amount: string } },
+  corridor: Corridor,
+): SettlementRequest {
+  return {
+    to: opened.depositAddress,
+    memo: opened.memo,
+    memoType: opened.memoType,
+    amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
+    corridor,
+  };
+}
+
+/** Run the optional chain verifier; a no-op success when none is configured. */
+async function verifyOnChain(
+  deps: EngineDeps,
+  ref: SettlementRef,
+  req: SettlementRequest,
+): Promise<Outcome<void>> {
+  if (!deps.chainVerifier) return ok(undefined);
+  const r = await deps.chainVerifier(ref, req);
+  if (r.ok) return r;
+  // Never retry: the payment is already on the chain, resubmitting would double it.
+  return fail(r.error.code, r.error.message, { retryable: false, cause: r.error.cause });
+}
 
 function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
   return {
@@ -525,6 +658,29 @@ function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
   };
 }
 
+function isTransactionStatus(value: unknown): value is TransactionStatus {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { status?: unknown }).status === "string" &&
+    typeof (value as { settled?: unknown }).settled === "boolean"
+  );
+}
+
+function statusFrom(value: unknown): TransactionStatus | undefined {
+  return isTransactionStatus(value) ? value : undefined;
+}
+
+function refundAudit(
+  info: TransactionStatus["refunds"],
+): { amountRefunded?: string; amountFee?: string } | undefined {
+  if (!info) return undefined;
+  return {
+    amountRefunded: info.amountRefunded.amount,
+    amountFee: info.amountFee.amount,
+  };
+}
+
 /** Log + audit a single transition. `run` must already be at its new state. */
 async function emitTransition(
   deps: EngineDeps,
@@ -533,7 +689,12 @@ async function emitTransition(
   at: number,
   error?: string,
   routeTrust?: "attested" | "manifest",
-  meta?: { quoteFee?: Money; networkFee?: string },
+  meta?: {
+    quoteFee?: Money;
+    networkFee?: string;
+    amountRefunded?: string;
+    amountFee?: string;
+  },
 ): Promise<void> {
   const entry: AuditEntry = {
     idempotencyKey: run.idempotencyKey,
@@ -546,6 +707,8 @@ async function emitTransition(
     ...(routeTrust && { routeTrust }),
     ...(meta?.quoteFee && { quoteFee: meta.quoteFee }),
     ...(meta?.networkFee && { networkFee: meta.networkFee }),
+    ...(meta?.amountRefunded !== undefined && { amountRefunded: meta.amountRefunded }),
+    ...(meta?.amountFee !== undefined && { amountFee: meta.amountFee }),
   };
   (deps.logger ?? silentLogger).log(error ? "error" : "info", "corridor.transition", entry);
   const metrics = deps.metrics ?? noopMetrics;
@@ -596,6 +759,31 @@ async function resumeRun(
         `resumed run ${run.idempotencyKey} has no transactionId`,
       );
     }
+    if (deps.chainVerifier) {
+      const saved = run.settlement;
+      if (!saved || !run.stellarTxHash) {
+        // Written before the request was recorded: nothing to compare against.
+        (deps.logger ?? silentLogger).log("warn", "corridor.verify.skipped", {
+          idempotencyKey: run.idempotencyKey,
+          reason: "run has no recorded settlement request",
+        });
+      } else {
+        const v = await verifyOnChain(
+          deps,
+          { stellarTxHash: run.stellarTxHash },
+          { ...saved, corridor },
+        );
+        if (!v.ok) {
+          // Money moved and the chain disagrees: park for a human, do not fail.
+          const rec = await advance("recovering");
+          if (!rec.ok) return rec;
+          run.lastError = `${v.error.code}: ${v.error.message}`;
+          const held = await advance("held");
+          if (!held.ok) return held;
+          return { ok: false, error: v.error };
+        }
+      }
+    }
     const route = await deps.resolver.resolve(intent, corridor);
     const r = await reconcileUntil(route.receiving, run.transactionId, {
       now,
@@ -603,6 +791,7 @@ async function resumeRun(
       deadlineMs: now() + corridor.recovery.timeout_seconds * 1000,
       pollMs,
       stallThreshold,
+      externalStallMs: externalStallBudgetMs(corridor),
       corridorId: corridor.id,
       logger: deps.logger,
       metrics: deps.metrics,
@@ -624,4 +813,13 @@ async function resumeRun(
   const done = await advance("completed");
   if (!done.ok) return done;
   return ok(toResult(run, trail));
+}
+
+function externalStallBudgetMs(corridor: Corridor): number {
+  return (
+    Math.min(
+      corridor.recovery.reconcile.external_stall_seconds,
+      corridor.recovery.timeout_seconds,
+    ) * 1000
+  );
 }

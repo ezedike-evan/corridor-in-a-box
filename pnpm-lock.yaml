@@ -208,6 +208,12 @@ importers:
       '@corridor/manifest':
         specifier: workspace:*
         version: link:../manifest
+      '@corridor/probe':
+        specifier: workspace:*
+        version: link:../probe
+      '@corridor/router':
+        specifier: workspace:*
+        version: link:../router
       '@corridor/sep31':
         specifier: workspace:*
         version: link:../sep31

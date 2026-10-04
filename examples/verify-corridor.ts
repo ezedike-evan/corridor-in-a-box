@@ -90,6 +90,8 @@ function pinToReferenceAnchor(corridor: Corridor): Corridor {
     ...corridor,
     dest: {
       ...corridor.dest,
+      // This harness drives a SEP-31 anchor, whatever the manifest declared.
+      protocol: "sep31" as const,
       endpoints: {
         ...corridor.dest.endpoints,
         home_domain: host,

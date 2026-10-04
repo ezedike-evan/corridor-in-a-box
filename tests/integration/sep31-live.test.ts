@@ -113,7 +113,7 @@ const intent: PaymentIntent = {
 describe.skipIf(!hasAnchor)("SEP-31 live anchor (read-only)", () => {
   it.skipIf(!hasSigner)("returns a firm quote with a future expiry", async () => {
     const c = liveCorridor();
-    if (!c.dest.endpoints.quote_server) {
+    if (!("quote_server" in c.dest.endpoints) || !c.dest.endpoints.quote_server) {
       // No SEP-38 server configured for this anchor — nothing to assert here.
       return;
     }

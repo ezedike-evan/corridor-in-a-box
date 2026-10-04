@@ -29,12 +29,20 @@ function corridor(): Corridor {
       endpoints: {
         home_domain: "d.example",
         transfer_server_sep31: "https://d.example/sep31",
+        endpoints_verified_at: "1970-01-01",
       },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery: { max_retries: 2 },
+    proof: {
+      canary_completed_at: "1970-01-01T00:00:00Z",
+      stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      anchor_transaction_id: "canary-test",
+      amount: "1",
+      max_age_days: 50000,
+    },
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;
@@ -393,6 +401,97 @@ describe("engine pre-settle gate", () => {
     expect(states).toContain("failed");
     expect(states).not.toContain("settling");
   });
+
+  it("rejects an over-cap unproven payment before claiming the idempotency key", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const audit = new InMemoryAuditLog();
+    const c = { ...corridor(), proof: undefined };
+    const i = {
+      ...intent("unproven-over-cap"),
+      sourceAmount: { asset: "USDC", amount: "10.01" },
+    };
+
+    const r = await execute(i, c, { ...deps(), idempotency: store, audit });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
+    expect(await store.get(i.idempotencyKey)).toBeUndefined();
+    expect(audit.details[0]).toMatchObject({
+      event: "verifying",
+      detail: { liveness: "verified", effectiveCap: "10" },
+    });
+  });
+
+  it("allows an unproven payment at the canary cap", async () => {
+    const c = { ...corridor(), proof: undefined };
+    const i = { ...intent("unproven-at-cap"), sourceAmount: { asset: "USDC", amount: "10" } };
+
+    const r = await execute(i, c, deps());
+
+    expect(r.ok).toBe(true);
+  });
+
+  it("applies only max_amount to a proven corridor", async () => {
+    const c = { ...corridor(), limits: { max_amount: "150" } };
+    const i = {
+      ...intent("proven-over-canary"),
+      sourceAmount: { asset: "USDC", amount: "100" },
+    };
+
+    const r = await execute(i, c, { ...deps(), unprovenMaxAmount: "10" });
+
+    expect(r.ok).toBe(true);
+
+    const overMax = await execute(
+      {
+        ...i,
+        idempotencyKey: "proven-over-max",
+        sourceAmount: { asset: "USDC", amount: "151" },
+      },
+      c,
+      deps(),
+    );
+    expect(overMax.ok).toBe(false);
+    if (!overMax.ok) expect(overMax.error.code).toBe("AMOUNT_INVALID");
+  });
+
+  it("treats stale proof as unproven", async () => {
+    const c = {
+      ...corridor(),
+      proof: {
+        ...corridor().proof!,
+        canary_completed_at: "2020-01-01T00:00:00Z",
+        max_age_days: 1,
+        canary_max_amount: "5",
+      },
+    };
+    const i = { ...intent("stale-proof"), sourceAmount: { asset: "USDC", amount: "6" } };
+    const r = await execute(i, c, {
+      ...deps(),
+      now: () => Date.parse("2026-09-29T00:00:00Z"),
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
+  });
+
+  it("refuses unverified public corridors before claiming the key", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const c = {
+      ...corridor(),
+      dest: {
+        ...corridor().dest,
+        endpoints: { ...corridor().dest.endpoints, endpoints_verified_at: undefined },
+      } as Corridor["dest"],
+    };
+    const i = intent("public-unverified");
+
+    const r = await execute(i, c, { ...deps(), idempotency: store });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
+    expect(await store.get(i.idempotencyKey)).toBeUndefined();
+  });
 });
 
 // Helper: build a corridor with custom recovery policy / timeout.
@@ -406,12 +505,20 @@ function corridorWith(recovery: Record<string, unknown>): Corridor {
       endpoints: {
         home_domain: "d.example",
         transfer_server_sep31: "https://d.example/sep31",
+        endpoints_verified_at: "1970-01-01",
       },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery,
+    proof: {
+      canary_completed_at: "1970-01-01T00:00:00Z",
+      stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      anchor_transaction_id: "canary-test",
+      amount: "1",
+      max_age_days: 50000,
+    },
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;
@@ -516,6 +623,112 @@ describe("engine recovery", () => {
       expect(r.error.message).toContain("first status=pending_sender");
       expect(r.error.message).toContain("last status=pending_receiver");
     }
+  });
+
+  it("does not poll-count-stall an external phase within its elapsed-time budget", async () => {
+    let pollCount = 0;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        pollCount += 1;
+        return {
+          ok: true as const,
+          value: {
+            status: pollCount <= 100 ? "pending_external" : "completed",
+            phase: pollCount <= 100 ? ("external" as const) : undefined,
+            settled: pollCount > 100,
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-external", {
+      now: () => 0,
+      sleep: async () => {},
+      deadlineMs: 1_000_000,
+      pollMs: 1_000,
+      stallThreshold: 10,
+      externalStallMs: 60_000,
+    });
+
+    expect(r.ok).toBe(true);
+    expect(pollCount).toBe(101);
+  });
+
+  it("poll-count-stalls an unchanged anchor phase after the configured threshold", async () => {
+    let pollCount = 0;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        pollCount += 1;
+        return {
+          ok: true as const,
+          value: {
+            status: "pending_stellar",
+            phase: "anchor" as const,
+            settled: false,
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-anchor", {
+      now: () => 0,
+      sleep: async () => {},
+      deadlineMs: 1_000_000,
+      pollMs: 1_000,
+      stallThreshold: 10,
+      externalStallMs: 60_000,
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("RECONCILE_STALLED");
+      expect(r.error.message).toContain("poll stall budget");
+    }
+    expect(pollCount).toBe(11);
+  });
+
+  it("backs off during external waits and resets the interval when status changes", async () => {
+    let pollCount = 0;
+    const delays: number[] = [];
+    const statuses = [
+      ["pending_external", "external"],
+      ["pending_external", "external"],
+      ["pending_receiver", "external"],
+      ["pending_stellar", "anchor"],
+      ["completed", undefined],
+    ] as const;
+    const adapter = {
+      ...createMockAdapter(),
+      getTransaction: async () => {
+        const [status, phase] = statuses[pollCount++];
+        return {
+          ok: true as const,
+          value: {
+            status,
+            ...(phase ? { phase } : {}),
+            settled: status === "completed",
+            terminalFailure: false,
+          },
+        };
+      },
+    };
+
+    const r = await reconcileUntil(adapter, "tx-backoff", {
+      now: () => 0,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      deadlineMs: 1_000_000,
+      pollMs: 1_000,
+      stallThreshold: 10,
+    });
+
+    expect(r.ok).toBe(true);
+    expect(delays).toEqual([1_000, 2_000, 1_000, 1_000]);
   });
 
   it("SETTLEMENT_TIMEOUT records identical first and last status for a stalled observer", async () => {
@@ -659,7 +872,23 @@ describe("engine recovery", () => {
     let polls = 0;
     const refunded: string[] = [];
     const base = createMockSubmitter();
-    const failing = createMockAdapter({ terminalFailure: true });
+    // The anchor reports a full refund alongside its terminal status, so the
+    // refund watcher (#173) settles on its first poll.
+    const failing = createMockAdapter({
+      terminalFailure: true,
+      refundStatus: {
+        amountRefunded: { asset: "USDC", amount: "100.00" },
+        amountFee: { asset: "USDC", amount: "0.00" },
+        payments: [
+          {
+            id: "refund-1",
+            amount: { asset: "USDC", amount: "100.00" },
+            fee: { asset: "USDC", amount: "0.00" },
+          },
+        ],
+        completeness: "full",
+      },
+    });
     const d: EngineDeps = {
       resolver: new StaticRouteResolver(
         () => ({
@@ -695,9 +924,11 @@ describe("engine recovery", () => {
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("RECONCILE_MISMATCH");
-    expect(polls).toBe(1); // bailed on the first status, did not poll to timeout
-    // The anchor is already refunding: the run parks in refund_pending and the
-    // engine does not ask the chain to reverse the payment (#171).
+    // One reconcile poll (bailed on the first terminal status instead of polling
+    // to timeout) plus one refund-watch poll that read the anchor's report.
+    expect(polls).toBe(2);
+    // The anchor is already refunding: the run goes through refund_pending and
+    // the engine does not ask the chain to reverse the payment (#171).
     expect(refunded).toHaveLength(0);
   });
 
@@ -899,6 +1130,112 @@ describe("state machine", () => {
     // And the path that motivated the split stays closed.
     expect(canTransition("settled", "settling")).toBe(false);
     expect(canTransition("settled", "recovering")).toBe(true);
+  });
+
+  it("watches an anchor-driven full refund and records its first refund id", async () => {
+    let t = 0;
+    const store = new InMemoryIdempotencyStore();
+    const audit = new InMemoryAuditLog();
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(
+        () =>
+          createMockAdapter({
+            terminalFailure: true,
+            refundStatus: {
+              amountRefunded: { asset: "USDC", amount: "100.00" },
+              amountFee: { asset: "USDC", amount: "1.00" },
+              payments: [
+                {
+                  id: "refund-payment-1",
+                  amount: { asset: "USDC", amount: "100.00" },
+                  fee: { asset: "USDC", amount: "1.00" },
+                },
+              ],
+              completeness: "full",
+            },
+          }),
+        { trustManifestWithoutAttestation: true },
+      ),
+      submitter: createMockSubmitter(),
+      idempotency: store,
+      audit,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
+    };
+    const r = await execute(
+      intent("refund-watch-full"),
+      corridorWith({ max_retries: 0, refund_wait_seconds: 60, rollback: "refund_sender" }),
+      d,
+    );
+    expect(r.ok).toBe(false);
+    const stored = await store.get("refund-watch-full");
+    expect(stored?.state).toBe("refunded");
+    expect(stored?.refundId).toBe("refund-payment-1");
+    expect(audit.entries.find((entry) => entry.to === "refunded")).toMatchObject({
+      amountRefunded: "100.00",
+      amountFee: "1.00",
+    });
+  });
+
+  it("holds a partial refund with the reported amounts", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(
+        () =>
+          createMockAdapter({
+            terminalFailure: true,
+            refundStatus: {
+              amountRefunded: { asset: "USDC", amount: "40.00" },
+              amountFee: { asset: "USDC", amount: "1.00" },
+              payments: [],
+              completeness: "partial",
+            },
+          }),
+        { trustManifestWithoutAttestation: true },
+      ),
+      submitter: createMockSubmitter(),
+      idempotency: store,
+      trustManifestWithoutAttestation: true,
+    };
+    await execute(
+      intent("refund-watch-partial"),
+      corridorWith({ max_retries: 0, refund_wait_seconds: 60, rollback: "refund_sender" }),
+      d,
+    );
+    const stored = await store.get("refund-watch-partial");
+    expect(stored?.state).toBe("held");
+    expect(stored?.lastError).toContain("amountRefunded=40.00 USDC");
+  });
+
+  it("holds when an anchor never reports a refund before the window", async () => {
+    let t = 0;
+    const store = new InMemoryIdempotencyStore();
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter({ terminalFailure: true }), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: createMockSubmitter(),
+      idempotency: store,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
+    };
+    await execute(
+      intent("refund-watch-timeout"),
+      corridorWith({ max_retries: 0, refund_wait_seconds: 1, rollback: "refund_sender" }),
+      d,
+    );
+    const stored = await store.get("refund-watch-timeout");
+    expect(stored?.state).toBe("held");
+    expect(stored?.lastError).toContain("refund for tx");
+    expect(stored?.lastError).toContain("timeout");
   });
 });
 
@@ -1189,7 +1526,7 @@ describe("per-corridor reconcile config", () => {
 });
 
 describe("refund_pending producer", () => {
-  it("parks in refund_pending, without calling submitter.refund, when the anchor errors after settle", async () => {
+  it("enters refund_pending, without calling submitter.refund, and holds when the anchor never reports the refund", async () => {
     const h = refundHarness();
     const d: EngineDeps = {
       ...h.deps,
@@ -1199,12 +1536,17 @@ describe("refund_pending producer", () => {
     };
     const r = await execute(
       intent("rp-1"),
-      corridorWith({ max_retries: 0, timeout_seconds: 3600, rollback: "refund_sender" }),
+      corridorWith({
+        max_retries: 0,
+        timeout_seconds: 3600,
+        refund_wait_seconds: 1,
+        rollback: "refund_sender",
+      }),
       d,
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("RECONCILE_MISMATCH");
-    expect((await h.store.get("rp-1"))?.state).toBe("refund_pending");
+    expect((await h.store.get("rp-1"))?.state).toBe("held");
     expect(h.trail()).toEqual([
       "quoted",
       "compliant",
@@ -1214,6 +1556,7 @@ describe("refund_pending producer", () => {
       "settled",
       "recovering",
       "refund_pending",
+      "held",
     ]);
     expect(h.refundCalls).toHaveLength(0);
     expect((await h.store.get("rp-1"))?.refundId).toBeUndefined();
@@ -1345,5 +1688,84 @@ describe("Quote fee and settlement amount validation", () => {
     expect(settledEntry).toBeDefined();
     expect(settledEntry?.quoteFee).toEqual({ asset: "USDC", amount: "0.50" });
     expect(settledEntry?.networkFee).toBe("100");
+  });
+});
+
+describe("engine chain verifier", () => {
+  it("passes the settlement request and continues to completed when the verifier accepts", async () => {
+    const h = refundHarness();
+    const seen: { to: string; amount: string; hash: string }[] = [];
+    const r = await execute(
+      intent("cv-ok"),
+      corridorWith({ max_retries: 0, timeout_seconds: 60, rollback: "hold" }),
+      {
+        ...h.deps,
+        chainVerifier: async (ref, req) => {
+          seen.push({ to: req.to, amount: req.amount.amount, hash: ref.stellarTxHash });
+          return ok(undefined);
+        },
+      },
+    );
+    expect(r.ok).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.amount).toBe("100.00");
+    expect(h.trail()).toContain("reconciled");
+  });
+
+  it("ends held under the hold policy when the verifier fails after settled", async () => {
+    const h = refundHarness();
+    const r = await execute(
+      intent("cv-bad"),
+      corridorWith({ max_retries: 0, timeout_seconds: 60, rollback: "hold" }),
+      {
+        ...h.deps,
+        chainVerifier: async () =>
+          fail("RECONCILE_MISMATCH", "amount expected 100.00, on-chain 1", {
+            retryable: false,
+          }),
+      },
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("RECONCILE_MISMATCH");
+    expect((await h.store.get("cv-bad"))?.state).toBe("held");
+    expect(h.trail()).toEqual([
+      "quoted",
+      "compliant",
+      "opened",
+      "verifying",
+      "settling",
+      "settled",
+      "recovering",
+      "held",
+    ]);
+    expect(h.trail()).not.toContain("reconciled");
+  });
+
+  it("re-verifies on resume from settled and holds on mismatch", async () => {
+    const h = refundHarness();
+    await h.store.put({
+      idempotencyKey: "cv-resume",
+      corridorId: "test",
+      state: "settled",
+      version: 5,
+      transactionId: "tx_1",
+      stellarTxHash: "mocktx1",
+      settlement: { to: "GDEST", amount: { asset: "USDC", amount: "100.00" } },
+    });
+    let got: string | undefined;
+    const r = await execute(
+      intent("cv-resume"),
+      corridorWith({ max_retries: 0, timeout_seconds: 60, rollback: "hold" }),
+      {
+        ...h.deps,
+        chainVerifier: async (_ref, req) => {
+          got = req.to;
+          return fail("RECONCILE_MISMATCH", "destination differs", { retryable: false });
+        },
+      },
+    );
+    expect(got).toBe("GDEST");
+    expect(r.ok).toBe(false);
+    expect((await h.store.get("cv-resume"))?.state).toBe("held");
   });
 });

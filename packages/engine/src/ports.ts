@@ -25,6 +25,8 @@ export interface SettlementRequest {
   readonly memoType?: "text" | "hash" | "id";
   readonly amount: Money;
   readonly corridor: Corridor;
+  /** Epoch ms after which a firm quote expires and settlement must not land on-chain. */
+  readonly validUntil?: number;
 }
 
 export interface RefundRequest {
@@ -34,6 +36,20 @@ export interface RefundRequest {
   readonly corridor: Corridor;
   readonly reason: string;
 }
+
+/**
+ * Independent post-settle check that the transaction the submitter reported
+ * really contains the payment we asked for (destination, amount, asset, memo).
+ * The engine otherwise trusts the submitter's hash and the anchor's `completed`
+ * status. Optional: pass it on `EngineDeps.chainVerifier` to turn it on.
+ *
+ * Return a non-retryable `RECONCILE_MISMATCH` naming the differing field when
+ * the chain disagrees with the request.
+ */
+export type ChainVerifier = (
+  ref: SettlementRef,
+  req: SettlementRequest,
+) => Promise<Outcome<void>>;
 
 export interface SettlementSubmitter {
   /**

@@ -329,12 +329,73 @@ anything by hand.
 No payment went out (failure was at quote/comply/open). Safe to retry with a
 **new** `idempotencyKey`.
 
+When the failure carries a `PRESETTLE_*` code, the pre-settle gate refused the
+attempt before the native payment operation was submitted. Resolve the cause,
+then retry with a new key. Never bypass a failed gate by calling the submitter
+directly.
+
+| Code                              | Meaning                                                             | Operator action                                                                  |
+| --------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `PRESETTLE_ANCHOR_DRIFT`          | Live `/info` or `stellar.toml` no longer matches what was verified. | Re-verify the anchor and update the manifest before retrying.                    |
+| `PRESETTLE_TX_MISMATCH`           | The opened anchor transaction is not what is about to be paid.      | Do not pay; open a new transaction and investigate the anchor response.          |
+| `PRESETTLE_DESTINATION_UNSAFE`    | Destination missing, has no trustline, or is not authorized.        | Confirm the destination account and its trustline/authorization with the anchor. |
+| `PRESETTLE_INSUFFICIENT_FUNDS`    | Amount, fee, and reserve do not fit the distribution account.       | Fund the account, establish the bridge-asset trustline, or lower the amount.     |
+| `PRESETTLE_QUOTE_WINDOW`          | The firm quote will not survive settle + confirm.                   | Request a fresh quote and retry promptly.                                        |
+| `PRESETTLE_AMOUNT_OUT_OF_RANGE`   | Amount is outside the anchor or manifest min/max.                   | Adjust the amount to the advertised limits.                                      |
+| `PRESETTLE_RECEIVER_NOT_ACCEPTED` | The receiver's SEP-12 status is no longer `ACCEPTED`.               | Complete or refresh the receiver's KYC before retrying.                          |
+| `CORRIDOR_UNPROVEN`               | Amount is above the canary cap on a lane that is not yet `PROVEN`.  | Stay within the canary cap until the lane is proven.                             |
+
+### `refund_pending`
+
+After a payment has settled but the receiving anchor reports a terminal failure,
+the engine enters `recovering → refund_pending`. The receiving anchor owns the
+refund under SEP-31, so the engine polls `GET /transactions/:id` and does not
+attempt a second on-chain reversal. A full `RefundInfo` report moves the run to
+`refunded` and records the first refund payment id in write-once `refund_id`.
+Partial or unknown refunds, and a silent anchor after
+`recovery.refund_wait_seconds`, move to `held`; the run's `lastError` includes
+the reported `amountRefunded` and `amountFee` when available. Contact the
+anchor and resolve the held run out of band.
+
+### `CORRIDOR_HALTED` and breaker reset
+
+A corridor breaker protects a lane after repeated operational failures. New
+payments are refused with `CORRIDOR_HALTED` until an operator verifies the
+anchor, signer balance, and outstanding runs. Inspect the breaker and reset it
+only after the cause is understood:
+
+```bash
+corridor breaker status [corridor-id]
+corridor breaker reset <corridor-id> --reason "anchor healthy; balance restored"
+```
+
+The reset reason is part of the operator audit record. A reset is not a retry of
+any existing idempotency key; held and failed runs remain unchanged.
+
+### Resolving a held run
+
+List held runs, contact the anchor or recipient, and record the out-of-band
+outcome without mutating the payment state:
+
+```bash
+corridor runs list --state held
+corridor runs resolve <idempotency-key> \
+  --outcome refunded-offchain \
+  --note "anchor refund reference rf_…"
+```
+
+Valid outcomes are `refunded-offchain`, `paid-out-manually`, and `written-off`.
+The command refuses non-held runs and duplicate resolutions; `held` remains the
+immutable payment audit state.
+
 ### Crash mid-flight
 
 On restart, calling `execute()` again with the same intent auto-resumes from
-`settled`/`reconciled` (re-polls, never re-settles). A run stuck in `settling`
-returns `IDEMPOTENCY_CONFLICT` — investigate whether the payment went out (check
-Horizon for the distribution account) before forcing any action.
+`settled`/`reconciled` (re-polls, never re-settles). A run in
+`refund_pending` resumes its refund watch; it never calls the settle leg again.
+A run stuck in `settling` returns `IDEMPOTENCY_CONFLICT` — investigate whether
+the payment went out (check Horizon for the distribution account) before
+forcing any action.
 
 ## 3. Signing-key rotation
 
@@ -423,8 +484,17 @@ terminal counter — they catch money that stopped needing a human (see §2):
 # A payment failed terminally (before or after settle).
 - alert: CorridorPaymentsFailed
   expr: increase(corridor_terminal{state="failed"}[15m]) > 0
+# A lane is refusing new payments until an operator resets its breaker.
+- alert: CorridorBreakerTripped
+  expr: increase(corridor_breaker_tripped[15m]) > 0
 ```
 
 Useful companion series: `corridor_transition{to=…}` (throughput per state),
+`corridor_breaker_refused{corridor=…}`, and
 `corridor_verb_<verb>_ms_*` (per-verb latency summary), and `corridor_duration_ms_*`
 (end-to-end). Treat a rising `held`/`failed` rate as the page-worthy signal.
+
+The Alerting port is the integration seam for paging: inject an implementation
+that turns breaker trips, `CORRIDOR_HALTED`, and held refunds into the team's
+incident channel. Keep the port asynchronous and idempotent so a metrics retry
+cannot send duplicate pages.

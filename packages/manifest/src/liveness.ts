@@ -53,9 +53,13 @@ export function liveness(c: Corridor, now: Date = new Date()): Liveness {
   const warnings: string[] = [];
   const endpoints = c.dest.endpoints;
   const verifiedAt = endpoints.endpoints_verified_at;
+  const sep31Server =
+    "transfer_server_sep31" in endpoints ? endpoints.transfer_server_sep31 : undefined;
+  const quoteServer = "quote_server" in endpoints ? endpoints.quote_server : undefined;
+  const kycServer = "kyc_server" in endpoints ? endpoints.kyc_server : undefined;
   const proof = c.proof;
 
-  if (!endpoints.transfer_server_sep31) {
+  if (!sep31Server) {
     warnings.push(
       "dest has no SEP-31 transfer server — corridor cannot settle. NOT runnable.",
     );
@@ -67,12 +71,12 @@ export function liveness(c: Corridor, now: Date = new Date()): Liveness {
     );
   }
 
-  if (c.fx.quote_source === "sep38" && !endpoints.quote_server) {
+  if (c.fx.quote_source === "sep38" && !quoteServer) {
     warnings.push(
       "fx.quote_source=sep38 but dest exposes no SEP-38 quote server — quotes will fail.",
     );
   }
-  if (!endpoints.kyc_server) {
+  if (!kycServer) {
     warnings.push(
       "dest has no SEP-12 KYC server — assuming 1:1 delivery with no per-customer KYC.",
     );
@@ -80,7 +84,7 @@ export function liveness(c: Corridor, now: Date = new Date()): Liveness {
 
   const rc = c.recovery.reconcile;
   if (
-    rc?.poll_seconds !== undefined &&
+    rc.poll_seconds !== undefined &&
     rc.stall_polls !== undefined &&
     rc.stall_polls > 0 &&
     rc.poll_seconds * rc.stall_polls >= c.recovery.timeout_seconds
@@ -90,8 +94,16 @@ export function liveness(c: Corridor, now: Date = new Date()): Liveness {
         `is not below timeout_seconds (${c.recovery.timeout_seconds}) — the stall check can never fire.`,
     );
   }
+  if (c.recovery.timeout_seconds <= rc.external_stall_seconds) {
+    warnings.push(
+      `recovery.timeout_seconds (${c.recovery.timeout_seconds}s) does not exceed ` +
+        `recovery.reconcile.external_stall_seconds (${rc.external_stall_seconds}s); the corridor ` +
+        `timeout will end pending_external/pending_receiver waits first. Raise timeout_seconds ` +
+        `for corridors that need the full external stall budget.`,
+    );
+  }
 
-  let state: LivenessState = !endpoints.transfer_server_sep31
+  let state: LivenessState = !sep31Server
     ? "not-runnable"
     : verifiedAt
       ? "verified"

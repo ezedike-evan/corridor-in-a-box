@@ -13,7 +13,7 @@
 // adapter never has to depend on a Stellar SDK. The on-chain settle leg is NOT
 // here; that's the engine's job.
 
-import type { AnchorConfig, Corridor } from "@corridor/manifest";
+import type { Sep31Anchor, Corridor } from "@corridor/manifest";
 import {
   applyPrice,
   compareAmounts,
@@ -113,6 +113,7 @@ const IN_FLIGHT_STATUSES = new Set([
  */
 export function mapSep31Status(raw: string): {
   status: string;
+  phase?: "anchor" | "external";
   settled: boolean;
   terminalFailure: boolean;
   awaitingInput: boolean;
@@ -128,7 +129,15 @@ export function mapSep31Status(raw: string): {
     return { status, settled: false, terminalFailure: false, awaitingInput: true };
   }
   if (IN_FLIGHT_STATUSES.has(status)) {
-    return { status, settled: false, terminalFailure: false, awaitingInput: false };
+    return {
+      status,
+      ...(status === "pending_external" || status === "pending_receiver"
+        ? { phase: "external" as const }
+        : {}),
+      settled: false,
+      terminalFailure: false,
+      awaitingInput: false,
+    };
   }
   // Unrecognised status. Same shape as a known in-flight one on purpose: the
   // default must stay fail-open to polling and never to a false "settled".
@@ -264,7 +273,7 @@ function jwtExpiryMs(token: string): number | undefined {
 
 export class Sep31Adapter implements AnchorAdapter {
   readonly name: string;
-  private readonly anchor: AnchorConfig;
+  private readonly anchor: Sep31Anchor;
   /** Bridge asset for this corridor — the denomination `amount_in` is reported in. */
   private readonly settlementAsset: string;
   private readonly fetchImpl: FetchLike;
@@ -272,7 +281,12 @@ export class Sep31Adapter implements AnchorAdapter {
   private cachedToken?: { token: string; expMs: number };
 
   constructor(corridor: Corridor, opts: Sep31AdapterOptions = {}) {
-    this.anchor = corridor.dest;
+    if (corridor.dest.protocol !== "sep31") {
+      throw new Error(
+        `Sep31Adapter cannot handle protocol "${corridor.dest.protocol}"; use an adapter for that protocol`,
+      );
+    }
+    this.anchor = corridor.dest as Sep31Anchor;
     this.settlementAsset = corridor.settlement.bridge_asset;
     this.name = corridor.dest.name;
     this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -936,3 +950,67 @@ export {
   type OpenedTxCheckOptions,
   type ReportedTransactionFields,
 } from "./openedTxCheck";
+export interface ReceiverKycAdapterLike {
+  ensureCompliance(intent: PaymentIntent, corridor: Corridor): Promise<Outcome<KycResult>>;
+  readonly name?: string;
+}
+
+/**
+ * Pre-settle gate check: re-read receiver SEP-12 status right before settle
+ * and require ACCEPTED.
+ *
+ * `comply()` runs once before `open`, but between comply and settle the anchor
+ * can move the receiver to NEEDS_INFO or REJECTED — especially on retry paths
+ * with backoff sleeps.
+ *
+ * For corridors with no `kyc_server` the adapter returns accepted; record
+ * `detail: "no SEP-12 server"` so the audit trail shows it was not really checked.
+ * Anything other than accepted returns `PRESETTLE_RECEIVER_NOT_ACCEPTED`.
+ */
+export function receiverKycCheck(adapter: ReceiverKycAdapterLike): GateCheck {
+  return {
+    name: "sep12.receiver",
+    async run(ctx: GateContext): Promise<CheckResult> {
+      const start = Date.now();
+      try {
+        const outcome = await adapter.ensureCompliance(ctx.intent, ctx.corridor);
+        if (!outcome.ok) {
+          return {
+            name: "sep12.receiver",
+            passed: false,
+            code: "PRESETTLE_RECEIVER_NOT_ACCEPTED",
+            detail: outcome.error.message,
+            durationMs: Date.now() - start,
+          };
+        }
+
+        if (outcome.value.status === "accepted") {
+          const endpoints = ctx.corridor.dest.endpoints;
+          const hasKycServer = Boolean("kyc_server" in endpoints && endpoints.kyc_server);
+          return {
+            name: "sep12.receiver",
+            passed: true,
+            detail: hasKycServer ? "receiver SEP-12 status is accepted" : "no SEP-12 server",
+            durationMs: Date.now() - start,
+          };
+        }
+
+        return {
+          name: "sep12.receiver",
+          passed: false,
+          code: "PRESETTLE_RECEIVER_NOT_ACCEPTED",
+          detail: `receiver SEP-12 status is ${outcome.value.status}`,
+          durationMs: Date.now() - start,
+        };
+      } catch (err: unknown) {
+        return {
+          name: "sep12.receiver",
+          passed: false,
+          code: "PRESETTLE_RECEIVER_NOT_ACCEPTED",
+          detail: err instanceof Error ? err.message : String(err),
+          durationMs: Date.now() - start,
+        };
+      }
+    },
+  };
+}
