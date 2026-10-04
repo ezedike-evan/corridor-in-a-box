@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
 import { createMockAdapter } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
@@ -9,12 +9,15 @@ import {
   hasRequestedRefund,
   canTransition,
   createMockSubmitter,
+  StellarPaymentStrategy,
   execute,
   reconcileUntil,
   type CorridorState,
   type EngineDeps,
   type PreSettleGate,
   type SettlementSubmitter,
+  type SettlementStrategy,
+  type StoredRun,
 } from "@corridor/engine";
 import type { TransactionStatus } from "@corridor/adapter-kit";
 import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
@@ -491,6 +494,148 @@ describe("engine pre-settle gate", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("CORRIDOR_UNPROVEN");
     expect(await store.get(i.idempotencyKey)).toBeUndefined();
+  });
+});
+
+function resumableRun(state: CorridorState, key = "resume-state"): StoredRun {
+  return {
+    idempotencyKey: key,
+    corridorId: "test",
+    state,
+    version: 4,
+    transactionId: "tx_resume",
+    quoteId: "q_resume",
+    quoteExpiresAt: Date.now() + 60_000,
+    quoteFirm: true,
+    settlementAmount: "100.00",
+    depositAddress: "GMOCK000000000000000000000000000000000000000000000000",
+    memo: "mock-memo",
+    memoType: "text",
+    stellarTxHash: "mocktx_existing",
+  };
+}
+
+describe("engine crash resume states", () => {
+  it.each(["created", "quoted", "compliant"] as const)(
+    "%s is failed as stale before anything is sent",
+    async (state) => {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}`;
+      await store.put({ ...resumableRun(state, key), transactionId: undefined });
+      const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.message).toContain("RESUME_STALE");
+      expect((await store.get(key))?.state).toBe("failed");
+    },
+  );
+
+  it.each(["opened", "retrying"] as const)(
+    "%s settles after a lookup miss and a fresh compliance gate",
+    async (state) => {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}-miss`;
+      await store.put(resumableRun(state, key));
+      const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+    },
+  );
+
+  it.each(["opened", "retrying", "settling"] as const)(
+    "%s advances to settled when lookup proves the payment exists",
+    async (state) => {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}-hit`;
+      const submitter = createMockSubmitter();
+      const existingPayment = await submitter.submit({
+        to: "GMOCK000000000000000000000000000000000000000000000000",
+        memo: "mock-memo",
+        memoType: "text",
+        amount: { asset: "USDC", amount: "100.00" },
+        corridor: corridor(),
+      });
+      if (!existingPayment.ok) throw new Error("mock settlement did not succeed");
+      await store.put({ ...resumableRun(state, key), stellarTxHash: undefined });
+      const r = await execute(intent(key), corridor(), {
+        ...deps(),
+        idempotency: store,
+        submitter,
+      });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+      expect((await store.get(key))?.stellarTxHash).toBe(existingPayment.value.stellarTxHash);
+    },
+  );
+
+  it("keeps a settling miss conflicted for operator review", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const key = "resume-settling-miss";
+    await store.put(resumableRun("settling", key));
+    const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect((await store.get(key))?.state).toBe("settling");
+  });
+
+  it("reconciles a settled run and completes a reconciled run", async () => {
+    for (const state of ["settled", "reconciled"] as const) {
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}`;
+      await store.put(resumableRun(state, key));
+      const r = await execute(intent(key), corridor(), { ...deps(), idempotency: store });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+    }
+  });
+
+  it.each(["recovering", "refund_pending"] as const)(
+    "%s continues watching until the receiving anchor reports refund information",
+    async (state) => {
+      const refundStatus = {
+        amountRefunded: { asset: "USDC", amount: "100.00" },
+        amountFee: { asset: "USDC", amount: "0" },
+        payments: [],
+        completeness: "full" as const,
+      };
+      const store = new InMemoryIdempotencyStore();
+      const key = `resume-${state}`;
+      await store.put(resumableRun(state, key));
+      const r = await execute(intent(key), corridor(), {
+        ...deps({ terminalFailure: true, refundStatus }),
+        idempotency: store,
+      });
+      expect(r.ok).toBe(false);
+      expect((await store.get(key))?.state).toBe("refunded");
+    },
+  );
+
+  it("routes a resumed reconcile failure through recovery.rollback", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const key = "resume-settled-refund";
+    await store.put(resumableRun("settled", key));
+    const refundStatus = {
+      amountRefunded: { asset: "USDC", amount: "100.00" },
+      amountFee: { asset: "USDC", amount: "0.00" },
+      payments: [
+        {
+          id: "refund-1",
+          amount: { asset: "USDC", amount: "100.00" },
+          fee: { asset: "USDC", amount: "0.00" },
+        },
+      ],
+      completeness: "full" as const,
+    };
+    const r = await execute(
+      intent(key),
+      corridorWith({ max_retries: 0, rollback: "refund_sender" }),
+      {
+        ...deps({ terminalFailure: true, refundStatus }),
+        idempotency: store,
+      },
+    );
+    expect(r.ok).toBe(false);
+    expect((await store.get(key))?.state).toBe("refunded");
+    expect((await store.get(key))?.refundId).toBeTruthy();
   });
 });
 
@@ -1767,5 +1912,106 @@ describe("engine chain verifier", () => {
     expect(got).toBe("GDEST");
     expect(r.ok).toBe(false);
     expect((await h.store.get("cv-resume"))?.state).toBe("held");
+  });
+});
+
+describe("SettlementStrategy", () => {
+  // Helper: run a full payment through execute() with custom deps override.
+  async function run(depsOverride: Partial<EngineDeps> = {}) {
+    return execute(intent("strategy-test"), corridor(), {
+      ...deps(),
+      ...depsOverride,
+      idempotency: new InMemoryIdempotencyStore(),
+    });
+  }
+
+  it("StellarPaymentStrategy produces the same settling -> settled transition as the legacy submitter", async () => {
+    const submitter = createMockSubmitter();
+    const r = await run({
+      strategies: [new StellarPaymentStrategy(submitter)],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.state).toBe("completed");
+      expect(r.value.trail).toContain("settling");
+      expect(r.value.trail).toContain("settled");
+      expect(r.value.stellarTxHash).toMatch(/^mocktx/);
+    }
+  });
+
+  it("strategy selected by kind: engine dispatches to the matching strategy", async () => {
+    // Spy to verify the correct strategy's settle() was called.
+    const spySettle = vi.fn().mockResolvedValue(
+      ok({
+        stellarTxHash: "spy000000000000000000000000000000000000000000000000000000000001",
+        ledger: 1,
+      }),
+    );
+    const strategy: SettlementStrategy = {
+      kind: "stellar_payment",
+      settle: spySettle,
+    };
+
+    const r = await run({ strategies: [strategy] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.state).toBe("completed");
+    expect(spySettle).toHaveBeenCalledOnce();
+    // Context should carry the opened tx, quote, and corridor.
+    const ctx = spySettle.mock.calls[0][0];
+    expect(ctx).toHaveProperty("opened");
+    expect(ctx).toHaveProperty("quote");
+    expect(ctx).toHaveProperty("corridor");
+  });
+
+  it("unknown kind fails closed and never calls the submitter", async () => {
+    const submitter = createMockSubmitter();
+    const submitSpy = vi.spyOn(submitter, "submit");
+
+    // Create an adapter that returns a deposit instruction kind not in our
+    // strategies list, simulating a future kind from issue #183.
+    const mockAdapter = createMockAdapter();
+    const originalOpen = mockAdapter.openTransaction.bind(mockAdapter);
+    mockAdapter.openTransaction = async (intent, quote, corridor) => {
+      const r = await originalOpen(intent, quote, corridor);
+      if (!r.ok) return r;
+      // Inject a `kind` field onto the opened tx to simulate claimable_balance.
+      return ok({ ...r.value, kind: "claimable_balance" });
+    };
+
+    const resolver = new StaticRouteResolver(() => mockAdapter, {
+      trustManifestWithoutAttestation: true,
+    });
+
+    // Only register a stellar_payment strategy — no match for claimable_balance.
+    const r = await run({
+      resolver,
+      submitter,
+      strategies: [new StellarPaymentStrategy(submitter)],
+    });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_FAILED");
+      // The error message must name the unrecognised kind.
+      expect(r.error.message).toMatch(/claimable_balance/);
+    }
+    // The underlying submitter must not have been called — no money moved.
+    expect(submitSpy).not.toHaveBeenCalled();
+  });
+
+  it("settling -> settled transitions are unchanged when using strategies", async () => {
+    const audit = new InMemoryAuditLog();
+    const r = await run({
+      strategies: [new StellarPaymentStrategy(createMockSubmitter())],
+    });
+    void audit;
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const trail = r.value.trail;
+      const settlingIdx = trail.indexOf("settling");
+      const settledIdx = trail.indexOf("settled");
+      expect(settlingIdx).toBeGreaterThan(-1);
+      expect(settledIdx).toBe(settlingIdx + 1);
+    }
   });
 });

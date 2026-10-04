@@ -30,6 +30,9 @@ create table if not exists corridor_runs (
   version         integer not null,
   transaction_id  text,
   quote_id        text,
+  quote_expires_at bigint,
+  quote_firm      boolean,
+  settlement_amount text,
   stellar_tx_hash text,
   deposit_address text,
   memo            text,
@@ -69,6 +72,9 @@ const ALTER_TABLE_SQL = [
   `alter table corridor_runs add column if not exists memo_type text;`,
   // JSON of what the settle leg was asked to pay, so a resumed run can re-verify it on-chain.
   `alter table corridor_runs add column if not exists settlement text;`,
+  `alter table corridor_runs add column if not exists quote_expires_at bigint;`,
+  `alter table corridor_runs add column if not exists quote_firm boolean;`,
+  `alter table corridor_runs add column if not exists settlement_amount text;`,
 ];
 
 export async function migrate(db: Queryable): Promise<void> {
@@ -83,6 +89,9 @@ interface Row {
   version: number;
   transaction_id: string | null;
   quote_id: string | null;
+  quote_expires_at: number | string | null;
+  quote_firm: boolean | null;
+  settlement_amount: string | null;
   stellar_tx_hash: string | null;
   deposit_address: string | null;
   memo: string | null;
@@ -101,6 +110,9 @@ function toRun(r: Row): StoredRun {
     version: r.version,
     transactionId: r.transaction_id ?? undefined,
     quoteId: r.quote_id ?? undefined,
+    quoteExpiresAt: r.quote_expires_at == null ? undefined : Number(r.quote_expires_at),
+    quoteFirm: r.quote_firm ?? undefined,
+    settlementAmount: r.settlement_amount ?? undefined,
     stellarTxHash: r.stellar_tx_hash ?? undefined,
     depositAddress: r.deposit_address ?? undefined,
     memo: r.memo ?? undefined,
@@ -127,9 +139,10 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
     const res = await this.db.query<{ idempotency_key: string }>(
       `insert into corridor_runs
          (idempotency_key, corridor_id, state, version, transaction_id,
-          quote_id, stellar_tx_hash, deposit_address, memo, memo_type,
+          quote_id, quote_expires_at, quote_firm, settlement_amount,
+          stellar_tx_hash, deposit_address, memo, memo_type,
           refund_id, last_error, owner, settlement, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now())
        on conflict (idempotency_key) do nothing
        returning idempotency_key`,
       [
@@ -139,6 +152,9 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
         run.version,
         run.transactionId ?? null,
         run.quoteId ?? null,
+        run.quoteExpiresAt ?? null,
+        run.quoteFirm ?? null,
+        run.settlementAmount ?? null,
         run.stellarTxHash ?? null,
         run.depositAddress ?? null,
         run.memo ?? null,
@@ -155,7 +171,8 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
   async get(key: string): Promise<StoredRun | undefined> {
     const res = await this.db.query<Row>(
       `select idempotency_key, corridor_id, state, version, transaction_id,
-              quote_id, stellar_tx_hash, deposit_address, memo, memo_type,
+              quote_id, quote_expires_at, quote_firm, settlement_amount,
+              stellar_tx_hash, deposit_address, memo, memo_type,
               refund_id, last_error, owner, settlement
          from corridor_runs where idempotency_key = $1`,
       [key],
@@ -184,14 +201,18 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
     await this.db.query(
       `insert into corridor_runs
          (idempotency_key, corridor_id, state, version, transaction_id,
-          quote_id, stellar_tx_hash, deposit_address, memo, memo_type,
+          quote_id, quote_expires_at, quote_firm, settlement_amount,
+          stellar_tx_hash, deposit_address, memo, memo_type,
           refund_id, last_error, owner, settlement, updated_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now())
        on conflict (idempotency_key) do update set
          state           = excluded.state,
          version         = excluded.version,
          transaction_id  = excluded.transaction_id,
          quote_id        = excluded.quote_id,
+         quote_expires_at = excluded.quote_expires_at,
+         quote_firm      = excluded.quote_firm,
+         settlement_amount = excluded.settlement_amount,
          stellar_tx_hash = excluded.stellar_tx_hash,
          deposit_address = excluded.deposit_address,
          memo            = excluded.memo,
@@ -208,6 +229,9 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
         run.version,
         run.transactionId ?? null,
         run.quoteId ?? null,
+        run.quoteExpiresAt ?? null,
+        run.quoteFirm ?? null,
+        run.settlementAmount ?? null,
         run.stellarTxHash ?? null,
         run.depositAddress ?? null,
         run.memo ?? null,

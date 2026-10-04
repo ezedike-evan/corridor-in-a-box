@@ -17,6 +17,9 @@ export interface StoredRun {
   version: number;
   transactionId?: string;
   quoteId?: string;
+  quoteExpiresAt?: number;
+  quoteFirm?: boolean;
+  settlementAmount?: string;
   stellarTxHash?: string;
   depositAddress?: string;
   memo?: string;
