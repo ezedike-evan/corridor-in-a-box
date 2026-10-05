@@ -189,7 +189,12 @@ export interface PollOptions {
    */
   stallThreshold?: number;
   /** Signal to cut the sleep short and poll immediately. */
-  wake?: { readonly aborted: boolean; addEventListener(type: "abort", cb: () => void): void; removeEventListener(type: "abort", cb: () => void): void };
+  wake?: {
+    readonly aborted: boolean;
+    addEventListener(type: "abort", cb: () => void): void;
+    removeEventListener(type: "abort", cb: () => void): void;
+    reset?(): void;
+  };
   /** Maximum elapsed time in an external phase before declaring a stall. */
   externalStallMs?: number;
   /** Corridor ID for metric tagging. Optional. */
@@ -316,7 +321,11 @@ export async function reconcileUntil(
         ? Math.min(nextPollMs, Math.max(opts.pollMs, 60_000))
         : opts.pollMs;
     if (opts.wake) {
-      if (opts.wake.aborted) continue;
+      if (opts.wake.aborted) {
+        // Wake already delivered: poll now, then consume it so we don't spin.
+        opts.wake.reset?.();
+        continue;
+      }
       await new Promise<void>((resolve) => {
         let done = false;
         const complete = () => {
@@ -328,6 +337,7 @@ export async function reconcileUntil(
         opts.wake?.addEventListener("abort", complete);
         opts.sleep(delay).then(complete).catch(complete);
       });
+      opts.wake.reset?.();
     } else {
       await opts.sleep(delay);
     }

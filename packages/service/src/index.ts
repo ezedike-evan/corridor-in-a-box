@@ -295,12 +295,18 @@ export function createService(options: ServiceOptions): Service {
       if (!sigHeader) {
         return { status: 401, body: { error: "missing signature header" } };
       }
-      const parts = sigHeader.match(/t=([^,]+),\s*s=(.+)/);
-      if (!parts) {
+      // Linear-time parse (no backtracking regex): "t=<unix>, s=<base64>".
+      const commaAt = sigHeader.indexOf(",");
+      const tPart = commaAt < 0 ? "" : sigHeader.slice(0, commaAt).trim();
+      const sPart = commaAt < 0 ? "" : sigHeader.slice(commaAt + 1).trim();
+      if (!tPart.startsWith("t=") || !sPart.startsWith("s=") || sigHeader.length > 2048) {
         return { status: 401, body: { error: "invalid signature format" } };
       }
-      const tStr = parts[1];
-      const s = parts[2];
+      const tStr = tPart.slice(2);
+      const s = sPart.slice(2);
+      if (!/^\d{1,15}$/.test(tStr) || s.length === 0) {
+        return { status: 401, body: { error: "invalid signature format" } };
+      }
       const t = parseInt(tStr, 10);
       const currentT = Math.floor(now() / 1000);
       if (isNaN(t) || Math.abs(currentT - t) > 120) {
@@ -541,7 +547,9 @@ export function gracefulShutdown(
 function decodeBase32(str: string): Buffer {
   const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
   const buf = Buffer.alloc(Math.ceil((str.length * 5) / 8));
-  let bits = 0, val = 0, idx = 0;
+  let bits = 0,
+    val = 0,
+    idx = 0;
   for (let i = 0; i < str.length; i++) {
     if (str[i] === "=") break;
     val = (val << 5) | ALPHABET.indexOf(str[i]);
@@ -557,7 +565,11 @@ function decodeBase32(str: string): Buffer {
 export class CallbackVerifier {
   private readonly keys = new Map<string, { key: crypto.KeyObject; expires: number }>();
 
-  async verify(homeDomain: string, payload: Buffer, signatureBase64: string): Promise<boolean> {
+  async verify(
+    homeDomain: string,
+    payload: Buffer,
+    signatureBase64: string,
+  ): Promise<boolean> {
     const now = Date.now();
     let cached = this.keys.get(homeDomain);
     if (!cached || cached.expires < now) {
