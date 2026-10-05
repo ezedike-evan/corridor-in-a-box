@@ -3,7 +3,10 @@
 // the fact, so every state transition is both logged and recorded as an immutable
 // audit entry. Both sinks are injected; the engine never reaches for a global.
 
+import type { Money } from "@corridor/types";
 import type { CorridorState } from "./state";
+import type { LivenessState } from "@corridor/manifest";
+import type { CheckResult } from "./gate";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -30,7 +33,7 @@ export const consoleLogger: Logger = {
 export const silentLogger: Logger = { log() {} };
 
 /** One immutable record of a single state transition. */
-export interface AuditEntry {
+export interface AuditEntry extends LogFields {
   readonly idempotencyKey: string;
   readonly corridorId: string;
   readonly from: CorridorState;
@@ -39,18 +42,43 @@ export interface AuditEntry {
   readonly at: number;
   readonly error?: string;
   readonly routeTrust?: "attested" | "manifest";
+  /** The anchor's SEP-38 fee, in the sell asset. Present on the `settled` entry when the quote carried one. */
+  readonly quoteFee?: Money;
+  /** Stellar network fee charged for the settlement, in stroops (Horizon `fee_charged`). */
+  readonly networkFee?: string;
+  readonly amountRefunded?: string;
+  readonly amountFee?: string;
+  /** Pre-settle gate results, recorded on the `verifying` transition. */
+  readonly checks?: readonly CheckResult[];
+}
+
+/** Verification decision recorded before the engine claims an idempotency key. */
+export interface AuditDetail {
+  readonly event: "verifying";
+  readonly idempotencyKey: string;
+  readonly corridorId: string;
+  readonly at: number;
+  readonly detail: {
+    readonly liveness: LivenessState;
+    readonly effectiveCap?: string;
+  };
 }
 
 export interface AuditSink {
   record(entry: AuditEntry): Promise<void> | void;
+  recordDetail?(detail: AuditDetail): Promise<void> | void;
 }
 
 /** In-memory audit log for tests/examples. Back this with an append-only table
  *  (or event stream) in production — never update or delete entries. */
 export class InMemoryAuditLog implements AuditSink {
   readonly entries: AuditEntry[] = [];
+  readonly details: AuditDetail[] = [];
   record(entry: AuditEntry): void {
     this.entries.push(entry);
+  }
+  recordDetail(detail: AuditDetail): void {
+    this.details.push(detail);
   }
 }
 

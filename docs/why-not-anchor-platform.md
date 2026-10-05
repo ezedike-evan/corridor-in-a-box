@@ -16,13 +16,13 @@ They are complementary: in a real lane the receiving anchor runs the Anchor
 Platform, and this engine talks to it through the same SEP-31 adapter you'd use
 for any standards-compliant anchor.
 
-|                                      | Anchor Platform     | corridor-in-a-box                |
-| ------------------------------------ | ------------------- | -------------------------------- |
-| Who runs it                          | An anchor           | A remittance operator / PSP      |
-| Role                                 | Serve SEP endpoints | Orchestrate a payment end-to-end |
-| Owns the settle leg                  | No                  | Yes (native Stellar payment)     |
-| Multi-anchor routing                 | No                  | Yes (RouteResolver seam)         |
-| Idempotency / recovery state machine | N/A                 | Core                             |
+|                                      | Anchor Platform     | corridor-in-a-box                                               |
+| ------------------------------------ | ------------------- | --------------------------------------------------------------- |
+| Who runs it                          | An anchor           | A remittance operator / PSP                                     |
+| Role                                 | Serve SEP endpoints | Orchestrate a payment end-to-end                                |
+| Owns the settle leg                  | No                  | Yes (native Stellar payment)                                    |
+| Multi-anchor routing                 | No                  | Seam only (`RouteResolver`); no multi-anchor resolver ships yet |
+| Idempotency / recovery state machine | N/A                 | Core                                                            |
 
 ## What this engine adds
 
@@ -32,12 +32,14 @@ for any standards-compliant anchor.
 - **One adapter for every standards-compliant anchor**, plus a port for bespoke
   OTC/exchange desks that don't speak SEP-31.
 - **An explicit, persisted state machine** with idempotency, crash-resume,
-  timeout enforcement, retry/backoff, and a real refund/hold recovery path —
-  the things you need to not lose an in-flight payment.
-- **A route seam.** The open repo ships the `RouteResolver` interface and a
-  trivial "use the declared anchor" default. A health-/rate-weighted resolver
-  could be developed as a separate proprietary component, but none is included
-  or injected at runtime today.
+  timeout enforcement, retry/backoff, and fail-closed recovery: a payment that
+  cannot complete is parked in `held` for a human — nothing is ever re-sent.
+  See the [operations runbook](./operations.md).
+- **A route seam.** The open repo ships the `RouteResolver` interface plus two
+  resolvers: `StaticRouteResolver` (trust the manifest) and
+  `RegistryRouteResolver` (require a fresh on-chain attestation). A
+  health-/rate-weighted resolver could be developed as a separate proprietary
+  component, but none is included or injected at runtime today.
 - **Build-time liveness checks.** `corridor plan` surfaces missing endpoints
   (e.g. a destination with no SEP-31 server) before you touch the network.
 

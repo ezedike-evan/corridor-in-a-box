@@ -67,7 +67,7 @@ packages/
                  anchor (SEP-10 auth + SEP-12 KYC; crypto behind an injected signer)
   stellar/       the only package on the money path that touches the chain;
                  @stellar/stellar-sdk-backed settlement submitter + SEP-10 signer
-  router/        RouteResolver seam — open interface + dumb static default
+  router/        RouteResolver seam — open interface + two resolvers (Static + Registry)
   engine/        corridor-agnostic orchestration of the five verbs, with a
                  persisted state machine, crash-resume, recovery, audit trail,
                  metrics hooks, and a durable Postgres idempotency store
@@ -92,10 +92,12 @@ Three boundaries do the work:
    Standards-compliant anchors share one adapter; bespoke exchange/OTC desks
    implement the same interface. Proprietary implementations could be maintained
    separately; none is included in this repo.
-3. **router seam** — the open repo ships the `RouteResolver` interface plus a
-   trivial "use the declared anchor" default. A health-/rate-weighted resolver
-   could be supplied separately; it is not included or injected by this repo.
-   The interface is the seam for that possible future component.
+3. **router seam** — the open repo ships the `RouteResolver` interface plus two
+   resolvers: `StaticRouteResolver` (trust the manifest) and
+   `RegistryRouteResolver` (require a fresh on-chain attestation). A
+   health-/rate-weighted resolver could be supplied separately; it is not
+   included or injected by this repo. The interface is the seam for that
+   possible future component.
 
 ## Corridor sequencing
 
@@ -237,6 +239,15 @@ the anchor's back-office plumbing, not the engine — but it means **the
 the engine's timeout/recovery path is what actually ran. Closing that is the
 remaining Phase-1 item.
 
+**Update (2026-09-01): cursor seeding fixed in #65.** `reference-anchor.sh up`
+now reseeds the observer cursor from Horizon's tip on every start (see [the
+observer cursor](./docs/operations.md#the-observer-cursor)), #66 added a
+cursor-lag check to `doctor`, and #67/#75 added `pnpm verify:corridor` plus the
+scheduled [`reference-corridor`](https://github.com/ezedike-evan/corridor-in-a-box/actions/workflows/reference-corridor.yml)
+workflow, which runs the whole corridor against the reference stack. The stale
+cursor is no longer the known blocker. `reconcile → completed` stays **unproven**
+until that workflow passes; it currently fails.
+
 ## Proof the settle leg is real
 
 The settle leg has been executed against live Stellar testnet. Reproduce it in
@@ -306,6 +317,9 @@ Swap the mocks for the real implementations (both ship in this repo):
   durable, crash-resumable run log (run `migrate(pool)` once at startup).
 - Pass an `audit` sink (and a `logger`) to `execute()` so every state transition
   is recorded.
+- Provide `gate: defaultSep31Gate(...)` (or a custom `PreSettleGate`) to `execute()`.
+  Pre-settle safety checks are mandatory by default before money moves on chain
+  (`unsafeSkipPreSettleGate: true` is strictly an explicit opt-out for tests).
 
 Then point a manifest at the testnet reference server and run it for real. The
 open repo runs with its default `RouteResolver`; a proprietary implementation

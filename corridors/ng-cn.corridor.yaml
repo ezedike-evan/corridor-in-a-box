@@ -27,6 +27,7 @@ fx:
   quote_source: sep38
   who_holds_risk: sending_anchor
   quote_ttl_seconds: 45
+  min_quote_remaining_seconds: 15 # default 45 would equal this TTL and refuse every quote
 
 compliance:
   source_jurisdiction: NG

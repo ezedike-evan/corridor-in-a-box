@@ -1,9 +1,10 @@
 // @corridor/router — the RouteResolver seam drawn in code.
 //
-// The interface and a simple default ship here, in the open repo. A resolver
-// weighted by anchor health, conformance, latency, and proprietary routing data
-// could be supplied separately in the future; no such proprietary component is
-// included or injected here. Anyone can run the open engine with its default.
+// The interface and two open resolvers ship here: StaticRouteResolver (trust the
+// manifest) and RegistryRouteResolver (require a fresh on-chain attestation). A
+// resolver weighted by anchor health, conformance, latency, and proprietary
+// routing data could be supplied separately in the future; no such proprietary
+// component is included or injected here.
 
 import type { Corridor } from "@corridor/manifest";
 import type { AnchorAdapter } from "@corridor/adapter-kit";
@@ -56,6 +57,7 @@ export class StaticRouteResolver implements RouteResolver {
 export {
   RegistryRouteResolver,
   UnattestedAnchorError,
+  isUnattestedDomainAllowed,
   type AttestationSource,
   type RegistryResolverOptions,
 } from "./registry-resolver";

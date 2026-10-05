@@ -8,8 +8,7 @@ import { describe, expect, it } from "vitest";
 // test a CLI's actual argv/exit-code/stdio contract.
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const TSX_BIN = process.platform === "win32" ? "tsx.cmd" : "tsx";
-const TSX = fileURLToPath(new URL(`../node_modules/.bin/${TSX_BIN}`, import.meta.url));
+const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
 const CLI = fileURLToPath(new URL("../packages/cli/src/index.ts", import.meta.url));
 
 function run(args: string[]) {
@@ -61,11 +60,31 @@ describe("corridor CLI", () => {
   // endpoints are merely PRESENT must never be reported as runnable — that is
   // how tooling ends up certifying a lane nobody has checked.
 
-  it("plan: reports VERIFIED only when endpoints_verified_at is set", () => {
+  it("plan: reports VERIFIED with proof: none when endpoints_verified_at is set without proof", () => {
     const r = run(["plan", "tests/fixtures/verified.corridor.yaml"]);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("liveness: ✓ VERIFIED");
     expect(r.stdout).toContain("2026-01-01");
+    expect(r.stdout).toContain("proof:    none — amounts capped at default");
+  });
+
+  it("plan: reports PROVEN with canary hash and completion age for proven lane", () => {
+    const r = run(["plan", "tests/fixtures/proven.corridor.yaml"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("liveness: ✓✓ PROVEN");
+    expect(r.stdout).toContain("canary a1b2c3d4 completed 2026-09-20");
+    expect(r.stdout).toContain("days ago, expires in");
+  });
+
+  it("plan: reports VERIFIED with warning when proof is stale", () => {
+    const r = run(["plan", "tests/fixtures/stale-proof.corridor.yaml"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("liveness: ✓ VERIFIED");
+    // A stale proof exists, so the plan must not claim there is none.
+    expect(r.stdout).toContain("proof:    not current — canary a1b2c3d4 completed 2025-01-01");
+    expect(r.stdout).not.toContain("proof:    none");
+    expect(r.stdout).toContain("liveness warnings:");
+    expect(r.stdout).toContain("proof is stale");
   });
 
   it("plan: reports UNVERIFIED for a fully-specified but unchecked corridor", () => {
@@ -76,6 +95,7 @@ describe("corridor CLI", () => {
     // Regression guard for the claim that got the project rejected: a corridor
     // with unconfirmed endpoints must never carry the green marker.
     expect(r.stdout).not.toContain("✓ VERIFIED");
+    expect(r.stdout).not.toContain("✓✓ PROVEN");
   });
 
   it("plan: never reports a placeholder-endpoint corridor as runnable", () => {
@@ -83,6 +103,7 @@ describe("corridor CLI", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("UNVERIFIED");
     expect(r.stdout).not.toContain("✓ VERIFIED");
+    expect(r.stdout).not.toContain("✓✓ PROVEN");
   });
 
   it("plan: reports all three liveness warnings for a corridor missing dest endpoints", () => {
@@ -103,5 +124,11 @@ describe("corridor CLI", () => {
   it("plan: prints the status_note when present", () => {
     const r = run(["plan", "corridors/ng-cn.corridor.yaml"]);
     expect(r.stdout).toContain("PENDING");
+  });
+
+  it("plan: prints limits min and max when set", () => {
+    const r = run(["plan", "tests/fixtures/limits.corridor.yaml"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("limits:   min=10.00 max=500.00");
   });
 });

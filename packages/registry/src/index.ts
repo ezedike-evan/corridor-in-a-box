@@ -142,6 +142,15 @@ export class AnchorRegistry {
     };
   }
 
+  /** SHA-256 of the stellar.toml the latest attestation was made from. */
+  async tomlHash(domain: string): Promise<string> {
+    const anchor = await this.getAnchor(domain);
+    if (!anchor || typeof anchor.tomlHash !== "string") {
+      throw new Error(`registry.get_anchor returned no TOML hash for ${domain}`);
+    }
+    return anchor.tomlHash;
+  }
+
   /**
    * Whether the anchor both ADVERTISES SEP-31 and PASSED the SEP-31 probe.
    *

@@ -13,7 +13,7 @@
 // adapter never has to depend on a Stellar SDK. The on-chain settle leg is NOT
 // here; that's the engine's job.
 
-import type { AnchorConfig, Corridor } from "@corridor/manifest";
+import type { Sep31Anchor, Corridor } from "@corridor/manifest";
 import {
   applyPrice,
   compareAmounts,
@@ -26,6 +26,7 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type {
+  AdapterCapabilities,
   AnchorAdapter,
   KycResult,
   OpenTransaction,
@@ -113,6 +114,7 @@ const IN_FLIGHT_STATUSES = new Set([
  */
 export function mapSep31Status(raw: string): {
   status: string;
+  phase?: "anchor" | "external";
   settled: boolean;
   terminalFailure: boolean;
   awaitingInput: boolean;
@@ -128,7 +130,15 @@ export function mapSep31Status(raw: string): {
     return { status, settled: false, terminalFailure: false, awaitingInput: true };
   }
   if (IN_FLIGHT_STATUSES.has(status)) {
-    return { status, settled: false, terminalFailure: false, awaitingInput: false };
+    return {
+      status,
+      ...(status === "pending_external" || status === "pending_receiver"
+        ? { phase: "external" as const }
+        : {}),
+      settled: false,
+      terminalFailure: false,
+      awaitingInput: false,
+    };
   }
   // Unrecognised status. Same shape as a known in-flight one on purpose: the
   // default must stay fail-open to polling and never to a false "settled".
@@ -152,6 +162,24 @@ interface RawRefunds {
  */
 function amountString(v: unknown): string | undefined {
   return typeof v === "string" && isValidAmount(v.trim()) ? v.trim() : undefined;
+}
+
+/** A non-empty string, or undefined if the anchor sent anything else. */
+function nonEmptyString(v: unknown): string | undefined {
+  return typeof v === "string" && v ? v : undefined;
+}
+
+/**
+ * SEP-31's `stellar_memo_type`, case-insensitively, or undefined when absent or
+ * not one of the three memo encodings Stellar supports. Never defaulted to
+ * "text" here: a hash memo encoded as text is corrupted, so an unknown type is
+ * reported as unknown.
+ */
+function parseMemoType(v: unknown): "text" | "hash" | "id" | undefined {
+  const memoType = typeof v === "string" ? v.toLowerCase() : undefined;
+  return memoType === "hash" || memoType === "id" || memoType === "text"
+    ? memoType
+    : undefined;
 }
 
 /**
@@ -246,7 +274,7 @@ function jwtExpiryMs(token: string): number | undefined {
 
 export class Sep31Adapter implements AnchorAdapter {
   readonly name: string;
-  private readonly anchor: AnchorConfig;
+  private readonly anchor: Sep31Anchor;
   /** Bridge asset for this corridor — the denomination `amount_in` is reported in. */
   private readonly settlementAsset: string;
   private readonly fetchImpl: FetchLike;
@@ -254,7 +282,12 @@ export class Sep31Adapter implements AnchorAdapter {
   private cachedToken?: { token: string; expMs: number };
 
   constructor(corridor: Corridor, opts: Sep31AdapterOptions = {}) {
-    this.anchor = corridor.dest;
+    if (corridor.dest.protocol !== "sep31") {
+      throw new Error(
+        `Sep31Adapter cannot handle protocol "${corridor.dest.protocol}"; use an adapter for that protocol`,
+      );
+    }
+    this.anchor = corridor.dest as Sep31Anchor;
     this.settlementAsset = corridor.settlement.bridge_asset;
     this.name = corridor.dest.name;
     this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -336,6 +369,18 @@ export class Sep31Adapter implements AnchorAdapter {
       );
     }
     return ok({ sep31, sep38: this.anchor.endpoints.quote_server });
+  }
+
+  capabilities(): AdapterCapabilities {
+    const e = this.anchor.endpoints;
+    return {
+      protocol: "sep31",
+      quotes: e.quote_server ? ["sep38_firm"] : ["none"],
+      kyc: e.kyc_server ? "sep12" : "none",
+      settlement: ["stellar_payment"],
+      refunds: "report_only",
+      callbacks: false,
+    };
   }
 
   async requestQuote(intent: PaymentIntent, corridor: Corridor): Promise<Outcome<Quote>> {
@@ -424,12 +469,31 @@ export class Sep31Adapter implements AnchorAdapter {
         }
       }
 
+      // The fee has to be in exactly the asset we asked to sell: a SEP-38 asset id, issuer included
+      // (the same code from another issuer is a different asset). Anything else would change what
+      // must be sent, so the quote is refused until someone proves the semantics of that case.
+      let fee: Money | undefined;
+      if (j.fee) {
+        const sellAsset = sep38SellAsset(corridor);
+        if (j.fee.asset !== sellAsset) {
+          return fail(
+            "QUOTE_UNAVAILABLE",
+            `${this.name}: quote fee asset "${j.fee.asset}" does not match sell asset "${sellAsset}"`,
+          );
+        }
+        // A malformed total is dropped rather than guessed at.
+        if (isValidAmount(j.fee.total)) {
+          fee = { asset: intent.sourceAmount.asset, amount: j.fee.total };
+        }
+      }
+
       return ok<Quote>({
         id: j.id,
         price: j.price,
         expiresAt: Date.parse(j.expires_at),
         sourceAmount: { asset: intent.sourceAmount.asset, amount: sellAmount },
         destAmount: { asset: this.anchor.asset, amount: j.buy_amount },
+        ...(fee && { fee }),
         firm: true,
       });
     } catch (cause) {
@@ -626,17 +690,13 @@ export class Sep31Adapter implements AnchorAdapter {
         stellar_memo?: string;
         stellar_memo_type?: string;
       };
-      const memoType = j.stellar_memo_type?.toLowerCase();
       return ok<OpenTransaction>({
         transactionId: j.id,
         depositAddress: j.stellar_account_id,
         memo: j.stellar_memo,
         // Carry the anchor's memo TYPE through. Assuming "text" corrupts a hash
         // memo (32 bytes, over the 28-byte text cap) and the submit fails.
-        memoType:
-          memoType === "hash" || memoType === "id" || memoType === "text"
-            ? memoType
-            : undefined,
+        memoType: parseMemoType(j.stellar_memo_type),
       });
     } catch (cause) {
       return fail("ANCHOR_UNAVAILABLE", `${this.name}: open-tx failed`, {
@@ -693,6 +753,9 @@ export class Sep31Adapter implements AnchorAdapter {
           amount_in?: unknown;
           amount_in_asset?: unknown;
           refunds?: unknown;
+          stellar_account_id?: unknown;
+          stellar_memo?: unknown;
+          stellar_memo_type?: unknown;
         };
       };
       const tx = j.transaction;
@@ -712,7 +775,24 @@ export class Sep31Adapter implements AnchorAdapter {
       // must never turn a readable status into an error.
       const refunds = parseRefunds(tx.refunds, asset, settledAmount);
 
-      return ok<TransactionStatus>(refunds ? { ...mapped, refunds } : mapped);
+      // The anchor's own record of what it expects to receive, for a pre-settle
+      // cross-check against what we are about to send. Same rule as refunds:
+      // each field is read on its own, and anything malformed is left out
+      // rather than guessed — including a numeric amount_in, which has already
+      // been through a float64.
+      const amountIn = amountString(tx.amount_in);
+      const depositAddress = nonEmptyString(tx.stellar_account_id);
+      const memo = nonEmptyString(tx.stellar_memo);
+      const memoType = parseMemoType(tx.stellar_memo_type);
+
+      return ok<TransactionStatus>({
+        ...mapped,
+        ...(refunds ? { refunds } : {}),
+        ...(amountIn !== undefined ? { amountIn: { asset, amount: amountIn } } : {}),
+        ...(depositAddress !== undefined ? { depositAddress } : {}),
+        ...(memo !== undefined ? { memo } : {}),
+        ...(memoType !== undefined ? { memoType } : {}),
+      });
     } catch (cause) {
       return fail("ANCHOR_UNAVAILABLE", `${this.name}: get-tx failed`, {
         retryable: true,
@@ -914,3 +994,67 @@ export {
   type OpenedTxCheckOptions,
   type ReportedTransactionFields,
 } from "./openedTxCheck";
+export interface ReceiverKycAdapterLike {
+  ensureCompliance(intent: PaymentIntent, corridor: Corridor): Promise<Outcome<KycResult>>;
+  readonly name?: string;
+}
+
+/**
+ * Pre-settle gate check: re-read receiver SEP-12 status right before settle
+ * and require ACCEPTED.
+ *
+ * `comply()` runs once before `open`, but between comply and settle the anchor
+ * can move the receiver to NEEDS_INFO or REJECTED — especially on retry paths
+ * with backoff sleeps.
+ *
+ * For corridors with no `kyc_server` the adapter returns accepted; record
+ * `detail: "no SEP-12 server"` so the audit trail shows it was not really checked.
+ * Anything other than accepted returns `PRESETTLE_RECEIVER_NOT_ACCEPTED`.
+ */
+export function receiverKycCheck(adapter: ReceiverKycAdapterLike): GateCheck {
+  return {
+    name: "sep12.receiver",
+    async run(ctx: GateContext): Promise<CheckResult> {
+      const start = Date.now();
+      try {
+        const outcome = await adapter.ensureCompliance(ctx.intent, ctx.corridor);
+        if (!outcome.ok) {
+          return {
+            name: "sep12.receiver",
+            passed: false,
+            code: "PRESETTLE_RECEIVER_NOT_ACCEPTED",
+            detail: outcome.error.message,
+            durationMs: Date.now() - start,
+          };
+        }
+
+        if (outcome.value.status === "accepted") {
+          const endpoints = ctx.corridor.dest.endpoints;
+          const hasKycServer = Boolean("kyc_server" in endpoints && endpoints.kyc_server);
+          return {
+            name: "sep12.receiver",
+            passed: true,
+            detail: hasKycServer ? "receiver SEP-12 status is accepted" : "no SEP-12 server",
+            durationMs: Date.now() - start,
+          };
+        }
+
+        return {
+          name: "sep12.receiver",
+          passed: false,
+          code: "PRESETTLE_RECEIVER_NOT_ACCEPTED",
+          detail: `receiver SEP-12 status is ${outcome.value.status}`,
+          durationMs: Date.now() - start,
+        };
+      } catch (err: unknown) {
+        return {
+          name: "sep12.receiver",
+          passed: false,
+          code: "PRESETTLE_RECEIVER_NOT_ACCEPTED",
+          detail: err instanceof Error ? err.message : String(err),
+          durationMs: Date.now() - start,
+        };
+      }
+    },
+  };
+}

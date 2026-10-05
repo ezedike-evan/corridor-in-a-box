@@ -14,10 +14,11 @@
 //
 // `fetchImpl` is injectable so the whole thing is testable without a network.
 
-import { createHash } from "node:crypto";
 import { Keypair, TransactionBuilder, type Transaction } from "@stellar/stellar-sdk";
+import { tomlHash as tomlHashText } from "./toml-hash";
 import { isSafeUrl } from "./url-safety";
 
+export { tomlHash } from "./toml-hash";
 export { isSafeUrl } from "./url-safety";
 
 /** SEP numbers in registry bit order. Must match SEP_NUMBERS in contracts/registry. */
@@ -143,7 +144,7 @@ export async function probeAnchor(
     const res = await get(`https://${domain}/.well-known/stellar.toml`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     toml = await res.text();
-    tomlHash = createHash("sha256").update(toml).digest("hex");
+    tomlHash = tomlHashText(toml);
     seps |= sepBit(1);
     record("toml_fetch", true, `sha256 ${tomlHash.slice(0, 16)}…`);
   } catch (e) {

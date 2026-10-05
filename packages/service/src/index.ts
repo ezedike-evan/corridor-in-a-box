@@ -115,6 +115,7 @@ const STATUS_BY_CODE: Record<CorridorErrorCode, number> = {
   PRESETTLE_RECEIVER_NOT_ACCEPTED: 403,
   CORRIDOR_UNPROVEN: 422,
   CORRIDOR_HALTED: 503,
+  ENGINE_MISCONFIGURED: 500,
 };
 
 /** Token-bucket rate limiter, keyed per client. In-memory; swap for Redis at scale. */

@@ -29,6 +29,14 @@ import type { RouteDecision, RouteResolver } from "./index";
 export interface AttestationSource {
   servesSep31(domain: string): Promise<boolean>;
   staleness(domain: string): Promise<number>;
+  tomlHash(domain: string): Promise<string>;
+}
+
+export function isUnattestedDomainAllowed(
+  domain: string,
+  allowUnattestedDomains: readonly string[] = [],
+): boolean {
+  return allowUnattestedDomains.includes(domain);
 }
 
 export class UnattestedAnchorError extends Error {
@@ -71,19 +79,19 @@ export class RegistryRouteResolver implements RouteResolver {
   private readonly registry: AttestationSource;
   private readonly adapterFor: (corridor: Corridor) => AnchorAdapter;
   private readonly maxStaleness: number;
-  private readonly allowed: ReadonlySet<string>;
+  private readonly allowed: readonly string[];
 
   constructor(opts: RegistryResolverOptions) {
     this.registry = opts.registry;
     this.adapterFor = opts.adapterFor;
     this.maxStaleness = opts.maxStalenessLedgers ?? WEEK_OF_LEDGERS;
-    this.allowed = new Set(opts.allowUnattestedDomains ?? []);
+    this.allowed = opts.allowUnattestedDomains ?? [];
   }
 
   async resolve(_intent: PaymentIntent, corridor: Corridor): Promise<RouteDecision> {
     const domain = corridor.dest.endpoints.home_domain;
 
-    if (this.allowed.has(domain)) {
+    if (isUnattestedDomainAllowed(domain, this.allowed)) {
       return { receiving: this.adapterFor(corridor), trust: "attested" };
     }
 

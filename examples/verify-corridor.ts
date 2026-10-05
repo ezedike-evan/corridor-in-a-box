@@ -44,6 +44,7 @@ import {
   InMemoryAuditLog,
   InMemoryIdempotencyStore,
   consoleLogger,
+  defaultSep31Gate,
   execute,
   type EngineDeps,
 } from "@corridor/engine";
@@ -90,6 +91,8 @@ function pinToReferenceAnchor(corridor: Corridor): Corridor {
     ...corridor,
     dest: {
       ...corridor.dest,
+      // This harness drives a SEP-31 anchor, whatever the manifest declared.
+      protocol: "sep31" as const,
       endpoints: {
         ...corridor.dest.endpoints,
         home_domain: host,
@@ -203,6 +206,7 @@ async function main(): Promise<void> {
     audit,
     logger: consoleLogger,
     trustManifestWithoutAttestation: true,
+    gate: defaultSep31Gate({ adapter, horizon: HORIZON }),
   };
 
   // SEP-12 identifies both parties to the receiving anchor. The sending side

@@ -17,7 +17,22 @@ import { isSettleableAmount, isValidAmount, type Outcome } from "@corridor/types
 
 const loaded = loadCorridor("corridors/reference.corridor.yaml");
 if (!loaded.ok) throw new Error("fixture manifest failed to load");
-const CORRIDOR: Corridor = loaded.value;
+// The reference manifest is unverified/unproven, which caps payments at the canary
+// amount. These tests exercise service behaviour, not the cap, so mark it proven.
+const CORRIDOR: Corridor = {
+  ...loaded.value,
+  dest: {
+    ...loaded.value.dest,
+    endpoints: { ...loaded.value.dest.endpoints, endpoints_verified_at: "1970-01-01" },
+  } as Corridor["dest"],
+  proof: {
+    canary_completed_at: "1970-01-01T00:00:00Z",
+    stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    anchor_transaction_id: "canary-test",
+    amount: "1",
+    max_age_days: 50000,
+  },
+};
 
 /** A submitter that records what it was asked to send, and always succeeds. */
 function recordingSubmitter() {
@@ -56,6 +71,7 @@ function service(opts: {
       idempotency: opts.store ?? new InMemoryIdempotencyStore(),
       submitter: opts.submitter ?? recordingSubmitter().submitter,
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     },
   });
 }
@@ -348,7 +364,12 @@ describe("SEP-38 quotes", () => {
       expires_at: new Date(Date.now() + 60_000).toISOString(),
       sell_amount: "10",
       buy_amount: "8.57",
-      fee: { total: "1.00", asset: "stellar:USDC:GBBD47IF" },
+      // A real SEP-38 server reports the fee in the asset it was asked to sell: the full
+      // `stellar:CODE:ISSUER` id, issuer included.
+      fee: {
+        total: "1.00",
+        asset: `stellar:${CORRIDOR.settlement.bridge_asset}:${CORRIDOR.settlement.asset_issuer}`,
+      },
       ...over,
     });
 

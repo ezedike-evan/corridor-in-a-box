@@ -50,6 +50,12 @@ function printPlan(c: Corridor): void {
   );
   line(`dest:     ${c.dest.name}  [${c.dest.asset}]  ${c.dest.endpoints.home_domain}`);
   line(`bridge:   ${c.settlement.bridge_asset} on ${c.settlement.network}`);
+  if (c.limits && (c.limits.min_amount !== undefined || c.limits.max_amount !== undefined)) {
+    const parts: string[] = [];
+    if (c.limits.min_amount !== undefined) parts.push(`min=${c.limits.min_amount}`);
+    if (c.limits.max_amount !== undefined) parts.push(`max=${c.limits.max_amount}`);
+    line(`limits:   ${parts.join(" ")}`);
+  }
   line(
     `recovery: retries=${c.recovery.max_retries}, timeout=${c.recovery.timeout_seconds}s, rollback=${c.recovery.rollback}`,
   );
@@ -68,8 +74,32 @@ function printPlan(c: Corridor): void {
   // not runnable — the presence of a URL is not evidence the anchor is real.
   const live = liveness(c);
 
-  if (live.state === "verified") {
+  if (live.state === "proven" && live.proof) {
+    const hashPrefix = live.proof.stellar_tx_hash.slice(0, 8);
+    const date = live.proof.canary_completed_at.slice(0, 10);
+    const now = new Date();
+    const completedAt = new Date(live.proof.canary_completed_at).getTime();
+    const ageMs = now.getTime() - completedAt;
+    const daysAgo = Math.max(0, Math.floor(ageMs / (24 * 60 * 60 * 1000)));
+    const maxAge = live.proof.max_age_days ?? 30;
+    const expiresIn = Math.max(0, maxAge - daysAgo);
+    line(
+      `liveness: ✓✓ PROVEN — canary ${hashPrefix} completed ${date} (${daysAgo} days ago, expires in ${expiresIn}d)`,
+    );
+  } else if (live.state === "verified") {
     line(`liveness: ✓ VERIFIED — endpoints confirmed ${live.verifiedAt} for all five steps`);
+    const cap = c.proof?.canary_max_amount ?? c.limits?.max_amount ?? "default";
+    if (c.proof) {
+      // A proof is on file but liveness() did not honour it (stale, future-dated):
+      // saying "none" would be wrong, and the reason is in the warnings below.
+      const hashPrefix = c.proof.stellar_tx_hash.slice(0, 8);
+      const date = c.proof.canary_completed_at.slice(0, 10);
+      line(
+        `proof:    not current — canary ${hashPrefix} completed ${date}; amounts capped at ${cap}`,
+      );
+    } else {
+      line(`proof:    none — amounts capped at ${cap}`);
+    }
   } else if (live.state === "unverified") {
     line("liveness: ? UNVERIFIED — endpoints present but unconfirmed. NOT runnable.");
   } else {

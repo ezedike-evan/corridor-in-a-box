@@ -42,6 +42,7 @@ import {
   PostgresIdempotencyStore,
   PrometheusMetrics,
   consoleLogger,
+  defaultSep31Gate,
   migrate,
   type EngineDeps,
   type IdempotencyStore,
@@ -123,6 +124,7 @@ async function main(): Promise<void> {
     logger: consoleLogger,
     metrics,
     trustManifestWithoutAttestation: true,
+    gate: defaultSep31Gate({ horizon: horizonUrl }),
   };
 
   const apiKeys = (process.env.CORRIDOR_API_KEYS ?? "")
