@@ -62,6 +62,7 @@ import {
   BREAKER_METRICS,
   MeteredCorridorHealthStore,
   breakerOutcomeFor,
+  recoveredBreakerCause,
   type CorridorHealthStore,
 } from "./breaker";
 
@@ -1237,12 +1238,17 @@ async function resumeRun(
       "RECONCILE_MISMATCH",
       `receiving transaction ${run.transactionId} was refunded`,
     );
+    // What the breaker judges. The failure that sent this run into recovery is
+    // not in memory after a restart, but its `lastError` was persisted, so read
+    // the real cause back before anything below clears it. Falls back to the
+    // refunded-reconcile error when there is nothing usable to read.
+    const breakerCause = recoveredBreakerCause(run.lastError, refundedError.error);
     // A refund this run already requested is the evidence that the money is
     // on its way back; never request or wait for a second one.
     if (hasRequestedRefund(run)) {
       const refunded = await context.advance("refunded");
       if (!refunded.ok) return refunded;
-      await recordOutcome("refunded", refundedError.error);
+      await recordOutcome("refunded", breakerCause);
       return refundedError;
     }
     if (run.state === "recovering") {
@@ -1267,16 +1273,12 @@ async function resumeRun(
       run.lastError = undefined;
       const refunded = await context.advance("refunded", refundAudit(info));
       if (!refunded.ok) return refunded;
-      await recordOutcome("refunded", refundedError.error);
+      await recordOutcome("refunded", breakerCause);
       return refundedError;
     }
-    // The original failure is not in memory after a restart; the refund report
-    // it was waiting on is the same lane-level reconcile outage.
-    return context.holdAndStop(
-      watched.error,
-      statusFrom(watched.error.cause),
-      refundedError.error,
-    );
+    // The refund report this run was waiting on never came; the breaker still
+    // judges the original failure (`breakerCause`), not the watch timeout.
+    return context.holdAndStop(watched.error, statusFrom(watched.error.cause), breakerCause);
   }
 
   return conflict("state is not supported by the resume handler");

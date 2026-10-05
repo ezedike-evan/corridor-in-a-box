@@ -7,6 +7,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Fixed — a resumed recovery run reports its real cause to the circuit breaker
+
+After a restart, a run resumed from `recovering` or `refund_pending` used to be
+judged by a synthesized `RECONCILE_MISMATCH` ("receiving transaction … was
+refunded"), so the lane's stored `lastError` never showed what actually went
+wrong. The run's persisted `lastError` ("CODE: message") is now read back and
+used when its code is one the breaker already counts as a lane failure. Anything
+else (no `lastError`, one that does not parse, a neutral code) falls back to the
+old behaviour, so a resume is never judged more leniently than before.
+
+### Maintenance — remaining valid test fixtures declare `protocol: sep31`
+
+`canary-capped`, `limits`, `proven` and `stale-proof` now state their
+destination protocol explicitly, so parsing them no longer yields the legacy
+deprecation warning. `invalid.corridor.yaml` is left as it was, on purpose.
+
 ### Added — pre-settle gate results are logged per check and copied into the audit trail ([#142](https://github.com/ezedike-evan/corridor-in-a-box/issues/142))
 
 Building on `AuditEntry.checks`, each gate check on the transition out of

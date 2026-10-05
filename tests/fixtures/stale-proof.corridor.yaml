@@ -9,6 +9,7 @@ source:
 dest:
   name: Fixture Receiving Anchor
   asset: "iso4217:USD"
+  protocol: sep31
   endpoints:
     home_domain: localhost:8080
     transfer_server_sep31: http://localhost:8080/sep31
