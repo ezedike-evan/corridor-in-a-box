@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-// corridor — a tiny CLI to validate manifests, dry-run the plan offline,
-// and drive live gated canary payments through the real stack.
+// corridor — a tiny CLI to validate manifests, dry-run the plan offline, drive
+// live gated canary payments through the real stack, and look after the circuit
+// breakers.
 //
 //   corridor validate <file.corridor.yaml>
 //   corridor plan     <file.corridor.yaml>
 //   corridor canary   <file.corridor.yaml> --amount <amount> [--network <public|testnet>]
+//   corridor breaker  status [corridorId]
+//   corridor breaker  reset <corridorId> --reason "…"
 //
 // `plan` is the cheap pre-flight: it tells you whether a corridor is actually
 // runnable (does the dest anchor expose SEP-31? a SEP-38 quote server?) before
@@ -12,10 +15,14 @@
 //
 // `canary` drives one tiny real payment through the full, gated stack:
 // Sep31Adapter + StellarSettlementSubmitter + the default gate + RegistryRouteResolver.
+//
+// `breaker` is the other end: when a lane has halted itself, someone has to look
+// at why and then say so in writing before it will take money again. See
+// docs/operations.md.
 
 import { liveness, loadCorridor, type Corridor } from "@corridor/manifest";
 import { isSettleableAmount } from "@corridor/types";
-import { PostgresIdempotencyStore, migrate } from "@corridor/engine";
+import { PostgresIdempotencyStore, migrate, type CorridorHealthStore } from "@corridor/engine";
 import {
   RESOLVE_USAGE,
   listHeldRuns,
@@ -26,6 +33,30 @@ import {
 import { AccountInspector } from "@corridor/stellar";
 import { finalizeCanary } from "./proof.js";
 import { EXIT_NOT_COMPLETED, executeCanary } from "./wire.js";
+import {
+  BREAKER_USAGE,
+  currentUser,
+  formatBreakerRecord,
+  formatBreakerReset,
+  formatBreakerTable,
+  openBreakerSession,
+  parseBreakerArgs,
+  type BreakerCommand,
+} from "./breaker";
+
+/** The first line is the main usage text; the breaker help follows it. */
+const USAGE = [
+  "usage: corridor <validate|plan|canary> <file.corridor.yaml> [options] | runs list --state held | resolve <key> --outcome <outcome> --note <text>",
+  '       corridor breaker <status [corridorId] | reset <corridorId> --reason "…">',
+  "",
+  "corridor breaker — inspect and reopen halted lanes (reads DATABASE_URL):",
+  BREAKER_USAGE,
+].join("\n");
+
+// 0 = fine, 1 = it ran and failed, 2 = you asked for something impossible.
+const EXIT_OK = 0;
+const EXIT_FAILED = 1;
+const EXIT_USAGE = 2;
 
 async function main(argv: string[]): Promise<number> {
   const [cmd] = argv;
@@ -34,11 +65,10 @@ async function main(argv: string[]): Promise<number> {
     return parsed ? withStore((store) => listHeldRuns(store, parsed)) : 2;
   }
   if (cmd === "resolve") return resolveCommand(argv.slice(1));
+  if (cmd === "breaker") return breakerCommand(argv.slice(1));
   if (!cmd || (cmd !== "validate" && cmd !== "plan" && cmd !== "canary")) {
-    console.error(
-      "usage: corridor <validate|plan|canary> <file.corridor.yaml> [options] | runs list --state held | resolve <key> --outcome <outcome> --note <text>",
-    );
-    return 2;
+    console.error(USAGE);
+    return EXIT_USAGE;
   }
 
   if (cmd === "canary") {
@@ -146,23 +176,75 @@ async function main(argv: string[]): Promise<number> {
   const file = argv[1];
   if (!file) {
     console.error(`usage: corridor ${cmd} <file.corridor.yaml>`);
-    return 2;
+    return EXIT_USAGE;
   }
 
   const loaded = loadCorridor(file);
   if (!loaded.ok) {
     console.error(`✗ ${loaded.error.code}: ${loaded.error.message}`);
-    return 1;
+    return EXIT_FAILED;
   }
   const c = loaded.value;
 
   if (cmd === "validate") {
     console.log(`✓ ${file} is a valid corridor manifest (id="${c.id}")`);
-    return 0;
+    return EXIT_OK;
   }
 
   printPlan(c);
-  return 0;
+  return EXIT_OK;
+}
+
+async function breakerCommand(argv: string[]): Promise<number> {
+  const parsed = parseBreakerArgs(argv);
+  if (!parsed.ok) {
+    console.error(parsed.error);
+    return EXIT_USAGE;
+  }
+  // Opened only after the arguments are known good, so a typo never reaches
+  // for a database connection.
+  const opened = await openBreakerSession();
+  if (!opened.ok) {
+    console.error(`✗ ${opened.error}`);
+    return EXIT_FAILED;
+  }
+  const { store, close } = opened.session;
+  try {
+    const command = parsed.command;
+    if (command.kind === "status") {
+      return await breakerStatus(store, command);
+    }
+    return await breakerReset(store, command);
+  } finally {
+    // The pool keeps the process alive, so this is not optional tidiness: an
+    // unfinished pool would hang the command after it had printed its answer.
+    await close();
+  }
+}
+
+async function breakerStatus(
+  store: CorridorHealthStore,
+  command: { corridorId?: string },
+): Promise<number> {
+  if (command.corridorId === undefined) {
+    console.log(formatBreakerTable(await store.list()));
+    return EXIT_OK;
+  }
+  // A lane with no row is a legitimate answer ("nothing has failed here"), not
+  // an error, so `status` exits 0 for it and says why it is empty.
+  console.log(formatBreakerRecord(await store.get(command.corridorId), command.corridorId));
+  return EXIT_OK;
+}
+
+async function breakerReset(
+  store: CorridorHealthStore,
+  command: Extract<BreakerCommand, { kind: "reset" }>,
+): Promise<number> {
+  const before = await store.get(command.corridorId);
+  const by = currentUser();
+  const record = await store.reset(command.corridorId, by, command.reason);
+  console.log(formatBreakerReset(record, before?.state === "open"));
+  return EXIT_OK;
 }
 
 async function openStore(): Promise<
@@ -224,7 +306,7 @@ function printPlan(c: Corridor): void {
     line(`limits:   ${parts.join(" ")}`);
   }
   line(
-    `recovery: retries=${c.recovery.max_retries}, timeout=${c.recovery.timeout_seconds}s, rollback=${c.recovery.rollback}`,
+    `recovery: retries=${c.recovery.max_retries}, timeout=${c.recovery.timeout_seconds}s, rollback=${c.recovery.rollback}, breaker=${c.recovery.breaker.consecutive_failures}`,
   );
   line();
   line("steps:");

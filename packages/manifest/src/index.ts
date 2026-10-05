@@ -248,6 +248,24 @@ export const ReconcileSchema = z.object({
   external_stall_seconds: z.number().int().positive().default(21_600),
 });
 
+export const BreakerSchema = z.object({
+  /**
+   * Consecutive lane-level failures after which the corridor halts.
+   *
+   * This is a *lane* circuit breaker, not a per-payment one: it counts whole
+   * runs that failed for settlement/reconcile reasons (see
+   * `breakerOutcomeFor` in @corridor/engine) and ignores failures that never
+   * got the money moving, so a bad quote or a rejected KYC cannot take a lane
+   * down. A successful run clears the count.
+   *
+   * Once it trips, new runs are refused with `CORRIDOR_HALTED` until a human
+   * resets it (`corridor breaker reset <id> --reason "…"`). There is no
+   * automatic half-open: the whole point is that reopening is a decision, not
+   * a timeout.
+   */
+  consecutive_failures: z.number().int().positive().default(3),
+});
+
 export const RecoverySchema = z.object({
   max_retries: z.number().int().nonnegative().default(3),
   timeout_seconds: z.number().int().positive().default(900),
@@ -255,6 +273,8 @@ export const RecoverySchema = z.object({
   refund_wait_seconds: z.number().int().positive().default(86_400),
   rollback: z.enum(["refund_sender", "hold", "manual"]).default("refund_sender"),
   reconcile: ReconcileSchema.default(() => ReconcileSchema.parse({})),
+  /** Omit the whole block to take the defaults (halt after 3 consecutive failures). */
+  breaker: BreakerSchema.default(() => BreakerSchema.parse({})),
 });
 
 /** True when the YYYY-MM-DD part names a real calendar day. `Date` alone is no help:

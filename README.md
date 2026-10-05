@@ -340,6 +340,15 @@ Swap the mocks for the real implementations (both ship in this repo):
   to the anchor deposit address and confirms it on Horizon.
 - `new InMemoryIdempotencyStore()` → `new PostgresIdempotencyStore(pool)` for a
   durable, crash-resumable run log (run `migrate(pool)` once at startup).
+- Optionally add a `health` store to stop retrying a dead anchor. Wrap
+  `new PostgresCorridorHealthStore(pool)` in `MeteredCorridorHealthStore` and
+  the engine halts a corridor after `recovery.breaker.consecutive_failures`
+  consecutive lane failures (default 3) instead of spending a fee per retry;
+  new payments get `CORRIDOR_HALTED` / 503 and a payment already past
+  settlement still completes. It is opt-in — no store, no gate, no series.
+  Manage it with `pnpm cli breaker status` and
+  `pnpm cli breaker reset <id> --reason "…"`; see
+  [docs/operations.md §7](./docs/operations.md).
 - Pass an `audit` sink (and a `logger`) to `execute()` so every state transition
   is recorded.
 - Provide `gate: defaultSep31Gate(...)` (or a custom `PreSettleGate`) to `execute()`.

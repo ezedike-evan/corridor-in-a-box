@@ -185,6 +185,7 @@ Body is a \`PaymentIntent\`:
 | \`501\` | \`REFUND_UNSUPPORTED\` | Payment failed and anchor does not support refund |
 | \`502\` | \`QUOTE_UNAVAILABLE\` | Origin or destination anchor failed to provide a quote |
 | \`502\` | \`ANCHOR_UNAVAILABLE\` | Upstream anchor service unreachable or returned an upstream error |
+| \`503\` | \`CORRIDOR_HALTED\` | Circuit breaker is open for this corridor: too many consecutive lane failures. No run was created and nothing was sent to the anchor. Retry is pointless until the lane is reset — see \`docs/operations.md\` §7. Non-retryable |
 | \`504\` | \`SETTLEMENT_TIMEOUT\` | Stellar network submission timed out |
 | \`504\` | \`RECONCILE_STALLED\` | Anchor transaction polling timed out |
 

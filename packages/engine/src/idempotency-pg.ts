@@ -14,6 +14,10 @@ import type {
   StoredRun,
 } from "./idempotency";
 import type { CorridorState } from "./state";
+// A value import, and the DDL for the breaker table lives with the store that
+// uses it rather than being duplicated here. This file does not import
+// breaker-pg's types, so there is no module cycle at runtime.
+import { CREATE_BREAKERS_TABLE_SQL, BREAKERS_MIGRATION_SQL } from "./breaker-pg";
 
 export interface QueryResult<R = Record<string, unknown>> {
   rows: R[];
@@ -48,17 +52,7 @@ create table if not exists corridor_runs (
   settlement      text,
   updated_at      timestamptz not null default now()
 );
-
-create table if not exists corridor_breakers (
-  corridor_id          text primary key,
-  consecutive_failures integer not null default 0,
-  state                text not null default 'up',
-  tripped_at           timestamptz,
-  last_error           text,
-  reset_by             text,
-  reset_reason         text,
-  updated_at           timestamptz not null default now()
-);`;
+`;
 
 export const CREATE_RESOLUTIONS_TABLE_SQL = `
 create table if not exists corridor_resolutions (
@@ -95,6 +89,15 @@ export async function migrate(db: Queryable): Promise<void> {
   await db.query(CREATE_TABLE_SQL);
   await db.query(CREATE_RESOLUTIONS_TABLE_SQL);
   for (const sql of ALTER_TABLE_SQL) await db.query(sql);
+  // The circuit-breaker table ships from the same entry point on purpose. It is
+  // one more `create table if not exists`, so a deployment that has not run
+  // migrate() since upgrading would get breaker errors on every payment — the
+  // kind of missing-migration failure that is only discovered in production.
+  await db.query(CREATE_BREAKERS_TABLE_SQL);
+  // Databases that ran migrate() between #366 and this change already have an
+  // older `corridor_breakers` (no reset_at, states 'up'/'down'); the create above
+  // is a no-op there, so upgrade it in place.
+  for (const sql of BREAKERS_MIGRATION_SQL) await db.query(sql);
 }
 
 interface Row {

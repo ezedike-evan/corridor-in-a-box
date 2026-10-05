@@ -48,7 +48,12 @@ export type CorridorErrorCode =
   | "PRESETTLE_RECEIVER_NOT_ACCEPTED"
   /** amount above the canary cap on a non-PROVEN lane */
   | "CORRIDOR_UNPROVEN"
-  /** per-corridor circuit breaker is open */
+  /**
+   * The corridor's circuit breaker is open: it halted after N consecutive
+   * lane-level failures and only a deliberate human reset reopens it. Not the
+   * caller's fault and not retryable - retrying the same payment would fail
+   * the same way until someone looks at why the lane stopped settling.
+   */
   | "CORRIDOR_HALTED";
 
 /**

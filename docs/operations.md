@@ -480,16 +480,21 @@ The distribution account's seed is the highest-value secret; see
 
 ## 4. Database migrations
 
-The durable store needs one table. Run the bundled DDL once at startup or via
-your migration tool:
+The durable store needs two tables: `corridor_runs` (idempotency) and, if you
+adopt the circuit breaker (§7), `corridor_breakers`. Run the bundled DDL once at
+startup or via your migration tool:
 
 ```ts
 import { migrate } from "@corridor/engine";
-await migrate(pool); // idempotent: CREATE TABLE IF NOT EXISTS corridor_runs (…)
+// idempotent: CREATE TABLE IF NOT EXISTS corridor_runs (…), corridor_breakers (…)
+await migrate(pool);
 ```
 
-The schema is intentionally tiny (`packages/engine/src/idempotency-pg.ts`). The
-`version` column carries optimistic concurrency — never edit it by hand. Any
+`migrate()` is the only migration entry point, so one command brings a database
+up to date — a deployment that upgrades the engine and does not re-run it would
+fail every payment on a missing table. The schema is intentionally tiny
+(`packages/engine/src/idempotency-pg.ts`, `packages/engine/src/breaker-pg.ts`).
+The `version` column carries optimistic concurrency — never edit it by hand. Any
 future schema change ships as an additive migration with a CHANGELOG entry.
 
 ## 5. Scaling notes (before multi-replica)
@@ -565,3 +570,106 @@ The Alerting port is the integration seam for paging: inject an implementation
 that turns breaker trips, `CORRIDOR_HALTED`, and held refunds into the team's
 incident channel. Keep the port asynchronous and idempotent so a metrics retry
 cannot send duplicate pages.
+
+### The circuit breaker
+
+Repeated settlement failures against one anchor are not 3 independent bad
+lunches — they are one broken anchor, and each retry spends another fee and
+another round of reconciliation to learn what you already know. The breaker
+stops that. After `recovery.breaker.consecutive_failures` consecutive lane
+failures (default **3**) the corridor is **halted**: new payments are refused
+immediately with `CORRIDOR_HALTED` / HTTP 503, and nothing is sent to the anchor.
+
+What counts as a failure: `SETTLEMENT_FAILED`, `SETTLEMENT_TIMEOUT`,
+`RECONCILE_MISMATCH`, `RECONCILE_STALLED`, and pre-settle failures (which carry
+funds — `PRESETTLE_INSUFFICIENT_FUNDS` and any `PRESETTLE_*` sibling). A
+rejected quote or a KYC denial does **not** trip it; those are the correct
+outcome of a payment you should not be making. One success clears the count.
+
+A failure is counted when the run **resolves** to `refunded` or `held`, using the
+original settlement/reconcile cause. A run that is merely parked in
+`refund_pending` (waiting on the anchor's refund report) is not counted yet.
+
+Three properties worth knowing before you rely on it:
+
+- **A halt only blocks new work.** A payment already past settlement still
+  reconciles and completes, so a halt never strands funds the anchor is holding.
+- **A halt is sticky.** Further failures do not clear it. Only an explicit
+  `reset` reopens the lane, so a still-broken anchor cannot un-halt itself.
+- **It is per-corridor.** A dead Argentine peso lane does not stop a lane to
+  Kenya.
+
+It is **opt-in**. Without a `CorridorHealthStore` in the engine's `deps.health`,
+no breaker state is kept, no gate runs, and no series are emitted — so a
+deployment that has not adopted it grows no always-zero series that looks like
+something is being measured. To adopt it, wrap the store so the counters land in
+your scrape target:
+
+```ts
+import {
+  MeteredCorridorHealthStore,
+  PostgresCorridorHealthStore,
+  PrometheusMetrics,
+} from "@corridor/engine";
+
+const health = new MeteredCorridorHealthStore(
+  new PostgresCorridorHealthStore(pool), // or InMemoryCorridorHealthStore()
+  metrics, // the SAME PrometheusMetrics the service renders
+);
+const service = createService({ corridors, deps: { ...deps, health } });
+```
+
+State lives in `corridor_breakers`, created by the same `migrate()` call as
+`corridor_runs` (§4). The increment and the threshold test are one atomic
+upsert, so concurrent failures cannot lose a count and two replicas cannot both
+claim the trip.
+
+Three counters, each labelled `corridor`:
+
+```yaml
+# The page. A lane just went from trying to refusing.
+- alert: CorridorBreakerTripped
+  expr: increase(corridor_breaker_tripped[15m]) > 0
+# Impact, not a separate incident: how much traffic the halt turned away.
+- alert: CorridorBreakerRefusing
+  expr: increase(corridor_breaker_refused[15m]) > 0
+```
+
+`corridor_breaker_tripped` fires **once per halt**, not once per failure while
+halted, so it stays quiet until an operator acts. `corridor_breaker_refused` is
+the impact side of the same incident — how much traffic the halt turned away.
+
+> `corridor_breaker_reset` is emitted only by a process that observed the reset,
+> and `corridor breaker reset` is a short-lived CLI process, so do **not** alert
+> on it. For "did anyone reopen this, and on what grounds", read the durable
+> `reset_by` / `reset_reason` / `reset_at` columns in `corridor_breakers` (shown
+> by `breaker status`) — those outlive the process that wrote them.
+
+### Reopening a lane
+
+```sh
+# What is halted, and since when, and what was the last error?
+pnpm cli breaker status
+pnpm cli breaker status ng-cn
+
+# Reopen. The reason is mandatory and is stored with the OS user who ran it.
+pnpm cli breaker reset ng-cn --reason "anchor confirmed healthy on testnet"
+```
+
+Both read `DATABASE_URL` — the same Postgres the engine uses, so the CLI and the
+service can never disagree about whether a lane is halted. Exit codes: `0`
+success, `1` environment/lookup failure (e.g. `DATABASE_URL` unset, no such
+corridor), `2` bad usage (a missing `--reason`, an unknown flag). **There is no
+`--force`**: if a reset needs justifying, that is the point of the command.
+
+Two cases to read carefully in `status`:
+
+- `UNKNOWN` means **no run has ever failed on that lane** — the absence of
+  evidence, not evidence of health. A lane with no row is accepting work.
+- `CLOSED` with a non-zero count is healthy but _near the threshold_. Check it
+  before it becomes a page.
+
+Reopen only after confirming the anchor is healthy (a testnet payment through,
+the anchor's own status page). Clearing a halt on an unfixed anchor just
+re-spends the fee that proved the lane was down. The reset is recorded, so a
+later `tripped` right after a `reset` is a fast signal that the reopen was wrong.

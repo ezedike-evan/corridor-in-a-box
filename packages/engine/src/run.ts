@@ -58,6 +58,12 @@ import {
   type Metrics,
 } from "./observability";
 import type { CheckResult, GateContext, PreSettleGate } from "./gate";
+import {
+  BREAKER_METRICS,
+  MeteredCorridorHealthStore,
+  breakerOutcomeFor,
+  type CorridorHealthStore,
+} from "./breaker";
 
 export interface EngineDeps {
   resolver: RouteResolver;
@@ -106,6 +112,18 @@ export interface EngineDeps {
   /** Maximum payment amount while a corridor has no fresh canary proof. Defaults to "10". */
   unprovenMaxAmount?: string;
   /**
+   * Per-corridor circuit breaker. Once `recovery.breaker.consecutive_failures`
+   * lane-level failures land in a row, new runs on that corridor are refused
+   * with `CORRIDOR_HALTED` until someone runs
+   * `corridor breaker reset <id> --reason "…"`.
+   *
+   * Omit it and the breaker is simply absent — the engine is unchanged, so this
+   * stays opt-in like every other store. In production this must be the shared
+   * `PostgresCorridorHealthStore`, not the in-memory one: a per-replica count
+   * lets a peer replica keep taking payments on a lane another has halted.
+   */
+  health?: CorridorHealthStore;
+  /**
    * Explicit opt-in allowing manifest-trusted routes on a public network without
    * on-chain attestation.
    */
@@ -146,6 +164,37 @@ export interface ExecuteOptions {
   trustManifestWithoutAttestation?: boolean;
 }
 
+/**
+ * Fold a finished run into the lane's breaker. The run's terminal state and the
+ * error that produced it are the only inputs: whether a failure says anything
+ * about the LANE (rather than about this one request) is decided by
+ * `breakerOutcomeFor`, not here.
+ *
+ * A lane failure is counted once, when the run RESOLVES (`failed`, `refunded`,
+ * `held`) -- never when it merely parks in `refund_pending`, which is still in
+ * flight and may yet be resolved either way by the anchor's refund report.
+ */
+type RecordOutcome = (state: CorridorState, e?: CorridorError) => Promise<void>;
+
+function makeRecordOutcome(
+  deps: EngineDeps,
+  corridor: Corridor,
+  health: CorridorHealthStore | undefined,
+  now: () => number,
+): RecordOutcome {
+  const breakerOpts = { threshold: corridor.recovery.breaker.consecutive_failures };
+  return async (state, e) => {
+    if (!health) return;
+    const outcome = breakerOutcomeFor(state, e?.code);
+    if (outcome === "neutral") return;
+    await health.recordOutcome(corridor.id, outcome, now(), {
+      ...breakerOpts,
+      // Stored verbatim, so it is exactly what the run's own `lastError` shows.
+      ...(e && { error: `${e.code}: ${e.message}` }),
+    });
+  };
+}
+
 export async function execute(
   intent: PaymentIntent,
   corridor: Corridor,
@@ -163,6 +212,12 @@ export async function execute(
   const externalStallMs = externalStallBudgetMs(corridor);
   const metrics = deps.metrics ?? noopMetrics;
   const startedAt = now();
+
+  // Wrap once, here, so every trip and reset is counted even when the embedding
+  // application never met the meter. An already-metered store is left alone so
+  // that an app which wired the meter itself does not double-count.
+  const health = meteredHealth(deps);
+  const recordOutcome = makeRecordOutcome(deps, corridor, health, now);
 
   // Time a verb call and emit a `corridor.verb.<name>` histogram sample.
   const timed = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
@@ -268,6 +323,7 @@ export async function execute(
         pollMs,
         stallThreshold,
         opts,
+        recordOutcome,
       );
     }
     return fail(
@@ -284,6 +340,39 @@ export async function execute(
     owner: opts.owner,
   };
   const trail: CorridorState[] = ["created"];
+
+  // --- circuit breaker: refuse NEW work on a halted lane ----------------
+  // Deliberately AFTER the resume path above and BEFORE the idempotency claim.
+  //
+  // After, because a run that already reached `settled` has money on the chain
+  // that this engine still has to reconcile. Blocking its resume would strand
+  // that payment behind a breaker whose whole purpose is to stop *new* money —
+  // the opposite of what §2 of the runbook asks for. The breaker is a gate on
+  // new work, never a gate on recovery.
+  //
+  // Before the claim, so a refused run leaves no row: nothing to reconcile,
+  // nothing to expire, and the caller can retry the identical idempotency key
+  // after the reset and get a real attempt.
+  if (health) {
+    const breaker = await health.get(corridor.id);
+    if (breaker?.state === "open") {
+      metrics.increment(BREAKER_METRICS.refused, { corridor: corridor.id });
+      (deps.logger ?? silentLogger).log("warn", "corridor.halted", {
+        corridor: corridor.id,
+        consecutiveFailures: breaker.consecutiveFailures,
+        trippedAt: breaker.trippedAt,
+        lastError: breaker.lastError,
+      });
+      return fail(
+        "CORRIDOR_HALTED",
+        `corridor ${corridor.id} is halted after ${breaker.consecutiveFailures} consecutive failures` +
+          (breaker.lastError ? ` (last: ${truncate(breaker.lastError, 200)})` : "") +
+          `. This is a deliberate stop, not a payment problem: investigate the lane, then reopen it with` +
+          ` \`corridor breaker reset ${corridor.id} --reason "…"\`.`,
+        { retryable: false },
+      );
+    }
+  }
 
   // Atomically claim the key before doing any work. `get()` above can't be the
   // gate on its own: two concurrent callers can both see "no existing run" and
@@ -313,6 +402,7 @@ export async function execute(
     pollMs,
     adapter,
     routeTrust,
+    recordOutcome,
   });
   const { advance, die, finishFailure } = context;
 
@@ -578,6 +668,8 @@ export async function execute(
     const t = await advance("completed");
     if (!t.ok) return die(t.error);
   }
+  // The one outcome that clears a lane's consecutive-failure count.
+  await recordOutcome("completed");
   metrics.timing("corridor.duration", now() - startedAt, { corridor: corridor.id });
   return ok(toResult(run, trail));
 }
@@ -643,7 +735,19 @@ interface RunContext {
   advance(to: CorridorState, meta?: AdvanceMeta): Promise<Outcome<void>>;
   die(error: CorridorError, checks?: readonly CheckResult[]): Promise<Err>;
   finishFailure(error: CorridorError): Promise<Err>;
-  holdAndStop(error: CorridorError, status?: TransactionStatus): Promise<Err>;
+  /**
+   * `breakerCause` is what the circuit breaker judges, when it differs from
+   * `error`: the refund port refusing, or a refund watch timing out, is a
+   * consequence, while the settlement/reconcile failure that put us in recovery
+   * is the lane-level signal. See LANE_FAILURE_CODES in breaker.ts.
+   */
+  holdAndStop(
+    error: CorridorError,
+    status?: TransactionStatus,
+    breakerCause?: CorridorError,
+  ): Promise<Err>;
+  /** Report a run that resolved outside this context (the resume handler). */
+  recordOutcome: RecordOutcome;
 }
 
 interface RunContextInit {
@@ -658,6 +762,8 @@ interface RunContextInit {
   /** Receiving-anchor adapter, used to watch an anchor-driven refund. */
   adapter: AnchorAdapter;
   routeTrust?: "attested" | "manifest";
+  /** Reports a resolved run to the circuit breaker (no-op without `deps.health`). */
+  recordOutcome: RecordOutcome;
 }
 
 /**
@@ -665,7 +771,19 @@ interface RunContextInit {
  * one, so both take exactly the same recovery path.
  */
 function createRunContext(init: RunContextInit): RunContext {
-  const { run, trail, corridor, deps, store, now, sleep, pollMs, adapter, routeTrust } = init;
+  const {
+    run,
+    trail,
+    corridor,
+    deps,
+    store,
+    now,
+    sleep,
+    pollMs,
+    adapter,
+    routeTrust,
+    recordOutcome,
+  } = init;
 
   const advance: RunContext["advance"] = async (to, meta) => {
     if (!canTransition(run.state, to)) {
@@ -697,10 +815,15 @@ function createRunContext(init: RunContextInit): RunContext {
       routeTrust,
       checks ? { checks } : undefined,
     );
+    await recordOutcome("failed", error);
     return { ok: false, error };
   };
 
-  const holdAndStop: RunContext["holdAndStop"] = async (error, status) => {
+  const holdAndStop: RunContext["holdAndStop"] = async (
+    error,
+    status,
+    breakerCause = error,
+  ) => {
     // `refund_pending` inherits `recovering`'s exits (state.ts), so it can be
     // held directly; anything else steps back into `recovering` first.
     if (run.state !== "recovering" && run.state !== "refund_pending") {
@@ -710,6 +833,7 @@ function createRunContext(init: RunContextInit): RunContext {
     run.lastError = `${error.code}: ${error.message}`;
     const held = await advance("held", refundAudit(status?.refunds));
     if (!held.ok) return die(held.error);
+    await recordOutcome("held", breakerCause);
     return { ok: false, error };
   };
 
@@ -742,11 +866,12 @@ function createRunContext(init: RunContextInit): RunContext {
         }
         const done = await advance("refunded", refundAudit(info));
         if (!done.ok) return die(done.error);
+        await recordOutcome("refunded", error);
         return { ok: false, error };
       }
       // The run is held with the watch outcome in `lastError`; the caller still
       // sees the anchor's own terminal failure that started the recovery.
-      const stopped = await holdAndStop(watched.error, statusFrom(watched.error.cause));
+      const stopped = await holdAndStop(watched.error, statusFrom(watched.error.cause), error);
       return stopped.error === watched.error ? { ok: false, error } : stopped;
     }
     // Only reverse the chain if a payment actually went out. If settlement never
@@ -758,11 +883,15 @@ function createRunContext(init: RunContextInit): RunContext {
     // would send the money back twice.
     if (run.stellarTxHash && !hasRequestedRefund(run)) {
       if (!run.settlementAmount) {
-        return holdAndStop({
-          code: "SETTLEMENT_FAILED",
-          message: "cannot refund: stored settlement amount is missing",
-          retryable: false,
-        });
+        return holdAndStop(
+          {
+            code: "SETTLEMENT_FAILED",
+            message: "cannot refund: stored settlement amount is missing",
+            retryable: false,
+          },
+          undefined,
+          error,
+        );
       }
       const req: RefundRequest = {
         original: { stellarTxHash: run.stellarTxHash },
@@ -775,7 +904,10 @@ function createRunContext(init: RunContextInit): RunContext {
       };
       const refund = await deps.submitter.refund(req);
       // Couldn't reverse the chain payment — escalate to a manual hold.
-      if (!refund.ok) return holdAndStop(refund.error);
+      // `error`, not `refund.error`, is what the breaker judges: the refund port
+      // refusing is a design invariant, while `error` is the reconcile/settlement
+      // outage that put us here.
+      if (!refund.ok) return holdAndStop(refund.error, undefined, error);
       // Recorded before the state advance that persists it, so the very next
       // write carries the id. Set once and never rewritten — see the coalesce
       // in PostgresIdempotencyStore.put.
@@ -784,6 +916,7 @@ function createRunContext(init: RunContextInit): RunContext {
     run.lastError = `${error.code}: ${error.message}`;
     const refunded = await advance("refunded");
     if (!refunded.ok) return die(refunded.error);
+    await recordOutcome("refunded", error);
     return { ok: false, error };
   };
 
@@ -795,7 +928,7 @@ function createRunContext(init: RunContextInit): RunContext {
     return die(error);
   };
 
-  return { advance, die, finishFailure, holdAndStop };
+  return { advance, die, finishFailure, holdAndStop, recordOutcome };
 }
 
 function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
@@ -922,6 +1055,7 @@ async function resumeRun(
   pollMs: number,
   stallThreshold: number,
   opts: ExecuteOptions,
+  recordOutcome: RecordOutcome,
 ): Promise<Outcome<RunResult>> {
   const run: StoredRun = { ...existing };
   const trail: CorridorState[] = [run.state];
@@ -943,6 +1077,7 @@ async function resumeRun(
     pollMs,
     adapter: route.receiving,
     routeTrust: route.trust,
+    recordOutcome,
   });
 
   if (run.state === "created" || run.state === "quoted" || run.state === "compliant") {
@@ -1092,6 +1227,7 @@ async function resumeRun(
   if (run.state === "reconciled") {
     const done = await context.advance("completed");
     if (!done.ok) return done;
+    await recordOutcome("completed");
     return ok(toResult(run, trail));
   }
 
@@ -1106,6 +1242,7 @@ async function resumeRun(
     if (hasRequestedRefund(run)) {
       const refunded = await context.advance("refunded");
       if (!refunded.ok) return refunded;
+      await recordOutcome("refunded", refundedError.error);
       return refundedError;
     }
     if (run.state === "recovering") {
@@ -1130,9 +1267,16 @@ async function resumeRun(
       run.lastError = undefined;
       const refunded = await context.advance("refunded", refundAudit(info));
       if (!refunded.ok) return refunded;
+      await recordOutcome("refunded", refundedError.error);
       return refundedError;
     }
-    return context.holdAndStop(watched.error, statusFrom(watched.error.cause));
+    // The original failure is not in memory after a restart; the refund report
+    // it was waiting on is the same lane-level reconcile outage.
+    return context.holdAndStop(
+      watched.error,
+      statusFrom(watched.error.cause),
+      refundedError.error,
+    );
   }
 
   return conflict("state is not supported by the resume handler");
@@ -1145,4 +1289,18 @@ function externalStallBudgetMs(corridor: Corridor): number {
       corridor.recovery.timeout_seconds,
     ) * 1000
   );
+}
+
+/** Wrap `deps.health` so breaker events reach `deps.metrics` exactly once. */
+function meteredHealth(deps: EngineDeps): CorridorHealthStore | undefined {
+  if (!deps.health) return undefined;
+  // Already wrapped by the application: return it untouched rather than
+  // double-counting every trip and reset.
+  if (deps.health instanceof MeteredCorridorHealthStore) return deps.health;
+  return new MeteredCorridorHealthStore(deps.health, deps.metrics ?? noopMetrics);
+}
+
+/** Keep a stored `lastError` readable in a one-line refusal message. */
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }

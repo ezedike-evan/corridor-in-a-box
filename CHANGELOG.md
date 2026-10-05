@@ -108,6 +108,39 @@ Schema only; the engine does not act on it yet. Manifests that omit `protocol`
 parse as `prefunded`, so existing corridors are unchanged. `corridor plan` now
 prints the source protocol.
 
+### Added - Per-corridor circuit breaker with a CLI and Prometheus counters (#165)
+
+Repeated settlement failures against one anchor are one broken anchor, not N
+incidents, and each retry spends another fee to relearn the same fact. After
+`recovery.breaker.consecutive_failures` consecutive lane failures (default `3`)
+the corridor is **halted**: new payments are refused with `CORRIDOR_HALTED`
+(HTTP 503) before a run is created, so nothing reaches the anchor. A run already
+past settlement still reconciles and completes — a halt blocks new work, never
+money the anchor is holding. A halt is sticky: only an explicit reset reopens it.
+
+- `@corridor/manifest`: optional `recovery.breaker.consecutive_failures`.
+- `@corridor/engine`: `CorridorHealthStore` port, `InMemoryCorridorHealthStore`,
+  `PostgresCorridorHealthStore` (one atomic upsert, so concurrent failures cannot
+  lose a count or double-claim a trip), and `MeteredCorridorHealthStore`. The
+  `corridor_breakers` table ships from the existing `migrate()` entry point.
+  This replaces #366's unwired stub store (`health-pg.ts`); the public names
+  `CorridorHealthStore` and `PostgresCorridorHealthStore` now come from the
+  breaker implementation.
+- **Table migration:** databases that ran `migrate()` since #366 already hold an
+  older `corridor_breakers` (states `up`/`down`, no `reset_at`). `migrate()` now
+  adds `reset_at`, changes the `state` default to `closed`, and maps legacy
+  `up` -> `closed` and `down` -> `open`. All statements are idempotent; re-run
+  `migrate()` once on upgrade.
+- A lane failure is counted when a run resolves to `refunded` or `held` (using the
+  original settlement/reconcile cause), not when it parks in `refund_pending`.
+- Metrics: `corridor_breaker_tripped` (once per halt), `corridor_breaker_refused`
+  (traffic turned away) and `corridor_breaker_reset`, each labelled `corridor`.
+  Opt-in — with no `deps.health` there is no gate, no state, and no series.
+- `corridor breaker status [corridorId]` and `corridor breaker reset <id>
+--reason "…"`, reading the same `DATABASE_URL` the engine uses. The reason is
+  mandatory and stored with the OS user who ran it; there is no `--force`.
+- Runbook and alerting in `docs/operations.md` §7.
+
 ### Added — `corridor canary` records a chain-verified proof in the manifest (2026-09-27)
 
 `corridor canary <file> --amount <decimal> [--write]` drives one tiny real

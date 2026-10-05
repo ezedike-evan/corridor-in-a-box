@@ -6,6 +6,7 @@ import { amountRangeCheck } from "@corridor/sep31";
 import {
   defaultSep31Gate,
   InMemoryAuditLog,
+  InMemoryCorridorHealthStore,
   InMemoryIdempotencyStore,
   InMemoryMetrics,
   hasRequestedRefund,
@@ -2223,5 +2224,84 @@ describe("SettlementStrategy", () => {
       expect(settlingIdx).toBeGreaterThan(-1);
       expect(settledIdx).toBe(settlingIdx + 1);
     }
+  });
+});
+
+describe("circuit breaker x refund_pending", () => {
+  // Decision: a lane failure is counted when the run RESOLVES (refunded / held),
+  // with the original settlement/reconcile cause -- not when it parks in
+  // refund_pending, which is still in flight.
+  function harness(adapterOpts: Parameters<typeof createMockAdapter>[0]) {
+    const health = new InMemoryCorridorHealthStore();
+    const seenWhilePending: number[] = [];
+    const store = new InMemoryIdempotencyStore();
+    const base = createMockSubmitter();
+    let t = 0;
+    const deps: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: base,
+      idempotency: store,
+      health,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+        // The refund watch sleeps between polls, i.e. while the run is parked in
+        // refund_pending: record what the breaker has counted at that moment.
+        if ((await store.get("bp-1"))?.state === "refund_pending") {
+          seenWhilePending.push((await health.get("test"))?.consecutiveFailures ?? 0);
+        }
+      },
+      reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
+    };
+    return { deps, health, store, seenWhilePending };
+  }
+
+  const recovery = {
+    max_retries: 0,
+    timeout_seconds: 3600,
+    refund_wait_seconds: 1,
+    rollback: "refund_sender",
+  };
+
+  it("counts a recovering -> refund_pending -> refunded run exactly once", async () => {
+    const h = harness({
+      terminalFailure: true,
+      refundStatus: {
+        amountRefunded: { asset: "USDC", amount: "100.00" },
+        amountFee: { asset: "USDC", amount: "0.00" },
+        payments: [
+          {
+            id: "refund-1",
+            amount: { asset: "USDC", amount: "100.00" },
+            fee: { asset: "USDC", amount: "0.00" },
+          },
+        ],
+        completeness: "full",
+      },
+    });
+    const r = await execute(intent("bp-1"), corridorWith(recovery), h.deps);
+    expect(r.ok).toBe(false);
+    expect((await h.store.get("bp-1"))?.state).toBe("refunded");
+    const row = await h.health.get("test");
+    expect(row?.consecutiveFailures).toBe(1);
+    expect(row?.lastError).toContain("RECONCILE_MISMATCH");
+  });
+
+  it("counts a refund_pending -> held run exactly once, and not while it sits in refund_pending", async () => {
+    const h = harness({ terminalFailure: true });
+    const r = await execute(intent("bp-1"), corridorWith(recovery), h.deps);
+    expect(r.ok).toBe(false);
+    expect((await h.store.get("bp-1"))?.state).toBe("held");
+    // The watch really did sit in refund_pending, and nothing was counted yet.
+    expect(h.seenWhilePending.length).toBeGreaterThan(0);
+    expect(h.seenWhilePending.every((n) => n === 0)).toBe(true);
+    const row = await h.health.get("test");
+    expect(row?.consecutiveFailures).toBe(1);
+    // The breaker judges the ORIGINAL reconcile cause, not the watch timeout.
+    expect(row?.lastError).toContain("RECONCILE_MISMATCH");
   });
 });
