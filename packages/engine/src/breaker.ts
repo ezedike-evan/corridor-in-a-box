@@ -24,7 +24,7 @@
 // tripped until a person records why it was safe to reopen. That is the whole
 // point — an automatic reopen just moves the outage later and hides it.
 
-import type { CorridorErrorCode } from "@corridor/types";
+import type { CorridorError, CorridorErrorCode } from "@corridor/types";
 import type { CorridorState } from "./state";
 import { noopMetrics, type Metrics } from "./observability";
 
@@ -150,6 +150,29 @@ export function breakerOutcomeFor(
   if (state !== "failed" && state !== "held" && state !== "refunded") return "neutral";
   if (code === undefined) return "neutral";
   return LANE_FAILURE_CODES.has(code) ? "failure" : "neutral";
+}
+
+/**
+ * The failure that sent a run into recovery, as the breaker should judge it when
+ * the run is picked up again after a restart. The in-memory error is gone, but
+ * the run persisted `lastError` as "CODE: message" before it went anywhere, so
+ * the real cause is still there and the lane's stored `lastError` can show it.
+ *
+ * Only a code the breaker already counts as a lane failure is trusted. Anything
+ * else (no `lastError`, one that does not parse, a neutral code such as
+ * REFUND_UNSUPPORTED left behind by a later step) falls back to `fallback`, so a
+ * resumed run is never judged more leniently than it was before.
+ */
+export function recoveredBreakerCause(
+  lastError: string | undefined,
+  fallback: CorridorError,
+): CorridorError {
+  if (lastError === undefined) return fallback;
+  const sep = lastError.indexOf(": ");
+  if (sep <= 0) return fallback;
+  const code = lastError.slice(0, sep) as CorridorErrorCode;
+  if (!LANE_FAILURE_CODES.has(code)) return fallback;
+  return { code, message: lastError.slice(sep + 2), retryable: false };
 }
 
 /** Does `recordOutcome` transitioning to this row mean "this call tripped it"? */

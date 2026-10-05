@@ -2305,3 +2305,103 @@ describe("circuit breaker x refund_pending", () => {
     expect(row?.lastError).toContain("RECONCILE_MISMATCH");
   });
 });
+
+describe("circuit breaker x resumed recovery", () => {
+  // After a restart the failure that sent a run into recovery is gone from
+  // memory, but its persisted `lastError` is not. The breaker should judge that
+  // real cause, and fall back to the refunded-reconcile error only when there is
+  // no lane-failure cause to read back (so a resume is never more lenient).
+  const recovery = {
+    max_retries: 0,
+    timeout_seconds: 3600,
+    refund_wait_seconds: 1,
+    rollback: "refund_sender",
+  };
+  const refundStatus = {
+    amountRefunded: { asset: "USDC", amount: "100.00" },
+    amountFee: { asset: "USDC", amount: "0.00" },
+    payments: [
+      {
+        id: "refund-1",
+        amount: { asset: "USDC", amount: "100.00" },
+        fee: { asset: "USDC", amount: "0.00" },
+      },
+    ],
+    completeness: "full" as const,
+  };
+
+  function resumeHarness(adapterOpts: Parameters<typeof createMockAdapter>[0]) {
+    const health = new InMemoryCorridorHealthStore();
+    const store = new InMemoryIdempotencyStore();
+    let t = 0;
+    const deps: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(adapterOpts), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: createMockSubmitter(),
+      idempotency: store,
+      health,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
+    };
+    return { deps, health, store };
+  }
+
+  it.each(["recovering", "refund_pending"] as const)(
+    "a %s run resumed to refunded is judged by its persisted lane-failure cause",
+    async (state) => {
+      const h = resumeHarness({ terminalFailure: true, refundStatus });
+      const key = `rr-${state}`;
+      await h.store.put({
+        ...resumableRun(state, key),
+        lastError: "RECONCILE_STALLED: anchor stopped reporting",
+      });
+      const r = await execute(intent(key), corridorWith(recovery), h.deps);
+      expect(r.ok).toBe(false);
+      expect((await h.store.get(key))?.state).toBe("refunded");
+      const row = await h.health.get("test");
+      expect(row?.consecutiveFailures).toBe(1);
+      expect(row?.lastError).toContain("RECONCILE_STALLED: anchor stopped reporting");
+      expect(row?.lastError).not.toContain("was refunded");
+    },
+  );
+
+  it("a resumed run that ends held is judged by its persisted cause, not the watch timeout", async () => {
+    const h = resumeHarness({ terminalFailure: true });
+    const key = "rr-held";
+    await h.store.put({
+      ...resumableRun("refund_pending", key),
+      lastError: "SETTLEMENT_TIMEOUT: anchor never confirmed",
+    });
+    const r = await execute(intent(key), corridorWith(recovery), h.deps);
+    expect(r.ok).toBe(false);
+    expect((await h.store.get(key))?.state).toBe("held");
+    const row = await h.health.get("test");
+    expect(row?.consecutiveFailures).toBe(1);
+    expect(row?.lastError).toContain("SETTLEMENT_TIMEOUT: anchor never confirmed");
+  });
+
+  it.each([
+    ["a neutral code", "REFUND_UNSUPPORTED: the refund port refused"],
+    ["no lastError at all", undefined],
+    ["a lastError that is not CODE: message", "something went wrong"],
+  ] as const)(
+    "falls back to the refunded-reconcile cause for %s",
+    async (_label, lastError) => {
+      const h = resumeHarness({ terminalFailure: true, refundStatus });
+      const key = "rr-fallback";
+      await h.store.put({ ...resumableRun("refund_pending", key), lastError });
+      const r = await execute(intent(key), corridorWith(recovery), h.deps);
+      expect(r.ok).toBe(false);
+      const row = await h.health.get("test");
+      // Still counted exactly once, exactly as before this change.
+      expect(row?.consecutiveFailures).toBe(1);
+      expect(row?.lastError).toContain("RECONCILE_MISMATCH");
+    },
+  );
+});
