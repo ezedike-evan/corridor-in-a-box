@@ -51,7 +51,7 @@ export default async function Home() {
         <Feature
           icon={<Repeat size={20} className="text-blue-600" />}
           title="Idempotent & resumable"
-          body="A persisted state machine with crash-resume and a real refund/hold recovery path. The same key never settles twice."
+          body="A persisted state machine with crash-resume and fail-closed recovery: a payment that cannot complete is parked as held for a human. Nothing is ever re-sent. The same key never settles twice."
         />
         <Feature
           icon={<ShieldCheck size={20} className="text-blue-600" />}
@@ -65,13 +65,14 @@ export default async function Home() {
         />
       </section>
 
-      {/* Anchors — read live from the on-chain registry */}
+      {/* Anchors — read from the on-chain registry */}
       <section className="flex flex-col gap-5">
         <div className="flex items-end justify-between gap-4">
           <div>
             <h2 className="text-2xl font-semibold">Attested anchors</h2>
             <p className="max-w-2xl text-secondary-text">
-              Read live from the on-chain registry. Each card separates what an anchor&apos;s{" "}
+              Read from the on-chain registry (refreshed hourly); each card shows the attestation
+              ledger. Each card separates what an anchor&apos;s{" "}
               <code className="rounded bg-bg-subtle px-1 py-0.5 text-xs">stellar.toml</code>{" "}
               <em>advertises</em> from what actually <em>worked</em> when it was probed — because
               those are different claims, and treating them as one is how a lane that does not

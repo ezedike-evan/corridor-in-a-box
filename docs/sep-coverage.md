@@ -45,13 +45,13 @@ through the `refunds` object on the transaction record: there is no request,
 only news.
 
 `Sep31Adapter.requestRefund()` therefore fails closed with a non-retryable
-`REFUND_UNSUPPORTED` and never touches the network. Nothing calls it yet —
-whether refund initiation belongs on the `AnchorAdapter` port at all is a
-separate design decision — the method exists to occupy the name with the
-refusal, so the next integration reads the constraint before inventing an
-endpoint. The engine already parks any refused refund in `held` for a human
-(asserted in a test), and the [operations runbook](./operations.md) takes over
-(out-of-band resolution with the anchor). Observing that a refund _happened_ is
+`REFUND_UNSUPPORTED` and never touches the network. Since #72 the port has
+`requestRefund`; the generic adapter refuses, the engine does not call it yet,
+and the state machine defines `refund_pending` but no transition enters it. The
+method occupies the name so bespoke adapters (OTC desks, proprietary anchors)
+can implement anchor-driven refunds. The engine already parks any refused
+refund in `held` for a human (asserted in a test), and the [operations
+runbook](./operations.md) takes over (out-of-band resolution with the anchor). Observing that a refund _happened_ is
 `getTransaction`'s job. An anchor that exposes a proprietary refund API is a
 bespoke integration: it implements `AnchorAdapter` itself and lives outside
 `packages/sep31`, keeping the generic adapter honest about what the standard
@@ -71,6 +71,20 @@ another transfer SEP is a new adapter, not an engine change:
   needed, the `open` step would return an `interactive_url` the caller must drive,
   and the engine would park in a `pending_user` state — a genuine engine change,
   which is why it is out of scope today.
+
+## External quotes (`fx.quote_source: external`)
+
+Some anchors (Cowrie, for one) publish no SEP-38 server. For those corridors the
+operator injects `EngineDeps.externalQuote`, a function
+`(intent, corridor) => Promise<Outcome<{ price; destAmount?; expiresAt? }>>`.
+The engine wraps it in `ExternalQuoteProvider` and never calls the adapter's
+`requestQuote`, so no SEP-38 request is made. The resulting `Quote` is always
+`firm: false`, so the firm-quote expiry checks do not apply to it.
+
+A non-firm rate cannot bind the receiving anchor, so `external` combined with
+`who_holds_risk: receiving_anchor` is refused before `open` (`MANIFEST_INVALID`)
+unless the adapter's `capabilities().quotes` includes `"native"`. A corridor with
+`quote_source: external` and no injected provider fails with `QUOTE_UNAVAILABLE`.
 
 The manifest already abstracts the corridor; the adapter port already abstracts
 the protocol. SEP-31 is the first and primary target because it is the flow whose

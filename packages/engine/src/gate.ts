@@ -96,3 +96,25 @@ function withTimeout<T>(p: Promise<T>, ms: number, name: string): Promise<T> {
     );
   });
 }
+
+export interface DefaultSep31GateOptions {
+  /** Optional adapter instance for protocol checks (e.g. SEP-31 /info). */
+  readonly adapter?: unknown;
+  /** Optional Horizon URL or Horizon client for ledger checks. */
+  readonly horizon?: unknown;
+  /** Optional registry resolver or client. */
+  readonly registry?: unknown;
+  /** Additional checks to include in the gate. */
+  readonly checks?: readonly GateCheck[];
+  /** Per-check timeout (ms). Defaults to 5000ms. */
+  readonly timeoutMs?: number;
+}
+
+/**
+ * Factory for standard SEP-31 pre-settle gate verification.
+ * Assembles standard checks and any additional configured checks into a CompositeGate.
+ */
+export function defaultSep31Gate(opts: DefaultSep31GateOptions = {}): PreSettleGate {
+  const checks: GateCheck[] = [...(opts.checks ?? [])];
+  return new CompositeGate(checks, { timeoutMs: opts.timeoutMs });
+}

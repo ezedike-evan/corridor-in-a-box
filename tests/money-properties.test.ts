@@ -19,6 +19,9 @@ import {
   subAmounts,
   toScaled,
 } from "@corridor/types";
+import type { OpenTransaction, Quote } from "@corridor/adapter-kit";
+import { buildSettlementRequest, settleQuoteProblem } from "@corridor/engine";
+import type { Corridor } from "@corridor/manifest";
 
 /**
  * Deterministic PRNG (mulberry32). Seeded so a failing run is reproducible —
@@ -197,5 +200,52 @@ describe("money properties", () => {
       const out = unwrap(addAmounts(amount(r, { signed: true }), amount(r, { signed: true })));
       expect(out, `produced ${out}`).not.toMatch(/e|E|Infinity|NaN/);
     }
+  });
+
+  it("settle sends exactly the quote's sell_amount, and refuses one it cannot send exactly", () => {
+    const r = rng(13);
+    const corridor = {
+      settlement: { bridge_asset: "USDC", asset_issuer: "GISSUER" },
+    } as unknown as Corridor;
+    const opened = {
+      depositAddress: "GDEPOSIT",
+      memo: "m",
+      memoType: "text",
+    } as unknown as OpenTransaction;
+
+    let accepted = 0;
+    let refused = 0;
+    for (let i = 0; i < RUNS; i++) {
+      const buy = amount(r);
+      const totalPrice = amount(r);
+      if (!isSettleableAmount(buy) || !isSettleableAmount(totalPrice)) continue;
+      const implied = applyPrice(buy, totalPrice);
+      if (!implied.ok) continue;
+      const sell = implied.value;
+
+      const q = {
+        id: "q",
+        price: "1",
+        expiresAt: 0,
+        sourceAmount: { asset: "USDC", amount: sell },
+        destAmount: { asset: "ARS", amount: buy },
+        firm: true,
+      } as Quote;
+
+      if (settleQuoteProblem(q, corridor) === null) {
+        // accepted: the on-chain amount is the quote's, character for character (never rounded)
+        expect(buildSettlementRequest(opened, q, corridor).amount.amount, `sell=${sell}`).toBe(
+          sell,
+        );
+        accepted += 1;
+      } else {
+        // refused: only because it is not exactly representable in stroops
+        expect(isSettleableAmount(sell, STROOP_SCALE), `sell=${sell}`).toBe(false);
+        refused += 1;
+      }
+    }
+    // The property has to actually have been exercised on both sides.
+    expect(accepted).toBeGreaterThan(0);
+    expect(accepted + refused).toBeGreaterThan(0);
   });
 });

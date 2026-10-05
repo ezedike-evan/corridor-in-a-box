@@ -7,6 +7,7 @@
 // InMemoryIdempotencyStore is for tests/examples. In production back this with
 // Postgres (a row per idempotencyKey, optimistic concurrency on `version`).
 
+import type { Money } from "@corridor/types";
 import type { CorridorState } from "./state";
 
 export interface StoredRun {
@@ -16,7 +17,13 @@ export interface StoredRun {
   version: number;
   transactionId?: string;
   quoteId?: string;
+  quoteExpiresAt?: number;
+  quoteFirm?: boolean;
+  settlementAmount?: string;
   stellarTxHash?: string;
+  depositAddress?: string;
+  memo?: string;
+  memoType?: "text" | "hash" | "id";
   /**
    * Identifier of a refund already requested for this run — the refund leg's
    * own reference, not the settlement's.
@@ -32,6 +39,18 @@ export interface StoredRun {
    * issue another.
    */
   refundId?: string;
+  /**
+   * What the settle leg was asked to pay, recorded before the run reaches
+   * `settled`. A resumed run has no other way to know the deposit address, memo
+   * or amount, so without it the on-chain verifier could not be re-run after a
+   * crash. Absent on runs written before this field existed.
+   */
+  settlement?: {
+    readonly to: string;
+    readonly memo?: string;
+    readonly memoType?: "text" | "hash" | "id";
+    readonly amount: Money;
+  };
   lastError?: string;
   /**
    * Opaque tenant id that owns this run, so a read can be scoped to its creator.

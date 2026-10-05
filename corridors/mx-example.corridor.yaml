@@ -1,13 +1,14 @@
-# Corridor #1 (TEMPLATE) — USD → Mexico (MXN) via a SEP-31 receiving anchor.
+# TEMPLATE — USD → Mexico (MXN) via a SEP-31 receiving anchor.
 #
 # EVERY ENDPOINT BELOW IS FICTIONAL. `anchor.example.mx` does not resolve and is
 # not intended to. This file exists to show the SHAPE of a Mexico lane, not to
 # describe one that exists — no anchor relationship stands behind it.
+# (See `ng-cowrie.corridor.yaml` for a worked real example.)
 #
 # It therefore reports UNVERIFIED from `corridor plan` and renders amber on the
 # dashboard, because `dest.endpoints.endpoints_verified_at` is deliberately
 # unset. To turn this into a real corridor: agree terms with an anchor, read the
-# live values out of its published stellar.toml (TRANSFER_SERVER_SEP0031,
+# live values out of its published stellar.toml (DIRECT_PAYMENT_SERVER,
 # WEB_AUTH_ENDPOINT, KYC_SERVER, ANCHOR_QUOTE_SERVER), replace the URLs, and set
 # endpoints_verified_at to the date you checked. Nothing else in this file changes.
 #

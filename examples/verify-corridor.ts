@@ -17,8 +17,10 @@
 //
 // It fails loudly and early rather than hanging: the stack is checked with
 // `reference-anchor.sh doctor` before a payment is opened, because a run against
-// a sick stack does not fail fast — it polls for the whole of
-// recovery.timeout_seconds and then reports SETTLEMENT_TIMEOUT.
+// a sick stack ends in RECONCILE_STALLED after 10 identical consecutive polls
+// (~20 s with the default stallThreshold=10 and reconcilePollMs=2000).
+// SETTLEMENT_TIMEOUT only fires when the anchor's status keeps changing but
+// never reaches a terminal state within recovery.timeout_seconds.
 //
 //   CORRIDOR_SIGNER_SECRET=S...   testnet distribution account seed (required)
 //   REFERENCE_ANCHOR_URL=...      local reference server (default localhost:8080)
@@ -42,6 +44,7 @@ import {
   InMemoryAuditLog,
   InMemoryIdempotencyStore,
   consoleLogger,
+  defaultSep31Gate,
   execute,
   type EngineDeps,
 } from "@corridor/engine";
@@ -88,7 +91,8 @@ function pinToReferenceAnchor(corridor: Corridor): Corridor {
     ...corridor,
     dest: {
       ...corridor.dest,
-      protocol: "sep31",
+      // This harness drives a SEP-31 anchor, whatever the manifest declared.
+      protocol: "sep31" as const,
       endpoints: {
         ...corridor.dest.endpoints,
         home_domain: host,
@@ -202,6 +206,7 @@ async function main(): Promise<void> {
     audit,
     logger: consoleLogger,
     trustManifestWithoutAttestation: true,
+    gate: defaultSep31Gate({ adapter, horizon: HORIZON }),
   };
 
   // SEP-12 identifies both parties to the receiving anchor. The sending side

@@ -26,12 +26,20 @@ function corridor(): Corridor {
       endpoints: {
         home_domain: "d.example",
         transfer_server_sep31: "https://d.example/sep31",
+        endpoints_verified_at: "1970-01-01",
       },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery: {},
+    proof: {
+      canary_completed_at: "1970-01-01T00:00:00Z",
+      stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      anchor_transaction_id: "canary-test",
+      amount: "1",
+      max_age_days: 50000,
+    },
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;
@@ -54,6 +62,7 @@ function deps(store: InMemoryIdempotencyStore): EngineDeps {
     idempotency: store,
     sleep: async () => {},
     trustManifestWithoutAttestation: true,
+    unsafeSkipPreSettleGate: true,
   };
 }
 
@@ -115,6 +124,7 @@ describe("concurrent claim", () => {
       idempotency: store,
       sleep: async () => {},
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
 
     const [a, b] = await Promise.all([
@@ -172,10 +182,16 @@ function fakeDb(): Queryable & { table: Map<string, Record<string, unknown>> } {
         version: params[3] as number,
         transaction_id: params[4],
         quote_id: params[5],
-        stellar_tx_hash: params[6],
-        refund_id: params[7],
-        last_error: params[8],
-        owner: params[9],
+        quote_expires_at: params[6],
+        quote_firm: params[7],
+        settlement_amount: params[8],
+        stellar_tx_hash: params[9],
+        deposit_address: params[10],
+        memo: params[11],
+        memo_type: params[12],
+        refund_id: params[13],
+        last_error: params[14],
+        owner: params[15],
       };
       // create(): INSERT … ON CONFLICT DO NOTHING RETURNING — only the first
       // writer for a key lands a row and gets it back; a conflict returns [].
@@ -314,6 +330,31 @@ describe("refund state round-trips", () => {
     });
     expect(seen[0]).toContain("refund_id");
     expect(seen.slice(1).join("\n")).toContain("add column if not exists refund_id");
+    expect(seen[0]).toContain("deposit_address");
+    expect(seen[0]).toContain("memo");
+    expect(seen[0]).toContain("memo_type");
+    expect(seen.slice(1).join("\n")).toContain("add column if not exists deposit_address");
+    expect(seen.slice(1).join("\n")).toContain("add column if not exists memo");
+    expect(seen.slice(1).join("\n")).toContain("add column if not exists memo_type");
+  });
+
+  it("ships resume data columns in create DDL and additive migrations", async () => {
+    const seen: string[] = [];
+    await migrate({
+      async query(text: string) {
+        seen.push(text);
+        return { rows: [] };
+      },
+    });
+    for (const column of [
+      "quote_expires_at",
+      "quote_firm",
+      "settlement_amount",
+      "deposit_address",
+    ]) {
+      expect(seen[0]).toContain(column);
+      expect(seen.slice(1).join("\n")).toContain(`add column if not exists ${column}`);
+    }
   });
 });
 
@@ -333,6 +374,55 @@ describe("PostgresIdempotencyStore", () => {
     expect(got).toMatchObject({ idempotencyKey: "k", state: "settled", transactionId: "tx" });
     expect(got?.stellarTxHash).toBeUndefined();
     expect(got?.quoteId).toBeUndefined();
+    expect(got?.depositAddress).toBeUndefined();
+    expect(got?.memo).toBeUndefined();
+    expect(got?.memoType).toBeUndefined();
+  });
+
+  it("round-trips depositAddress, memo, and memoType", async () => {
+    const db = fakeDb();
+    const store = new PostgresIdempotencyStore(db);
+    const run: StoredRun = {
+      idempotencyKey: "k-dep",
+      corridorId: "c",
+      state: "opened",
+      version: 3,
+      transactionId: "tx-dep",
+      depositAddress: "GDEP123",
+      memo: "memo-test",
+      memoType: "text",
+    };
+    await store.put(run);
+    const got = await store.get("k-dep");
+    expect(got?.depositAddress).toBe("GDEP123");
+    expect(got?.memo).toBe("memo-test");
+    expect(got?.memoType).toBe("text");
+  });
+
+  it("round-trips quote and opened transaction data", async () => {
+    const store = new PostgresIdempotencyStore(fakeDb());
+    await store.put({
+      idempotencyKey: "resume-data",
+      corridorId: "c",
+      state: "opened",
+      version: 2,
+      transactionId: "tx",
+      quoteId: "quote",
+      quoteExpiresAt: 1234,
+      quoteFirm: true,
+      settlementAmount: "10.00",
+      depositAddress: "GDEST",
+      memo: "memo",
+      memoType: "hash",
+    });
+    expect(await store.get("resume-data")).toMatchObject({
+      quoteExpiresAt: 1234,
+      quoteFirm: true,
+      settlementAmount: "10.00",
+      depositAddress: "GDEST",
+      memo: "memo",
+      memoType: "hash",
+    });
   });
 
   it("ignores a stale write with a lower version (optimistic concurrency)", async () => {

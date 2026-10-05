@@ -11,7 +11,9 @@
   "main": "./src/index.ts",
   "dependencies": {
     "@corridor/types": "workspace:*",
+    "@corridor/engine": "workspace:*",
     "@corridor/manifest": "workspace:*",
-    "@corridor/adapter-kit": "workspace:*"
+    "@corridor/adapter-kit": "workspace:*",
+    "@corridor/engine": "workspace:*"
   }
 }

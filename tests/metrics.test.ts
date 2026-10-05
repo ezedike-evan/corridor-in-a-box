@@ -22,12 +22,20 @@ function corridor(): Corridor {
       endpoints: {
         home_domain: "d.example",
         transfer_server_sep31: "https://d.example/sep31",
+        endpoints_verified_at: "1970-01-01",
       },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery: {},
+    proof: {
+      canary_completed_at: "1970-01-01T00:00:00Z",
+      stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      anchor_transaction_id: "canary-test",
+      amount: "1",
+      max_age_days: 50000,
+    },
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;
@@ -51,6 +59,7 @@ function deps(metrics: InMemoryMetrics, adapterOpts = {}): EngineDeps {
     metrics,
     sleep: async () => {},
     trustManifestWithoutAttestation: true,
+    unsafeSkipPreSettleGate: true,
   };
 }
 
@@ -66,10 +75,39 @@ describe("metrics", () => {
     }
     expect(timingNames).toContain("corridor.duration");
 
-    // 7 transitions counted
-    expect(m.counters.filter((c) => c.name === "corridor.transition")).toHaveLength(7);
+    // 8 transitions counted
+    expect(m.counters.filter((c) => c.name === "corridor.transition")).toHaveLength(8);
     const terminal = m.counters.find((c) => c.name === "corridor.terminal");
     expect(terminal?.tags?.state).toBe("completed");
+  });
+
+  it("records gate timing and check counter metrics when gate is evaluated", async () => {
+    const m = new InMemoryMetrics();
+    const d = deps(m);
+    d.gate = {
+      async evaluate() {
+        return {
+          passed: true,
+          results: [
+            {
+              name: "chain.balance",
+              passed: true,
+              detail: "sufficient",
+              durationMs: 1,
+            },
+          ],
+        };
+      },
+    };
+    const r = await execute(intent, corridor(), d);
+    expect(r.ok).toBe(true);
+
+    const timingNames = m.timings.map((t) => t.name);
+    expect(timingNames).toContain("corridor.verb.verify");
+
+    const gateChecks = m.counters.filter((c) => c.name === "corridor.gate.check");
+    expect(gateChecks).toHaveLength(1);
+    expect(gateChecks[0].tags).toEqual({ name: "chain.balance", passed: "true" });
   });
 
   it("counts a failed terminal when a verb fails", async () => {

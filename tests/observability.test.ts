@@ -23,12 +23,20 @@ function corridor(): Corridor {
       endpoints: {
         home_domain: "d.example",
         transfer_server_sep31: "https://d.example/sep31",
+        endpoints_verified_at: "1970-01-01",
       },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery: {},
+    proof: {
+      canary_completed_at: "1970-01-01T00:00:00Z",
+      stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      anchor_transaction_id: "canary-test",
+      amount: "1",
+      max_age_days: 50000,
+    },
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;
@@ -54,16 +62,18 @@ describe("audit trail", () => {
       audit,
       now: () => 1700000000000,
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(intent, corridor(), deps);
     expect(r.ok).toBe(true);
 
-    // created -> quoted -> compliant -> opened -> settling -> settled
-    //   -> reconciled -> completed = 7 transitions
+    // created -> quoted -> compliant -> opened -> verifying -> settling -> settled
+    //   -> reconciled -> completed = 8 transitions
     expect(audit.entries.map((e) => e.to)).toEqual([
       "quoted",
       "compliant",
       "opened",
+      "verifying",
       "settling",
       "settled",
       "reconciled",
@@ -92,6 +102,7 @@ describe("audit trail", () => {
       idempotency: new InMemoryIdempotencyStore(),
       audit,
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
     const r = await execute(intent, corridor(), deps);
     expect(r.ok).toBe(false);
@@ -220,6 +231,7 @@ describe("reconcile polling observability", () => {
       logger,
       metrics,
       trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
     };
 
     const r = await execute(intent, corridor(), deps);

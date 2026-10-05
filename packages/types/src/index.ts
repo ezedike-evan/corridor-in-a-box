@@ -19,6 +19,8 @@ export const isErr = <T, E>(o: Outcome<T, E>): o is Err<E> => !o.ok;
 export type CorridorErrorCode =
   | "MANIFEST_INVALID"
   | "AMOUNT_INVALID"
+  | "ENGINE_MISCONFIGURED"
+  | "PRESETTLE_ANCHOR_DRIFT"
   | "QUOTE_UNAVAILABLE"
   | "QUOTE_EXPIRED"
   | "KYC_REQUIRED"
@@ -30,8 +32,24 @@ export type CorridorErrorCode =
   | "RECONCILE_MISMATCH"
   | "RECONCILE_STALLED"
   | "IDEMPOTENCY_CONFLICT"
+  /** live /info or stellar.toml no longer matches what was verified */
+  | "PRESETTLE_ANCHOR_DRIFT"
+  /** the opened anchor transaction is not what we are about to pay */
+  | "PRESETTLE_TX_MISMATCH"
+  /** destination missing, no trustline, or not authorized */
+  | "PRESETTLE_DESTINATION_UNSAFE"
   /** our balance cannot cover amount + fee + reserve */
-  | "PRESETTLE_INSUFFICIENT_FUNDS";
+  | "PRESETTLE_INSUFFICIENT_FUNDS"
+  /** firm quote will not survive settle + confirm */
+  | "PRESETTLE_QUOTE_WINDOW"
+  /** outside anchor or manifest min/max */
+  | "PRESETTLE_AMOUNT_OUT_OF_RANGE"
+  /** SEP-12 status is no longer ACCEPTED */
+  | "PRESETTLE_RECEIVER_NOT_ACCEPTED"
+  /** amount above the canary cap on a non-PROVEN lane */
+  | "CORRIDOR_UNPROVEN"
+  /** per-corridor circuit breaker is open */
+  | "CORRIDOR_HALTED";
 
 /**
  * Returns true if the error code is a pre-settle gate check refusal.
