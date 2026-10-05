@@ -53,6 +53,7 @@ describe("StaticRouteResolver", () => {
     const registry = {
       servesSep31: async () => true,
       staleness: async () => 0,
+      tomlHash: async () => "0".repeat(64),
     };
     const resolver = new RegistryRouteResolver({
       registry,

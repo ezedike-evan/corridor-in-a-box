@@ -5,7 +5,7 @@
 // specific fact arrives via the validated manifest, every anchor-specific fact via
 // the injected RouteResolver/adapters. Add a corridor = add a manifest.
 
-import type { Corridor } from "@corridor/manifest";
+import { liveness, type Corridor, type LivenessState } from "@corridor/manifest";
 import {
   compareAmounts,
   fail,
@@ -17,7 +17,7 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type { RouteResolver } from "@corridor/router";
-import type { GateContext, PreSettleGate } from "./gate";
+import { ExternalQuoteProvider, type ExternalQuoteFn } from "@corridor/adapter-kit";
 import { canTransition, isTerminal, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
@@ -26,36 +26,64 @@ import {
   type StoredRun,
 } from "./idempotency";
 import type {
+  ChainVerifier,
   RefundRequest,
   SettlementRef,
   SettlementRequest,
+  SettlementStrategy,
   SettlementSubmitter,
 } from "./ports";
 import {
   anchorTerminalStatus,
   backoffMs,
+  buildSettlementRequest,
   comply,
   open,
   quote,
   recover,
   reconcileUntil,
   settle,
+  watchRefund,
   settleQuoteProblem,
 } from "./verbs";
+import type { AnchorAdapter, TransactionStatus } from "@corridor/adapter-kit";
+import { defaultStrategies } from "./ports";
 import {
   noopMetrics,
   silentLogger,
   type AuditEntry,
   type AuditSink,
+  type Alerting,
   type Logger,
   type Metrics,
 } from "./observability";
+import type { CheckResult, GateContext, PreSettleGate } from "./gate";
 
 export interface EngineDeps {
   resolver: RouteResolver;
   submitter: SettlementSubmitter;
   gate?: PreSettleGate;
+  /**
+   * Optional independent check that the settle transaction really paid what
+   * was requested. Runs once after `settled` (and again on resume from
+   * `settled`), before the run may become `reconciled`. A failure is treated
+   * like any post-settle failure: money moved, so it goes to the manifest's
+   * `hold` / `refund_sender` path rather than `failed`.
+   */
+  chainVerifier?: ChainVerifier;
+  /**
+   * Explicit list of settlement strategies. When omitted, the engine derives
+   * `[new StellarPaymentStrategy(deps.submitter)]` so all existing callers
+   * keep working with no changes.
+   *
+   * Provide this when you need to handle settlement kinds beyond
+   * `"stellar_payment"` (e.g. after issue #183 lands). The engine dispatches
+   * to the first strategy whose `kind` matches the deposit instructions kind
+   * returned by the receiving anchor.
+   */
+  strategies?: readonly SettlementStrategy[];
   idempotency?: IdempotencyStore;
+  waker?: import("./ports").ReconcileWaker;
   now?: () => number;
   /** Injectable sleep so tests don't wait on real backoff/poll delays. */
   sleep?: (ms: number) => Promise<void>;
@@ -71,13 +99,27 @@ export interface EngineDeps {
   logger?: Logger;
   /** Append-only audit sink; receives one entry per state transition. */
   audit?: AuditSink;
+  /** Best-effort operational alerts. Failures are logged and never alter a run. */
+  alerting?: Alerting;
   /** Counter/timing sink. Defaults to a no-op. */
   metrics?: Metrics;
+  /** Maximum payment amount while a corridor has no fresh canary proof. Defaults to "10". */
+  unprovenMaxAmount?: string;
   /**
    * Explicit opt-in allowing manifest-trusted routes on a public network without
    * on-chain attestation.
    */
   trustManifestWithoutAttestation?: boolean;
+  /**
+   * Pricing function for corridors with `fx.quote_source: external`. Required
+   * for those corridors; the engine never makes a SEP-38 call for them.
+   */
+  externalQuote?: ExternalQuoteFn;
+  /**
+   * Explicit escape hatch skipping pre-settle verification. When true, execute() bypasses gate
+   * evaluation while recording `gate.skipped` in the audit log and emitting a warning.
+   */
+  unsafeSkipPreSettleGate?: boolean;
 }
 
 export interface RunResult {
@@ -118,6 +160,7 @@ export async function execute(
   const pollMs =
     rc?.poll_seconds !== undefined ? rc.poll_seconds * 1000 : (deps.reconcilePollMs ?? 2_000);
   const stallThreshold = rc?.stall_polls ?? deps.stallThreshold ?? 10;
+  const externalStallMs = externalStallBudgetMs(corridor);
   const metrics = deps.metrics ?? noopMetrics;
   const startedAt = now();
 
@@ -129,6 +172,16 @@ export async function execute(
     return r;
   };
 
+  // --- configuration guard: pre-settle gate is mandatory by default.
+  // Fail closed before claiming idempotency key (no run row persisted) unless
+  // an explicit opt-out is provided.
+  if (!deps.gate && deps.unsafeSkipPreSettleGate !== true) {
+    return fail(
+      "ENGINE_MISCONFIGURED",
+      "pre-settle gate is required; supply deps.gate or explicitly opt out with deps.unsafeSkipPreSettleGate = true",
+    );
+  }
+
   // --- input guard: never let a malformed or non-positive amount reach the
   // chain. `isSettleableAmount` and not `isValidAmount`: the latter is a syntax
   // check that accepts a leading minus (subAmounts needs signed values), so it
@@ -139,9 +192,43 @@ export async function execute(
       `sourceAmount "${intent.sourceAmount.amount}" is not a positive decimal amount`,
     );
   }
+  const verificationAt = now();
+  const live = liveness(corridor, new Date(verificationAt));
+  const unproven = live.state !== "proven";
+  const canaryCap = corridor.proof?.canary_max_amount ?? deps.unprovenMaxAmount ?? "10";
   // Per-corridor ceiling. A manifest that declares max_amount caps any single
-  // payment on that lane; without one there is no upper bound at all.
+  // payment on that lane, including on a proven corridor.
   const max = corridor.limits?.max_amount;
+  let effectiveCap = unproven ? canaryCap : max;
+  if (unproven && max) {
+    const compared = compareAmounts(max, canaryCap);
+    if (!compared.ok) return compared;
+    effectiveCap = compared.value <= 0 ? max : canaryCap;
+  }
+  await emitVerification(deps, intent, corridor, verificationAt, live.state, effectiveCap);
+
+  if (
+    corridor.settlement.network === "public" &&
+    (live.state === "unverified" || live.state === "not-runnable")
+  ) {
+    return fail(
+      "CORRIDOR_UNPROVEN",
+      `corridor ${corridor.id} is ${live.state} on the public network and cannot accept payments`,
+    );
+  }
+
+  const min = corridor.limits?.min_amount;
+  if (min) {
+    const cmp = compareAmounts(intent.sourceAmount.amount, min);
+    if (!cmp.ok) return cmp;
+    if (cmp.value < 0) {
+      return fail(
+        "AMOUNT_INVALID",
+        `sourceAmount "${intent.sourceAmount.amount}" is below corridor ${corridor.id} min_amount ${min}`,
+      );
+    }
+  }
+
   if (max) {
     const cmp = compareAmounts(intent.sourceAmount.amount, max);
     if (!cmp.ok) return cmp;
@@ -152,17 +239,24 @@ export async function execute(
       );
     }
   }
+  if (unproven && effectiveCap) {
+    const cmp = compareAmounts(intent.sourceAmount.amount, effectiveCap);
+    if (!cmp.ok) return cmp;
+    if (cmp.value > 0) {
+      return fail(
+        "CORRIDOR_UNPROVEN",
+        `sourceAmount "${intent.sourceAmount.amount}" exceeds corridor ${corridor.id} unproven canary cap ${effectiveCap}`,
+      );
+    }
+  }
 
   // --- idempotency gate + crash resume ---------------------------------
-  // A persisted run lets a crashed process pick up where it left off. We only
-  // auto-resume from states where resuming is provably safe — never from a state
-  // where re-running could double-settle.
   const existing = await store.get(intent.idempotencyKey);
   if (existing) {
     if (existing.state === "completed") {
       return ok(toResult(existing, [existing.state]));
     }
-    if (existing.state === "settled" || existing.state === "reconciled") {
+    if (!isTerminal(existing.state)) {
       return resumeRun(
         existing,
         intent,
@@ -173,11 +267,9 @@ export async function execute(
         sleep,
         pollMs,
         stallThreshold,
+        opts,
       );
     }
-    // settling / created / quoted / … : ambiguous (did the payment go out?) or
-    // stale (quote may have expired). Surface for a fresh attempt or ops, rather
-    // than risk a duplicate payment.
     return fail(
       "IDEMPOTENCY_CONFLICT",
       `idempotencyKey ${intent.idempotencyKey} already in-flight (state=${existing.state})`,
@@ -210,33 +302,19 @@ export async function execute(
   const route = await deps.resolver.resolve(intent, corridor);
   const routeTrust = route.trust;
   const adapter = route.receiving;
-
-  const advance = async (
-    to: CorridorState,
-    meta?: { quoteFee?: Money; networkFee?: string },
-  ): Promise<Outcome<void>> => {
-    if (!canTransition(run.state, to)) {
-      return fail("SETTLEMENT_FAILED", `illegal transition ${run.state} -> ${to}`);
-    }
-    const from = run.state;
-    run.state = to;
-    run.version += 1;
-    trail.push(to);
-    await store.put(run);
-    await emitTransition(deps, run, from, now(), undefined, routeTrust, meta);
-    return ok(undefined);
-  };
-
-  const die = async (e: CorridorError): Promise<Err> => {
-    const from = run.state;
-    run.lastError = `${e.code}: ${e.message}`;
-    run.state = "failed";
-    run.version += 1;
-    trail.push("failed");
-    await store.put(run);
-    await emitTransition(deps, run, from, now(), `${e.code}: ${e.message}`, routeTrust);
-    return { ok: false, error: e };
-  };
+  const context = createRunContext({
+    run,
+    trail,
+    corridor,
+    deps,
+    store,
+    now,
+    sleep,
+    pollMs,
+    adapter,
+    routeTrust,
+  });
+  const { advance, die, finishFailure } = context;
 
   if (
     corridor.settlement.network === "public" &&
@@ -252,10 +330,39 @@ export async function execute(
     });
   }
 
+  let externalProvider: ExternalQuoteProvider | undefined;
+  if (corridor.fx.quote_source === "external") {
+    // A non-firm external rate cannot bind the receiving anchor, so when that
+    // anchor is the one holding FX risk we refuse unless it prices natively.
+    if (
+      corridor.fx.who_holds_risk === "receiving_anchor" &&
+      !adapter.capabilities().quotes.includes("native")
+    ) {
+      return die({
+        code: "MANIFEST_INVALID",
+        message: `corridor ${corridor.id}: fx.quote_source "external" with who_holds_risk "receiving_anchor" requires an adapter that reports firm native quotes; a non-firm external rate cannot bind the receiving anchor`,
+        retryable: false,
+      });
+    }
+    if (!deps.externalQuote) {
+      return die({
+        code: "QUOTE_UNAVAILABLE",
+        message: `corridor ${corridor.id} sets fx.quote_source "external" but no EngineDeps.externalQuote was provided`,
+        retryable: false,
+      });
+    }
+    externalProvider = new ExternalQuoteProvider(deps.externalQuote, now);
+  }
+
   // --- 1. quote ---------------------------------------------------------
-  const q = await timed("quote", () => quote(adapter, intent, corridor, now()));
+  const q = await timed("quote", () =>
+    quote(adapter, intent, corridor, now(), externalProvider),
+  );
   if (!q.ok) return die(q.error);
   run.quoteId = q.value.id;
+  run.quoteExpiresAt = q.value.expiresAt;
+  run.quoteFirm = q.value.firm;
+  run.settlementAmount = q.value.sourceAmount.amount;
   {
     const t = await advance("quoted");
     if (!t.ok) return die(t.error);
@@ -283,75 +390,6 @@ export async function execute(
 
   // The whole settle+reconcile phase must finish inside the corridor's timeout.
   const deadlineMs = now() + corridor.recovery.timeout_seconds * 1000;
-
-  // Terminal failure handling: reverse any on-chain settlement (refund), park for
-  // manual intervention (hold), or give up — per the manifest's recovery policy.
-  const finishFailure = async (e: CorridorError): Promise<Err> => {
-    if (corridor.recovery.rollback === "refund_sender") {
-      return refundAndStop(e);
-    }
-    if (corridor.recovery.rollback === "hold") {
-      return holdAndStop(e);
-    }
-    return die(e);
-  };
-
-  const refundAndStop = async (e: CorridorError): Promise<Err> => {
-    const back = await advance("recovering");
-    if (!back.ok) return die(back.error);
-    // Money moved and the anchor itself reports a terminal failure: it is
-    // already refunding (SEP-31 `refunds`), so we wait for its report instead of
-    // asking the chain to reverse a payment it cannot reverse. Watching the
-    // anchor from here is a separate step; this only parks the run correctly.
-    if (run.stellarTxHash && anchorTerminalStatus(e)) {
-      run.lastError = `${e.code}: ${e.message}`;
-      const pending = await advance("refund_pending");
-      if (!pending.ok) return die(pending.error);
-      return { ok: false, error: e };
-    }
-    // Only reverse the chain if a payment actually went out. If settlement never
-    // succeeded, there is nothing on-chain to undo — the sending anchor returns
-    // the sender's funds off-chain — so we just record the refunded state.
-    // A refund already requested for this run is not requested again. The
-    // stored id is the only evidence a resumed process has that it already
-    // asked: without this check a crash between the refund and the next write
-    // would send the money back twice.
-    if (run.stellarTxHash && !hasRequestedRefund(run)) {
-      const req: RefundRequest = {
-        original: { stellarTxHash: run.stellarTxHash },
-        amount: {
-          asset: corridor.settlement.bridge_asset,
-          amount: q.value.sourceAmount.amount,
-        },
-        corridor,
-        reason: `${e.code}: ${e.message}`,
-      };
-      const rf = await deps.submitter.refund(req);
-      if (!rf.ok) {
-        // Couldn't reverse the chain payment — escalate to a manual hold.
-        return holdAndStop(rf.error);
-      }
-      // Recorded before the state advance that persists it, so the very next
-      // write carries the id. Set once and never rewritten — see the coalesce
-      // in PostgresIdempotencyStore.put.
-      run.refundId = rf.value.stellarTxHash;
-    }
-    run.lastError = `${e.code}: ${e.message}`;
-    const done = await advance("refunded");
-    if (!done.ok) return die(done.error);
-    return { ok: false, error: e };
-  };
-
-  const holdAndStop = async (e: CorridorError): Promise<Err> => {
-    if (run.state !== "recovering") {
-      const back = await advance("recovering");
-      if (!back.ok) return die(back.error);
-    }
-    run.lastError = `${e.code}: ${e.message}`;
-    const held = await advance("held");
-    if (!held.ok) return die(held.error);
-    return { ok: false, error: e };
-  };
 
   // --- 3b/4. settle + reconcile, with recover() retry loop --------------
   let attempt = 0;
@@ -385,13 +423,9 @@ export async function execute(
       return die({ code: "AMOUNT_INVALID", message: settleProblem, retryable: false });
     }
 
-    {
-      const t = await advance("verifying");
-      if (!t.ok) return die(t.error);
-    }
-
+    let gateChecks: CheckResult[];
     if (deps.gate) {
-      const gateContext: GateContext = {
+      const gateCtx: GateContext = {
         intent,
         corridor,
         quote: q.value,
@@ -399,32 +433,64 @@ export async function execute(
         now: now(),
         attempt,
       };
-
       let gateResult;
       try {
-        gateResult = await timed("verify", () => deps.gate!.evaluate(gateContext));
+        gateResult = await timed("verify", () => deps.gate!.evaluate(gateCtx));
       } catch (e) {
+        // Record the attempt at the gate so the audit trail shows where it died.
+        await advance("verifying");
         return die({
           code: "SETTLEMENT_FAILED",
           message: e instanceof Error ? e.message : String(e),
           retryable: false,
         });
       }
-
-      for (const check of gateResult.results) {
+      gateChecks = gateResult.results;
+      for (const check of gateChecks) {
         metrics.increment("corridor.gate.check", {
           name: check.name,
           passed: String(check.passed),
         });
       }
-
+      {
+        const t = await advance("verifying", { checks: gateChecks });
+        if (!t.ok) return die(t.error);
+      }
       if (!gateResult.passed) {
-        const firstFailure = gateResult.results.find((r) => !r.passed);
-        return die({
-          code: firstFailure?.code ?? "SETTLEMENT_FAILED",
-          message: firstFailure?.detail ?? "pre-settle gate failed",
-          retryable: false,
-        });
+        const failure = gateChecks.find((r) => !r.passed)!;
+        return die(
+          {
+            code: failure.code ?? "SETTLEMENT_FAILED",
+            message: failure.detail,
+            retryable: false,
+          },
+          gateChecks,
+        );
+      }
+    } else {
+      const skippedCheck: CheckResult = {
+        name: "gate.skipped",
+        passed: true,
+        detail: "unsafeSkipPreSettleGate",
+        durationMs: 0,
+      };
+      gateChecks = [skippedCheck];
+      (deps.logger ?? silentLogger).log(
+        "warn",
+        "pre-settle gate skipped via unsafeSkipPreSettleGate",
+        {
+          idempotencyKey: run.idempotencyKey,
+          corridor: corridor.id,
+          attempt,
+        },
+      );
+      metrics.increment("corridor.gate.check", {
+        name: skippedCheck.name,
+        passed: "true",
+      });
+      {
+        const t = await advance("verifying", { checks: gateChecks });
+        if (!t.ok) return die(t.error);
       }
     }
 
@@ -433,18 +499,10 @@ export async function execute(
       if (!t.ok) return die(t.error);
     }
 
+    const strategies = deps.strategies ?? defaultStrategies(deps.submitter);
     let s: Outcome<SettlementRef>;
     if (deps.submitter.findExisting) {
-      const req: SettlementRequest = {
-        to: opened.value.depositAddress,
-        memo: opened.value.memo,
-        memoType: opened.value.memoType,
-        amount: {
-          asset: corridor.settlement.bridge_asset,
-          amount: q.value.sourceAmount.amount,
-        },
-        corridor,
-      };
+      const req = buildSettlementRequest(opened.value, q.value, corridor);
       const existing = await timed("findExisting", () => deps.submitter.findExisting!(req));
       if (!existing.ok) {
         return finishFailure(existing.error);
@@ -452,12 +510,10 @@ export async function execute(
       if (existing.value) {
         s = ok(existing.value);
       } else {
-        s = await timed("settle", () =>
-          settle(deps.submitter, opened.value, q.value, corridor),
-        );
+        s = await timed("settle", () => settle(strategies, opened.value, q.value, corridor));
       }
     } else {
-      s = await timed("settle", () => settle(deps.submitter, opened.value, q.value, corridor));
+      s = await timed("settle", () => settle(strategies, opened.value, q.value, corridor));
     }
     if (!s.ok) {
       const action = recover(corridor, s.error.retryable, attempt);
@@ -474,6 +530,13 @@ export async function execute(
       return finishFailure(s.error);
     }
     run.stellarTxHash = s.value.stellarTxHash;
+    const settleReq = settlementRequestFor(opened.value, q.value, corridor);
+    run.settlement = {
+      to: settleReq.to,
+      memo: settleReq.memo,
+      memoType: settleReq.memoType,
+      amount: settleReq.amount,
+    };
     {
       const t = await advance("settled", {
         quoteFee: q.value.fee,
@@ -481,6 +544,10 @@ export async function execute(
       });
       if (!t.ok) return die(t.error);
     }
+
+    // Verify our own payment on-chain before trusting the anchor's word on it.
+    const v = await timed("verify", () => verifyOnChain(deps, s.value, settleReq));
+    if (!v.ok) return finishFailure(v.error);
 
     // Poll until the anchor confirms payout or we hit the corridor timeout.
     // reconcileUntil returns a non-retryable error, so we never re-settle here.
@@ -491,6 +558,8 @@ export async function execute(
         deadlineMs,
         pollMs,
         stallThreshold,
+        wake: deps.waker?.signal(opened.value.transactionId),
+        externalStallMs,
         corridorId: corridor.id,
         logger: deps.logger,
         metrics: deps.metrics,
@@ -513,7 +582,221 @@ export async function execute(
   return ok(toResult(run, trail));
 }
 
+async function emitVerification(
+  deps: EngineDeps,
+  intent: PaymentIntent,
+  corridor: Corridor,
+  at: number,
+  state: LivenessState,
+  effectiveCap?: string,
+): Promise<void> {
+  const detail = { liveness: state, effectiveCap };
+  const entry = {
+    event: "verifying" as const,
+    idempotencyKey: intent.idempotencyKey,
+    corridorId: corridor.id,
+    at,
+    detail,
+  };
+  (deps.logger ?? silentLogger).log("info", "corridor.verifying", entry);
+  await deps.audit?.recordDetail?.(entry);
+}
+
 type Err = { ok: false; error: CorridorError };
+
+function settlementRequestFor(
+  opened: { depositAddress: string; memo?: string; memoType?: "text" | "hash" | "id" },
+  q: { sourceAmount: { amount: string } },
+  corridor: Corridor,
+): SettlementRequest {
+  return {
+    to: opened.depositAddress,
+    memo: opened.memo,
+    memoType: opened.memoType,
+    amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
+    corridor,
+  };
+}
+
+/** Run the optional chain verifier; a no-op success when none is configured. */
+async function verifyOnChain(
+  deps: EngineDeps,
+  ref: SettlementRef,
+  req: SettlementRequest,
+): Promise<Outcome<void>> {
+  if (!deps.chainVerifier) return ok(undefined);
+  const r = await deps.chainVerifier(ref, req);
+  if (r.ok) return r;
+  // Never retry: the payment is already on the chain, resubmitting would double it.
+  return fail(r.error.code, r.error.message, { retryable: false, cause: r.error.cause });
+}
+
+interface AdvanceMeta {
+  quoteFee?: Money;
+  networkFee?: string;
+  amountRefunded?: string;
+  amountFee?: string;
+  checks?: readonly CheckResult[];
+}
+
+interface RunContext {
+  advance(to: CorridorState, meta?: AdvanceMeta): Promise<Outcome<void>>;
+  die(error: CorridorError, checks?: readonly CheckResult[]): Promise<Err>;
+  finishFailure(error: CorridorError): Promise<Err>;
+  holdAndStop(error: CorridorError, status?: TransactionStatus): Promise<Err>;
+}
+
+interface RunContextInit {
+  run: StoredRun;
+  trail: CorridorState[];
+  corridor: Corridor;
+  deps: EngineDeps;
+  store: IdempotencyStore;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  pollMs: number;
+  /** Receiving-anchor adapter, used to watch an anchor-driven refund. */
+  adapter: AnchorAdapter;
+  routeTrust?: "attested" | "manifest";
+}
+
+/**
+ * The transition + failure-handling closures shared by a fresh run and a resumed
+ * one, so both take exactly the same recovery path.
+ */
+function createRunContext(init: RunContextInit): RunContext {
+  const { run, trail, corridor, deps, store, now, sleep, pollMs, adapter, routeTrust } = init;
+
+  const advance: RunContext["advance"] = async (to, meta) => {
+    if (!canTransition(run.state, to)) {
+      return fail("SETTLEMENT_FAILED", `illegal transition ${run.state} -> ${to}`);
+    }
+    const from = run.state;
+    run.state = to;
+    run.version += 1;
+    trail.push(to);
+    await store.put(run);
+    await emitTransition(deps, run, from, now(), undefined, routeTrust, meta);
+    return ok(undefined);
+  };
+
+  const die: RunContext["die"] = async (error, checks) => {
+    if (!canTransition(run.state, "failed")) return { ok: false, error };
+    const from = run.state;
+    run.lastError = `${error.code}: ${error.message}`;
+    run.state = "failed";
+    run.version += 1;
+    trail.push("failed");
+    await store.put(run);
+    await emitTransition(
+      deps,
+      run,
+      from,
+      now(),
+      run.lastError,
+      routeTrust,
+      checks ? { checks } : undefined,
+    );
+    return { ok: false, error };
+  };
+
+  const holdAndStop: RunContext["holdAndStop"] = async (error, status) => {
+    // `refund_pending` inherits `recovering`'s exits (state.ts), so it can be
+    // held directly; anything else steps back into `recovering` first.
+    if (run.state !== "recovering" && run.state !== "refund_pending") {
+      const back = await advance("recovering");
+      if (!back.ok) return die(back.error);
+    }
+    run.lastError = `${error.code}: ${error.message}`;
+    const held = await advance("held", refundAudit(status?.refunds));
+    if (!held.ok) return die(held.error);
+    return { ok: false, error };
+  };
+
+  const refundAndStop = async (error: CorridorError): Promise<Err> => {
+    if (run.state !== "recovering") {
+      const back = await advance("recovering");
+      if (!back.ok) return die(back.error);
+    }
+    // Money moved and the anchor itself reports a terminal failure: it is
+    // already refunding (SEP-31 `refunds`), so we wait for its report instead of
+    // asking the chain to reverse a payment it cannot reverse.
+    if (run.stellarTxHash && run.transactionId && anchorTerminalStatus(error)) {
+      run.lastError = `${error.code}: ${error.message}`;
+      const pending = await advance("refund_pending");
+      if (!pending.ok) return die(pending.error);
+      const watched = await watchRefund(adapter, run.transactionId, {
+        now,
+        sleep,
+        deadlineMs: now() + corridor.recovery.refund_wait_seconds * 1000,
+        pollMs,
+        corridorId: corridor.id,
+        logger: deps.logger,
+        metrics: deps.metrics,
+      });
+      if (watched.ok) {
+        const info = watched.value.refunds;
+        if (info && !hasRequestedRefund(run)) {
+          const firstPayment = info.payments[0];
+          if (firstPayment?.id) run.refundId = firstPayment.id;
+        }
+        const done = await advance("refunded", refundAudit(info));
+        if (!done.ok) return die(done.error);
+        return { ok: false, error };
+      }
+      // The run is held with the watch outcome in `lastError`; the caller still
+      // sees the anchor's own terminal failure that started the recovery.
+      const stopped = await holdAndStop(watched.error, statusFrom(watched.error.cause));
+      return stopped.error === watched.error ? { ok: false, error } : stopped;
+    }
+    // Only reverse the chain if a payment actually went out. If settlement never
+    // succeeded, there is nothing on-chain to undo — the sending anchor returns
+    // the sender's funds off-chain — so we just record the refunded state.
+    // A refund already requested for this run is not requested again. The
+    // stored id is the only evidence a resumed process has that it already
+    // asked: without this check a crash between the refund and the next write
+    // would send the money back twice.
+    if (run.stellarTxHash && !hasRequestedRefund(run)) {
+      if (!run.settlementAmount) {
+        return holdAndStop({
+          code: "SETTLEMENT_FAILED",
+          message: "cannot refund: stored settlement amount is missing",
+          retryable: false,
+        });
+      }
+      const req: RefundRequest = {
+        original: { stellarTxHash: run.stellarTxHash },
+        amount: {
+          asset: corridor.settlement.bridge_asset,
+          amount: run.settlementAmount,
+        },
+        corridor,
+        reason: `${error.code}: ${error.message}`,
+      };
+      const refund = await deps.submitter.refund(req);
+      // Couldn't reverse the chain payment — escalate to a manual hold.
+      if (!refund.ok) return holdAndStop(refund.error);
+      // Recorded before the state advance that persists it, so the very next
+      // write carries the id. Set once and never rewritten — see the coalesce
+      // in PostgresIdempotencyStore.put.
+      run.refundId = refund.value.stellarTxHash;
+    }
+    run.lastError = `${error.code}: ${error.message}`;
+    const refunded = await advance("refunded");
+    if (!refunded.ok) return die(refunded.error);
+    return { ok: false, error };
+  };
+
+  // Terminal failure handling: reverse any on-chain settlement (refund), park for
+  // manual intervention (hold), or give up — per the manifest's recovery policy.
+  const finishFailure: RunContext["finishFailure"] = async (error) => {
+    if (corridor.recovery.rollback === "refund_sender") return refundAndStop(error);
+    if (corridor.recovery.rollback === "hold") return holdAndStop(error);
+    return die(error);
+  };
+
+  return { advance, die, finishFailure, holdAndStop };
+}
 
 function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
   return {
@@ -525,6 +808,29 @@ function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
   };
 }
 
+function isTransactionStatus(value: unknown): value is TransactionStatus {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { status?: unknown }).status === "string" &&
+    typeof (value as { settled?: unknown }).settled === "boolean"
+  );
+}
+
+function statusFrom(value: unknown): TransactionStatus | undefined {
+  return isTransactionStatus(value) ? value : undefined;
+}
+
+function refundAudit(
+  info: TransactionStatus["refunds"],
+): { amountRefunded?: string; amountFee?: string } | undefined {
+  if (!info) return undefined;
+  return {
+    amountRefunded: info.amountRefunded.amount,
+    amountFee: info.amountFee.amount,
+  };
+}
+
 /** Log + audit a single transition. `run` must already be at its new state. */
 async function emitTransition(
   deps: EngineDeps,
@@ -533,7 +839,13 @@ async function emitTransition(
   at: number,
   error?: string,
   routeTrust?: "attested" | "manifest",
-  meta?: { quoteFee?: Money; networkFee?: string },
+  meta?: {
+    quoteFee?: Money;
+    networkFee?: string;
+    amountRefunded?: string;
+    amountFee?: string;
+    checks?: readonly CheckResult[];
+  },
 ): Promise<void> {
   const entry: AuditEntry = {
     idempotencyKey: run.idempotencyKey,
@@ -546,21 +858,58 @@ async function emitTransition(
     ...(routeTrust && { routeTrust }),
     ...(meta?.quoteFee && { quoteFee: meta.quoteFee }),
     ...(meta?.networkFee && { networkFee: meta.networkFee }),
+    ...(meta?.amountRefunded !== undefined && { amountRefunded: meta.amountRefunded }),
+    ...(meta?.amountFee !== undefined && { amountFee: meta.amountFee }),
+    // A copy, so a caller mutating its array afterwards cannot change what was recorded.
+    ...(meta?.checks && meta.checks.length > 0 && { checks: [...meta.checks] }),
   };
-  (deps.logger ?? silentLogger).log(error ? "error" : "info", "corridor.transition", entry);
+  const logger = deps.logger ?? silentLogger;
+  for (const c of meta?.checks ?? []) {
+    // Only the check's own fields: `detail` is PII-free by contract (see
+    // CheckResult) and nothing about the sender or recipient is added here.
+    logger.log(c.passed ? "info" : "warn", "corridor.gate.check", {
+      idempotencyKey: run.idempotencyKey,
+      corridorId: run.corridorId,
+      check: c.name,
+      passed: c.passed,
+      ...(c.code && { code: c.code }),
+      detail: c.detail,
+      durationMs: c.durationMs,
+    });
+  }
+  // The per-check lines carry the results; keep the transition line flat.
+  const { checks: _checks, ...transition } = entry;
+  logger.log(error ? "error" : "info", "corridor.transition", transition);
   const metrics = deps.metrics ?? noopMetrics;
   metrics.increment("corridor.transition", { to: run.state, corridor: run.corridorId });
   if (isTerminal(run.state)) {
     metrics.increment("corridor.terminal", { state: run.state, corridor: run.corridorId });
   }
   await deps.audit?.record(entry);
+  if (run.state === "held" || run.state === "refund_pending") {
+    try {
+      await deps.alerting?.raise({
+        kind: run.state,
+        corridorId: run.corridorId,
+        idempotencyKey: run.idempotencyKey,
+        stellarTxHash: run.stellarTxHash,
+        lastError: run.lastError ?? error,
+        at,
+      });
+    } catch (alertError) {
+      (deps.logger ?? silentLogger).log("warn", "corridor.alert_failed", {
+        corridorId: run.corridorId,
+        idempotencyKey: run.idempotencyKey,
+        kind: run.state,
+        error: alertError instanceof Error ? alertError.message : String(alertError),
+      });
+    }
+  }
 }
 
 /**
- * Resume a persisted run that crashed after the money moved. From `settled` we
- * re-poll the anchor (the payment already went out — we must NOT re-settle) and,
- * once confirmed, complete. From `reconciled` we just finish. A failed re-poll is
- * surfaced for ops rather than auto-refunded, since funds are already in flight.
+ * Resume a persisted run only when its prior settlement can be proved or safely
+ * excluded. An ambiguous `settling` miss remains an operator conflict.
  */
 async function resumeRun(
   existing: StoredRun,
@@ -572,56 +921,228 @@ async function resumeRun(
   sleep: (ms: number) => Promise<void>,
   pollMs: number,
   stallThreshold: number,
+  opts: ExecuteOptions,
 ): Promise<Outcome<RunResult>> {
   const run: StoredRun = { ...existing };
   const trail: CorridorState[] = [run.state];
+  const conflict = (detail: string) =>
+    fail(
+      "IDEMPOTENCY_CONFLICT",
+      `idempotencyKey ${run.idempotencyKey} cannot resume state=${run.state}: ${detail}`,
+    );
 
-  const advance = async (to: CorridorState): Promise<Outcome<void>> => {
-    if (!canTransition(run.state, to)) {
-      return fail("SETTLEMENT_FAILED", `illegal resume transition ${run.state} -> ${to}`);
+  const route = await deps.resolver.resolve(intent, corridor);
+  const context = createRunContext({
+    run,
+    trail,
+    corridor,
+    deps,
+    store,
+    now,
+    sleep,
+    pollMs,
+    adapter: route.receiving,
+    routeTrust: route.trust,
+  });
+
+  if (run.state === "created" || run.state === "quoted" || run.state === "compliant") {
+    return context.die({
+      code: "IDEMPOTENCY_CONFLICT",
+      message: `RESUME_STALE: run stopped in ${run.state} before opening a receiving transaction; retry with a new idempotency key`,
+      retryable: false,
+    });
+  }
+
+  if (
+    run.state === "opened" ||
+    run.state === "retrying" ||
+    run.state === "verifying" ||
+    run.state === "settling"
+  ) {
+    if (
+      !run.transactionId ||
+      !run.depositAddress ||
+      !run.settlementAmount ||
+      run.quoteExpiresAt === undefined ||
+      run.quoteFirm === undefined
+    ) {
+      return conflict("persisted quote/open data is incomplete");
     }
-    const from = run.state;
-    run.state = to;
-    run.version += 1;
-    trail.push(to);
-    await store.put(run);
-    await emitTransition(deps, run, from, now());
-    return ok(undefined);
-  };
+    if (!deps.submitter.findExisting) {
+      return conflict("settlement submitter does not support findExisting");
+    }
+    const request: SettlementRequest = {
+      to: run.depositAddress,
+      memo: run.memo,
+      memoType: run.memoType,
+      amount: { asset: corridor.settlement.bridge_asset, amount: run.settlementAmount },
+      corridor,
+    };
+    const found = await deps.submitter.findExisting(request);
+    if (!found.ok) return found;
+
+    // Walk the legal path up to `settling` (opened/retrying -> verifying ->
+    // settling), as a fresh run would: the table in state.ts stays the guard.
+    const enterSettling = async (): Promise<Outcome<void>> => {
+      if (run.state === "opened" || run.state === "retrying") {
+        const verifying = await context.advance("verifying");
+        if (!verifying.ok) return verifying;
+      }
+      if (run.state === "verifying") return context.advance("settling");
+      return ok(undefined);
+    };
+
+    let ref: SettlementRef | undefined;
+    if (found.value) {
+      // A payment matching this exact request already exists: money moved
+      // before the crash, so do not submit again.
+      const entered = await enterSettling();
+      if (!entered.ok) return context.die(entered.error);
+      ref = found.value;
+    } else if (run.state === "settling") {
+      return conflict(
+        "Horizon found no matching payment, but settlement may still be in flight",
+      );
+    } else {
+      if (run.quoteFirm && run.quoteExpiresAt <= now()) {
+        return context.die({
+          code: "QUOTE_EXPIRED",
+          message: `stored quote ${run.quoteId ?? "(unknown)"} expired before resumed settlement`,
+          retryable: false,
+        });
+      }
+      if (
+        corridor.settlement.network === "public" &&
+        route.trust === "manifest" &&
+        !deps.trustManifestWithoutAttestation &&
+        !opts.trustManifestWithoutAttestation
+      ) {
+        return context.die({
+          code: "MANIFEST_INVALID",
+          message: "refusing manifest route trust on public network without explicit opt-in",
+          retryable: false,
+        });
+      }
+      if (deps.gate) {
+        // The gate needs the live quote and opened transaction, which a resumed
+        // run no longer holds; never submit past a gate that cannot be re-run.
+        return conflict(
+          "pre-settle gate cannot be re-evaluated on resume; operator review needed",
+        );
+      }
+      const compliance = await comply(route.receiving, intent, corridor);
+      if (!compliance.ok) return context.die(compliance.error);
+      const entered = await enterSettling();
+      if (!entered.ok) return context.die(entered.error);
+      const submitted = await deps.submitter.submit(request);
+      if (!submitted.ok) return context.finishFailure(submitted.error);
+      ref = submitted.value;
+    }
+    run.stellarTxHash = ref.stellarTxHash;
+    run.settlement = {
+      to: request.to,
+      memo: request.memo,
+      memoType: request.memoType,
+      amount: request.amount,
+    };
+    const settled = await context.advance("settled", { networkFee: ref.feeCharged });
+    if (!settled.ok) return context.die(settled.error);
+  }
 
   if (run.state === "settled") {
-    if (!run.transactionId) {
-      return fail(
-        "RECONCILE_MISMATCH",
-        `resumed run ${run.idempotencyKey} has no transactionId`,
-      );
+    if (!run.transactionId) return conflict("settled run has no transactionId");
+    if (deps.chainVerifier) {
+      const saved = run.settlement;
+      if (!saved || !run.stellarTxHash) {
+        // Written before the request was recorded: nothing to compare against.
+        (deps.logger ?? silentLogger).log("warn", "corridor.verify.skipped", {
+          idempotencyKey: run.idempotencyKey,
+          reason: "run has no recorded settlement request",
+        });
+      } else {
+        const v = await verifyOnChain(
+          deps,
+          { stellarTxHash: run.stellarTxHash },
+          { ...saved, corridor },
+        );
+        if (!v.ok) {
+          // Money moved and the chain disagrees: park for a human, do not fail.
+          const held = await context.holdAndStop(v.error);
+          return held;
+        }
+      }
     }
-    const route = await deps.resolver.resolve(intent, corridor);
-    const r = await reconcileUntil(route.receiving, run.transactionId, {
+    const reconciled = await reconcileUntil(route.receiving, run.transactionId, {
       now,
       sleep,
       deadlineMs: now() + corridor.recovery.timeout_seconds * 1000,
       pollMs,
       stallThreshold,
+      wake: deps.waker?.signal(run.transactionId),
+      externalStallMs: externalStallBudgetMs(corridor),
       corridorId: corridor.id,
       logger: deps.logger,
       metrics: deps.metrics,
     });
-    if (!r.ok) {
-      const from = run.state;
-      run.lastError = `${r.error.code}: ${r.error.message}`;
-      run.state = "failed";
-      run.version += 1;
-      trail.push("failed");
-      await store.put(run);
-      await emitTransition(deps, run, from, now(), `${r.error.code}: ${r.error.message}`);
-      return { ok: false, error: r.error };
-    }
-    const t = await advance("reconciled");
-    if (!t.ok) return t;
+    if (!reconciled.ok) return context.finishFailure(reconciled.error);
+    const advanced = await context.advance("reconciled");
+    if (!advanced.ok) return advanced;
   }
 
-  const done = await advance("completed");
-  if (!done.ok) return done;
-  return ok(toResult(run, trail));
+  if (run.state === "reconciled") {
+    const done = await context.advance("completed");
+    if (!done.ok) return done;
+    return ok(toResult(run, trail));
+  }
+
+  if (run.state === "recovering" || run.state === "refund_pending") {
+    if (!run.transactionId) return conflict("refund recovery has no receiving transactionId");
+    const refundedError = fail(
+      "RECONCILE_MISMATCH",
+      `receiving transaction ${run.transactionId} was refunded`,
+    );
+    // A refund this run already requested is the evidence that the money is
+    // on its way back; never request or wait for a second one.
+    if (hasRequestedRefund(run)) {
+      const refunded = await context.advance("refunded");
+      if (!refunded.ok) return refunded;
+      return refundedError;
+    }
+    if (run.state === "recovering") {
+      const pending = await context.advance("refund_pending");
+      if (!pending.ok) return pending;
+    }
+    const watched = await watchRefund(route.receiving, run.transactionId, {
+      now,
+      sleep,
+      deadlineMs: now() + corridor.recovery.refund_wait_seconds * 1000,
+      pollMs,
+      corridorId: corridor.id,
+      logger: deps.logger,
+      metrics: deps.metrics,
+    });
+    if (watched.ok) {
+      const info = watched.value.refunds;
+      if (info) {
+        const firstPayment = info.payments[0];
+        if (firstPayment?.id) run.refundId = firstPayment.id;
+      }
+      run.lastError = undefined;
+      const refunded = await context.advance("refunded", refundAudit(info));
+      if (!refunded.ok) return refunded;
+      return refundedError;
+    }
+    return context.holdAndStop(watched.error, statusFrom(watched.error.cause));
+  }
+
+  return conflict("state is not supported by the resume handler");
+}
+
+function externalStallBudgetMs(corridor: Corridor): number {
+  return (
+    Math.min(
+      corridor.recovery.reconcile.external_stall_seconds,
+      corridor.recovery.timeout_seconds,
+    ) * 1000
+  );
 }

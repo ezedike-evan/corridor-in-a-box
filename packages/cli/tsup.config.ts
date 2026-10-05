@@ -6,7 +6,7 @@ import { defineConfig } from "tsup";
 // (zod, yaml, pulled in transitively via @corridor/manifest) stay external:
 // they're on the public registry, so npm installs them normally for consumers.
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: ["src/index.ts", "src/wire.ts"],
   format: ["esm"],
   target: "es2022",
   clean: true,

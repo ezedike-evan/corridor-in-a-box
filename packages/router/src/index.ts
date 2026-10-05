@@ -57,6 +57,7 @@ export class StaticRouteResolver implements RouteResolver {
 export {
   RegistryRouteResolver,
   UnattestedAnchorError,
+  isUnattestedDomainAllowed,
   type AttestationSource,
   type RegistryResolverOptions,
 } from "./registry-resolver";

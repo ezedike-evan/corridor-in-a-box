@@ -14,7 +14,10 @@ export const revalidate = 3600;
 
 export default async function Home() {
   const attestations = await fetchAttestations();
-  const verifiedCount = corridors.filter((c) => liveness(c).state === "verified").length;
+  const verifiedCount = corridors.filter((c) => {
+    const state = liveness(c).state;
+    return state === "verified" || state === "proven";
+  }).length;
   return (
     <div className="flex flex-col gap-16">
       {/* Hero */}
@@ -51,7 +54,7 @@ export default async function Home() {
         <Feature
           icon={<Repeat size={20} className="text-blue-600" />}
           title="Idempotent & resumable"
-          body="A persisted state machine with crash-resume and a real refund/hold recovery path. The same key never settles twice."
+          body="A persisted state machine with crash-resume and fail-closed recovery: a payment that cannot complete is parked as held for a human. Nothing is ever re-sent. The same key never settles twice."
         />
         <Feature
           icon={<ShieldCheck size={20} className="text-blue-600" />}

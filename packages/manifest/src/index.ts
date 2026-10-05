@@ -11,17 +11,17 @@
 import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { fail, type CorridorError } from "@corridor/types";
+import {
+  ok,
+  fail,
+  type Ok,
+  type Err,
+  type CorridorError,
+  compareAmounts,
+} from "@corridor/types";
 
-// Shared verified-at schema to avoid repetition.
-const endpointsVerifiedAtSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, "expected an ISO date, YYYY-MM-DD")
-  .optional();
-
-/** SEP-31 endpoints schema (DIRECT_PAYMENT_SERVER and friends).
- *  Only home_domain is mandatory; the rest are discovered from the anchor's
- *  stellar.toml in practice, but may be pinned here. */
+/** SEP endpoints an anchor exposes. Only home_domain is mandatory; the rest are
+ *  discovered from its stellar.toml in practice, but may be pinned here. */
 export const AnchorEndpointsSchema = z.object({
   home_domain: z.string().min(1),
   /** SEP-31 DIRECT_PAYMENT_SERVER */
@@ -43,56 +43,60 @@ export const AnchorEndpointsSchema = z.object({
    * will report a corridor as verified. Leave it unset until you have actually
    * looked. Never set it speculatively.
    */
-  endpoints_verified_at: endpointsVerifiedAtSchema,
+  endpoints_verified_at: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "expected an ISO date, YYYY-MM-DD")
+    .optional(),
 });
 
-/** Backward-compat alias — SEP-31 endpoints are the only shape currently in use. */
-export const Sep31EndpointsSchema = AnchorEndpointsSchema;
-
-/**
- * Destination anchor schema with explicit protocol discriminator.
- *
- * The `protocol` field declares how the destination anchor is reached:
- * - `"sep31"` — standard SEP-31 DIRECT_PAYMENT_SERVER anchor.
- *
- * Manifests that omit `protocol` default to `"sep31"` for backward
- * compatibility (legacy flat endpoint shape). New manifests must declare
- * `protocol: sep31` explicitly to suppress a deprecation warning.
- */
-export const DestAnchorSchema = z.preprocess(
-  (raw: unknown) => {
-    if (typeof raw !== "object" || raw === null) return raw;
-    const obj = raw as Record<string, unknown>;
-    // Backward compat: manifests without protocol default to sep31.
-    if (!("protocol" in obj)) {
-      return { protocol: "sep31", ...obj, _legacyProtocol: true };
-    }
-    return obj;
-  },
-  z.object({
-    name: z.string().min(1),
-    /** Asset this anchor deals in at this leg, e.g. "iso4217:NGN". */
-    asset: z.string().min(1),
-    /**
-     * How the destination anchor is reached. Must be "sep31" (the only
-     * protocol supported today). Omitting `protocol` is deprecated — set it
-     * explicitly to suppress the deprecation warning emitted by parseCorridor.
-     */
-    protocol: z.literal("sep31"),
-    endpoints: AnchorEndpointsSchema,
-    /** Internal marker: true when protocol was defaulted (not explicitly set). */
-    _legacyProtocol: z.boolean().optional(),
-  }),
-);
-
-/** Source anchor schema (source-side protocol is unversioned/thin for now). */
-export const AnchorSchema = z.object({
+const AnchorBaseSchema = z.object({
   name: z.string().min(1),
-  endpoints: AnchorEndpointsSchema,
   /** Asset this anchor deals in at this leg. Source side: typically "USDC".
    *  Dest side: the off-chain payout asset, e.g. "iso4217:ARS". */
   asset: z.string().min(1),
 });
+
+export const AnchorSchema = AnchorBaseSchema.extend({ endpoints: AnchorEndpointsSchema });
+
+// `transfer_server_sep31` stays optional so an incomplete manifest still
+// parses; `liveness()` reports a SEP-31 dest without it as NOT runnable.
+const Sep31DestSchema = AnchorBaseSchema.extend({
+  protocol: z.literal("sep31").default("sep31"),
+  endpoints: AnchorEndpointsSchema,
+});
+
+const Sep6DestSchema = AnchorBaseSchema.extend({
+  protocol: z.literal("sep6"),
+  endpoints: z.object({
+    home_domain: z.string().min(1),
+    transfer_server: z.string().url(),
+    web_auth: z.string().url().optional(),
+    kyc_server: z.string().url().optional(),
+    quote_server: z.string().url().optional(),
+    endpoints_verified_at: AnchorEndpointsSchema.shape.endpoints_verified_at,
+  }),
+});
+
+const CustomDestSchema = AnchorBaseSchema.extend({
+  protocol: z.string().regex(/^custom:[a-z0-9-]+$/, "expected custom:<lowercase-id>"),
+  endpoints: z.object({
+    home_domain: z.string().min(1),
+    base_url: z.string().url(),
+    extra: z.record(z.string(), z.string()).default({}),
+    endpoints_verified_at: AnchorEndpointsSchema.shape.endpoints_verified_at,
+  }),
+});
+
+// A discriminated union discriminates before defaults apply, so default an
+// absent `protocol` to "sep31" first (existing manifests unchanged), the same
+// way SourceAnchorSchema defaults to "prefunded".
+export const DestSchema = z.preprocess(
+  (raw) =>
+    raw && typeof raw === "object" && !Array.isArray(raw) && !("protocol" in raw)
+      ? { ...raw, protocol: "sep31" }
+      : raw,
+  z.discriminatedUnion("protocol", [Sep31DestSchema, Sep6DestSchema]).or(CustomDestSchema),
+);
 
 /**
  * How the SENDING side is reached. Schema only: the engine does not act on this
@@ -143,18 +147,37 @@ export const SourceAnchorSchema = z.preprocess(
       : raw,
   z.union([PrefundedSourceSchema, Sep6SourceSchema, Sep24SourceSchema, CustomSourceSchema]),
 );
-export type DestProtocol = "sep31";
-export type AnchorConfig = z.infer<typeof DestAnchorSchema>;
 
-export const FxSchema = z.object({
-  /** The conversion path, in order. e.g. ["NGN","USDC","ARS"]. >= 2 hops. */
-  path: z.array(z.string().min(1)).min(2),
-  quote_source: z.enum(["sep38", "external"]).default("sep38"),
-  /** Who carries the rate risk between quote-time and settlement. */
-  who_holds_risk: z.enum(["sender", "sending_anchor", "receiving_anchor"]),
-  /** Firm-quote TTL. The settle leg must hit the chain before this elapses. */
-  quote_ttl_seconds: z.number().int().positive().default(60),
-});
+export const FxSchema = z
+  .object({
+    /** The conversion path, in order. e.g. ["NGN","USDC","ARS"]. >= 2 hops. */
+    path: z.array(z.string().min(1)).min(2),
+    quote_source: z.enum(["sep38", "external"]).default("sep38"),
+    /** Who carries the rate risk between quote-time and settlement. */
+    who_holds_risk: z.enum(["sender", "sending_anchor", "receiving_anchor"]),
+    /** Firm-quote TTL. The settle leg must hit the chain before this elapses. */
+    quote_ttl_seconds: z.number().int().positive().default(60),
+    /**
+     * Minimum seconds a firm quote must still have left when a settle attempt
+     * starts (#152). Covers submit plus Horizon confirmation, so a quote that
+     * is technically alive but would expire mid-flight is refused BEFORE our
+     * money moves, instead of the anchor rejecting or re-pricing the payout
+     * after it has. Enforced by the `quote.window` gate check.
+     */
+    min_quote_remaining_seconds: z.number().int().positive().default(45),
+  })
+  .superRefine((fx, ctx) => {
+    // A margin at or above the TTL would refuse every firm quote the moment
+    // it is minted — a corridor that can never settle, misconfigured rather
+    // than cautious.
+    if (fx.min_quote_remaining_seconds >= fx.quote_ttl_seconds) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["min_quote_remaining_seconds"],
+        message: `min_quote_remaining_seconds (${fx.min_quote_remaining_seconds}) must be smaller than quote_ttl_seconds (${fx.quote_ttl_seconds})`,
+      });
+    }
+  });
 
 export const ComplianceSchema = z.object({
   source_jurisdiction: z.string().min(1),
@@ -183,16 +206,35 @@ export const SettlementSchema = z.object({
   asset_issuer: z.string().min(1),
 });
 
-/** Per-corridor payment ceilings. Optional, but a lane with no ceiling accepts
+/** Per-corridor payment limits (floor and ceiling). Optional, but a lane with no ceiling accepts
  *  any positive amount the caller asks for — set one before real money. */
-export const LimitsSchema = z.object({
-  /** Largest single payment this corridor will accept, as a decimal string in
-   *  the source asset. Omit for no ceiling (dev/testnet only). */
-  max_amount: z
-    .string()
-    .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
-    .optional(),
-});
+export const LimitsSchema = z
+  .object({
+    /** Smallest single payment this corridor will accept, as a decimal string in
+     *  the source asset. Omit for no floor. */
+    min_amount: z
+      .string()
+      .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
+      .optional(),
+    /** Largest single payment this corridor will accept, as a decimal string in
+     *  the source asset. Omit for no ceiling (dev/testnet only). */
+    max_amount: z
+      .string()
+      .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
+      .optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.min_amount !== undefined && val.max_amount !== undefined) {
+      const cmp = compareAmounts(val.min_amount, val.max_amount);
+      if (cmp.ok && cmp.value === 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `min_amount (${val.min_amount}) must be <= max_amount (${val.max_amount})`,
+          path: ["min_amount"],
+        });
+      }
+    }
+  });
 
 /** How patiently this corridor polls the receiving anchor after settling. Both
  *  fields are optional: an unset field falls back to `EngineDeps`, then to the
@@ -202,13 +244,17 @@ export const ReconcileSchema = z.object({
   poll_seconds: z.number().int().positive().optional(),
   /** Consecutive identical-status polls before `RECONCILE_STALLED`. 0 disables. */
   stall_polls: z.number().int().nonnegative().optional(),
+  /** Seconds a pending_external/pending_receiver status may stay unchanged before it counts as stalled. */
+  external_stall_seconds: z.number().int().positive().default(21_600),
 });
 
 export const RecoverySchema = z.object({
   max_retries: z.number().int().nonnegative().default(3),
   timeout_seconds: z.number().int().positive().default(900),
+  /** How long to wait for an anchor-driven refund report after a terminal failure. */
+  refund_wait_seconds: z.number().int().positive().default(86_400),
   rollback: z.enum(["refund_sender", "hold", "manual"]).default("refund_sender"),
-  reconcile: ReconcileSchema.optional(),
+  reconcile: ReconcileSchema.default(() => ReconcileSchema.parse({})),
 });
 
 /** True when the YYYY-MM-DD part names a real calendar day. `Date` alone is no help:
@@ -253,8 +299,7 @@ export const CorridorSchema = z.object({
   /** Human note. Use it to record liveness, e.g. "pending: no RMB SEP-31 anchor". */
   status_note: z.string().optional(),
   source: SourceAnchorSchema,
-  /** Destination anchor. Must declare `protocol: sep31` explicitly (omitting is deprecated). */
-  dest: DestAnchorSchema,
+  dest: DestSchema,
   fx: FxSchema,
   compliance: ComplianceSchema,
   settlement: SettlementSchema,
@@ -264,53 +309,59 @@ export const CorridorSchema = z.object({
 });
 
 export type Corridor = z.infer<typeof CorridorSchema>;
+export type DestProtocol = "sep31" | "sep6" | `custom:${string}`;
+export type Sep31Anchor = z.infer<typeof Sep31DestSchema>;
+export type Sep6Anchor = z.infer<typeof Sep6DestSchema>;
+export type CustomAnchor = z.infer<typeof CustomDestSchema>;
+export type AnchorConfig = Sep31Anchor | Sep6Anchor | CustomAnchor;
+
+export function protocolOf(anchor: z.infer<typeof DestSchema>): DestProtocol {
+  return anchor.protocol as DestProtocol;
+}
 export type SourceAnchorConfig = z.infer<typeof SourceAnchorSchema>;
 export type Proof = z.infer<typeof ProofSchema>;
 
-/**
- * Result of `parseCorridor` / `loadCorridor`.
- * On success, `warnings` carries any deprecation notices (currently: missing
- * `dest.protocol`, which defaults to `"sep31"` for backward compat).
- */
-export type ParseCorridorResult =
-  { ok: true; value: Corridor; warnings: string[] } | { ok: false; error: CorridorError };
+/** Successful parse, plus non-fatal warnings (e.g. deprecated legacy shapes).
+ *  Assignable to `Outcome<Corridor>`, so existing callers are unaffected. */
+export type ParseCorridorOutcome =
+  (Ok<Corridor> & { readonly warnings: string[] }) | Err<CorridorError>;
 
-/** Parse + validate a corridor manifest from an object already in memory.
- *
- * Returns a `ParseCorridorResult` — on success, check `.warnings` for
- * deprecation notices (e.g. missing explicit `dest.protocol`).
- */
-export function parseCorridor(raw: unknown): ParseCorridorResult {
+/** Parse + validate a corridor manifest from an object already in memory. */
+export function parseCorridor(raw: unknown): ParseCorridorOutcome {
   const warnings: string[] = [];
-
-  // Detect missing dest.protocol before Zod fills the default, so we can warn.
-  if (typeof raw === "object" && raw !== null && "dest" in raw) {
-    const dest = (raw as Record<string, unknown>).dest;
-    if (typeof dest === "object" && dest !== null && !("protocol" in dest)) {
-      warnings.push(
-        "dest.protocol is not set — defaulting to 'sep31'. " +
-          "Set `protocol: sep31` explicitly under dest: to silence this warning.",
+  const dest =
+    raw && typeof raw === "object" ? (raw as Record<string, unknown>).dest : undefined;
+  if (dest && typeof dest === "object" && !Array.isArray(dest) && !("protocol" in dest)) {
+    // Legacy flat SEP-31 manifest: no `protocol`. Parsed as sep31 for backward
+    // compatibility, but a key belonging to another protocol is ambiguous.
+    const ep = (dest as Record<string, unknown>).endpoints;
+    const keys = ep && typeof ep === "object" ? ep : {};
+    if ("transfer_server" in keys) {
+      return fail(
+        "MANIFEST_INVALID",
+        "dest.protocol: manifest dest specifies transfer_server with no protocol; set protocol: sep6",
       );
     }
+    if ("base_url" in keys) {
+      return fail(
+        "MANIFEST_INVALID",
+        "dest.protocol: manifest dest specifies base_url with no protocol; set protocol: custom:<name>",
+      );
+    }
+    warnings.push(
+      "dest anchor specifies no protocol; defaulting to 'sep31'. " +
+        "Set dest.protocol: 'sep31' explicitly; omitting it is deprecated.",
+    );
   }
-
   const parsed = CorridorSchema.safeParse(raw);
   if (!parsed.success) {
     return fail("MANIFEST_INVALID", formatZodError(parsed.error), { cause: parsed.error });
   }
-
-  // Strip the internal _legacyProtocol marker before returning the clean value.
-  const value = parsed.data;
-  if (value.dest._legacyProtocol) {
-    const { _legacyProtocol: _, ...cleanDest } = value.dest;
-    return { ok: true, value: { ...value, dest: cleanDest as typeof value.dest }, warnings };
-  }
-
-  return { ok: true, value, warnings };
+  return { ...ok(parsed.data), warnings };
 }
 
 /** Read + validate a *.corridor.yaml file from disk. */
-export function loadCorridor(path: string): ParseCorridorResult {
+export function loadCorridor(path: string): ParseCorridorOutcome {
   let raw: unknown;
   try {
     raw = parseYaml(readFileSync(path, "utf8"));

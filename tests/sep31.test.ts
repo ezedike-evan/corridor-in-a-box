@@ -4,14 +4,17 @@ import {
   Sep31Adapter,
   mapSep31Status,
   openedTxCheck,
+  receiverKycCheck,
   parseRefunds,
   sep31InfoCheck,
+  amountRangeCheck,
+  sep31GateChecks,
   type ReportedTransactionFields,
   type Sep10Signer,
   type Sep31InfoCheckResult,
 } from "@corridor/sep31";
-import type { PaymentIntent } from "@corridor/types";
-import type { GateContext } from "@corridor/engine";
+import { fail, ok, type PaymentIntent } from "@corridor/types";
+import { CompositeGate, type GateContext } from "@corridor/engine";
 import type { TransactionStatus } from "@corridor/adapter-kit";
 
 const PASSPHRASE = "Test SDF Network ; September 2015";
@@ -97,6 +100,30 @@ const intent: PaymentIntent = {
 };
 
 describe("SEP-10 auth", () => {
+  it("rejects a non-SEP-31 destination with a clear error", () => {
+    const raw = {
+      id: "test",
+      source: { name: "S", asset: "USDC", endpoints: { home_domain: "s.example" } },
+      dest: {
+        protocol: "sep6",
+        name: "D",
+        asset: "iso4217:ARS",
+        endpoints: { home_domain: "d.example", transfer_server: "https://d.example/sep6" },
+      },
+      fx: { path: ["ARS", "USDC"], who_holds_risk: "receiving_anchor" },
+      compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
+      settlement: { network: "public", asset_issuer: "GISSUER" },
+      recovery: {},
+    };
+    const parsed = parseCorridor(raw);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(() => new Sep31Adapter(parsed.value)).toThrow(
+        'Sep31Adapter cannot handle protocol "sep6"',
+      );
+    }
+  });
+
   it("does the challenge/response handshake and attaches the JWT", async () => {
     const token = jwt(900);
     const signer: Sep10Signer = {
@@ -311,15 +338,18 @@ describe("SEP-31 status mapping", () => {
   });
 
   it("classifies the Anchor Platform's in-flight statuses as in-flight", () => {
-    for (const pending of [
-      "pending_sender",
-      "pending_receiver",
-      "pending_external",
-      "pending_anchor",
-      "pending_stellar",
-    ]) {
+    for (const pending of ["pending_sender", "pending_anchor", "pending_stellar"]) {
       expect(mapSep31Status(pending)).toEqual({
         status: pending,
+        settled: false,
+        terminalFailure: false,
+        awaitingInput: false,
+      });
+    }
+    for (const pending of ["pending_receiver", "pending_external"]) {
+      expect(mapSep31Status(pending)).toEqual({
+        status: pending,
+        phase: "external",
         settled: false,
         terminalFailure: false,
         awaitingInput: false,
@@ -582,6 +612,85 @@ describe("SEP-31 status mapping", () => {
       payments: [],
       completeness: "partial",
     });
+  });
+
+  // --- The anchor's own record of what it expects (#147) -------------------
+  //
+  // Read back off GET /transactions/:id so the opened transaction can be
+  // cross-checked against what we are about to send, before settling.
+
+  it("parses amount, deposit account and memo when the anchor reports them", async () => {
+    const r = await getTx({
+      status: "pending_sender",
+      amount_in: " 100.50 ",
+      amount_in_asset: REFUND_ASSET,
+      stellar_account_id: "GDEPOSIT",
+      stellar_memo: "aGVsbG8=",
+      stellar_memo_type: "HASH",
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.amountIn).toEqual({ asset: REFUND_ASSET, amount: "100.50" });
+    expect(r.value.depositAddress).toBe("GDEPOSIT");
+    expect(r.value.memo).toBe("aGVsbG8=");
+    expect(r.value.memoType).toBe("hash");
+  });
+
+  it("names the bridge asset on amountIn when the anchor names none", async () => {
+    const r = await getTx({ status: "pending_sender", amount_in: "100" });
+    expect(r.ok && r.value.amountIn).toEqual({ asset: "USDC", amount: "100" });
+  });
+
+  it("omits the fields when the anchor does not report them", async () => {
+    const r = await getTx({ status: "pending_sender" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toEqual({
+      status: "pending_sender",
+      settled: false,
+      terminalFailure: false,
+      awaitingInput: false,
+    });
+    for (const key of ["amountIn", "depositAddress", "memo", "memoType"]) {
+      expect(key in r.value).toBe(false);
+    }
+  });
+
+  it("omits each malformed field on its own and never guesses", async () => {
+    const r = await getTx({
+      status: "pending_sender",
+      // A number has already been through a float64 — refused, not laundered.
+      amount_in: 100.5,
+      amount_in_asset: REFUND_ASSET,
+      stellar_account_id: "GDEPOSIT",
+      stellar_memo: 12345,
+      stellar_memo_type: "base64",
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.amountIn).toBeUndefined();
+    expect(r.value.memo).toBeUndefined();
+    expect(r.value.memoType).toBeUndefined();
+    // A readable field survives its neighbours being malformed.
+    expect(r.value.depositAddress).toBe("GDEPOSIT");
+  });
+
+  it("rejects numeric and unparseable amounts and empty strings", async () => {
+    for (const amount_in of [100, 0, "abc", "1e5", "", null, {}]) {
+      const r = await getTx({
+        status: "completed",
+        amount_in,
+        stellar_account_id: "",
+        stellar_memo: "",
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      expect(r.value.amountIn).toBeUndefined();
+      expect(r.value.depositAddress).toBeUndefined();
+      expect(r.value.memo).toBeUndefined();
+      // Classification is decided independently and is untouched.
+      expect(r.value.settled).toBe(true);
+    }
   });
 });
 
@@ -990,5 +1099,344 @@ describe("sep31InfoCheck gate check (sep31.info.asset)", () => {
     expect(result.passed).toBe(false);
     expect(result.code).toBe("PRESETTLE_ANCHOR_DRIFT");
     expect(result.detail).toContain("get-info request failed");
+  });
+});
+
+describe("receiverKycCheck gate check (sep12.receiver)", () => {
+  function testGateContext(c: Corridor, customIntent: PaymentIntent = intent): GateContext {
+    return {
+      intent: customIntent,
+      corridor: c,
+      quote: {
+        id: "q-1",
+        price: "1",
+        expiresAt: Date.now() + 60_000,
+        sourceAmount: { asset: "USDC", amount: "100" },
+        destAmount: { asset: "iso4217:ARS", amount: "100" },
+        firm: true,
+      },
+      opened: {
+        transactionId: "tx-1",
+        depositAddress: "GDEPOSIT",
+      },
+      now: Date.now(),
+      attempt: 1,
+    };
+  }
+
+  it("has the name 'sep12.receiver'", () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fakeFetch({}).fn });
+    const check = receiverKycCheck(adapter);
+    expect(check.name).toBe("sep12.receiver");
+  });
+
+  it("passes when receiver status is ACCEPTED on anchor with kyc_server", async () => {
+    const c = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const { fn } = fakeFetch({
+      "GET /sep12/customer": res({ id: "cust-1", status: "ACCEPTED" }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const check = receiverKycCheck(adapter);
+    const result = await check.run(testGateContext(c));
+
+    expect(result.passed).toBe(true);
+    expect(result.name).toBe("sep12.receiver");
+    expect(result.detail).toBe("receiver SEP-12 status is accepted");
+    expect(result.code).toBeUndefined();
+  });
+
+  it("passes with detail 'no SEP-12 server' when corridor has no kyc_server", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fakeFetch({}).fn });
+    const check = receiverKycCheck(adapter);
+    const result = await check.run(testGateContext(c));
+
+    expect(result.passed).toBe(true);
+    expect(result.name).toBe("sep12.receiver");
+    expect(result.detail).toBe("no SEP-12 server");
+    expect(result.code).toBeUndefined();
+  });
+
+  it("detail distinguishes 'no SEP-12 server' from a real ACCEPTED", async () => {
+    const cNoKyc = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+    });
+    const adapterNoKyc = new Sep31Adapter(cNoKyc, {
+      fetchImpl: fakeFetch({}).fn,
+    });
+    const noKycResult = await receiverKycCheck(adapterNoKyc).run(testGateContext(cNoKyc));
+
+    const cWithKyc = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const { fn } = fakeFetch({
+      "GET /sep12/customer": res({ id: "cust-1", status: "ACCEPTED" }),
+    });
+    const adapterWithKyc = new Sep31Adapter(cWithKyc, { fetchImpl: fn });
+    const withKycResult = await receiverKycCheck(adapterWithKyc).run(
+      testGateContext(cWithKyc),
+    );
+
+    expect(noKycResult.detail).toBe("no SEP-12 server");
+    expect(withKycResult.detail).toBe("receiver SEP-12 status is accepted");
+    expect(noKycResult.detail).not.toBe(withKycResult.detail);
+  });
+
+  it("fails with PRESETTLE_RECEIVER_NOT_ACCEPTED when status is PROCESSING", async () => {
+    const c = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const { fn } = fakeFetch({
+      "GET /sep12/customer": res({ id: "cust-1", status: "PROCESSING" }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const result = await receiverKycCheck(adapter).run(testGateContext(c));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_RECEIVER_NOT_ACCEPTED");
+    expect(result.detail).toContain("pending");
+  });
+
+  it("fails with PRESETTLE_RECEIVER_NOT_ACCEPTED when status is NEEDS_INFO", async () => {
+    const c = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const { fn } = fakeFetch({
+      "GET /sep12/customer": res({ id: "cust-1", status: "NEEDS_INFO" }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const result = await receiverKycCheck(adapter).run(testGateContext(c));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_RECEIVER_NOT_ACCEPTED");
+    expect(result.detail).toContain("pending");
+  });
+
+  it("fails with PRESETTLE_RECEIVER_NOT_ACCEPTED when status is REJECTED", async () => {
+    const c = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const { fn } = fakeFetch({
+      "GET /sep12/customer": res({ id: "cust-1", status: "REJECTED" }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const result = await receiverKycCheck(adapter).run(testGateContext(c));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_RECEIVER_NOT_ACCEPTED");
+    expect(result.detail).toContain("rejected");
+  });
+
+  it("fails with PRESETTLE_RECEIVER_NOT_ACCEPTED when anchor returns HTTP 500", async () => {
+    const c = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const { fn } = fakeFetch({
+      "GET /sep12/customer": res({ error: "internal server error" }, false, 500),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const result = await receiverKycCheck(adapter).run(testGateContext(c));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_RECEIVER_NOT_ACCEPTED");
+    expect(result.detail).toContain("HTTP 500");
+  });
+
+  it("fails when recipient has no sep12Id", async () => {
+    const c = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fakeFetch({}).fn });
+    const intentNoSep12: PaymentIntent = {
+      ...intent,
+      recipient: { id: "recip-no-sep12" },
+    };
+    const result = await receiverKycCheck(adapter).run(testGateContext(c, intentNoSep12));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_RECEIVER_NOT_ACCEPTED");
+    expect(result.detail).toContain("no SEP-12 customer id");
+  });
+
+  it("fails when adapter throws unexpectedly", async () => {
+    const throwingAdapter = {
+      ensureCompliance: async () => {
+        throw new Error("unexpected network timeout");
+      },
+    };
+    const c = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const result = await receiverKycCheck(throwingAdapter).run(testGateContext(c));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_RECEIVER_NOT_ACCEPTED");
+    expect(result.detail).toContain("unexpected network timeout");
+  });
+
+  it("evaluates correctly within CompositeGate", async () => {
+    const cPass = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const { fn: fnPass } = fakeFetch({
+      "GET /sep12/customer": res({ id: "cust-1", status: "ACCEPTED" }),
+    });
+    const adapterPass = new Sep31Adapter(cPass, { fetchImpl: fnPass });
+    const gatePass = new CompositeGate([receiverKycCheck(adapterPass)]);
+    const evalPass = await gatePass.evaluate(testGateContext(cPass));
+    expect(evalPass.passed).toBe(true);
+    expect(evalPass.results).toHaveLength(1);
+    expect(evalPass.results[0].passed).toBe(true);
+
+    const cFail = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const { fn: fnFail } = fakeFetch({
+      "GET /sep12/customer": res({ id: "cust-1", status: "NEEDS_INFO" }),
+    });
+    const adapterFail = new Sep31Adapter(cFail, { fetchImpl: fnFail });
+    const gateFail = new CompositeGate([receiverKycCheck(adapterFail)]);
+    const evalFail = await gateFail.evaluate(testGateContext(cFail));
+    expect(evalFail.passed).toBe(false);
+    expect(evalFail.results[0].code).toBe("PRESETTLE_RECEIVER_NOT_ACCEPTED");
+  });
+});
+
+describe("amountRangeCheck gate check (sep31.amount.range)", () => {
+  function testGateContext(c: Corridor, customQuoteAmount = "100"): GateContext {
+    return {
+      intent,
+      corridor: c,
+      quote: {
+        id: "q-1",
+        price: "1",
+        expiresAt: Date.now() + 60_000,
+        sourceAmount: { asset: "USDC", amount: customQuoteAmount },
+        destAmount: { asset: "iso4217:ARS", amount: customQuoteAmount },
+        firm: true,
+      },
+      opened: {
+        transactionId: "tx-1",
+        depositAddress: "GDEPOSIT",
+      },
+      now: Date.now(),
+      attempt: 1,
+    };
+  }
+
+  it("has the name 'sep31.amount.range'", () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fakeFetch({}).fn });
+    const check = amountRangeCheck(adapter);
+    expect(check.name).toBe("sep31.amount.range");
+  });
+
+  it("passes when amount is within anchor info limits", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn } = fakeFetch({
+      "GET /sep31/info": res({
+        receive: { USDC: { min_amount: "50", max_amount: "500" } },
+      }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const check = amountRangeCheck(adapter);
+    const result = await check.run(testGateContext(c, "100"));
+
+    expect(result.passed).toBe(true);
+    expect(result.code).toBeUndefined();
+  });
+
+  it("anchor bumps sell_amount above max_amount, refused at verifying with zero submits", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn } = fakeFetch({
+      "GET /sep31/info": res({
+        receive: { USDC: { max_amount: "90" } },
+      }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const check = amountRangeCheck(adapter);
+    const result = await check.run(testGateContext(c, "100"));
+
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("PRESETTLE_AMOUNT_OUT_OF_RANGE");
+    expect(result.detail).toContain("above maximum 90");
+  });
+
+  it("below anchor min, above anchor max, and missing /info bounds so only manifest bounds apply", async () => {
+    const c = corridor(
+      { transfer_server_sep31: "https://d.example/sep31" },
+      { bridge_asset: "USDC" },
+    );
+    // Add manifest limits
+    c.limits = { min_amount: "20", max_amount: "200" };
+
+    // Missing info bounds
+    const { fn } = fakeFetch({
+      "GET /sep31/info": res({
+        receive: { USDC: {} },
+      }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const check = amountRangeCheck(adapter);
+
+    // Within manifest limits
+    const passResult = await check.run(testGateContext(c, "100"));
+    expect(passResult.passed).toBe(true);
+
+    // Below manifest min
+    const failMinResult = await check.run(testGateContext(c, "10"));
+    expect(failMinResult.passed).toBe(false);
+    expect(failMinResult.code).toBe("PRESETTLE_AMOUNT_OUT_OF_RANGE");
+    expect(failMinResult.detail).toContain("below minimum 20");
+
+    // Above manifest max
+    const failMaxResult = await check.run(testGateContext(c, "300"));
+    expect(failMaxResult.passed).toBe(false);
+    expect(failMaxResult.code).toBe("PRESETTLE_AMOUNT_OUT_OF_RANGE");
+    expect(failMaxResult.detail).toContain("above maximum 200");
+  });
+  it("shares one /info fetch with sep31InfoCheck via sep31GateChecks", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const { fn, calls } = fakeFetch({
+      "GET /sep31/info": res({ receive: { USDC: { min_amount: "50", max_amount: "500" } } }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const gate = new CompositeGate(sep31GateChecks(adapter));
+    const out = await gate.evaluate(testGateContext(c, "100"));
+    expect(out.passed).toBe(true);
+    expect(out.results.map((r) => r.name).sort()).toEqual([
+      "sep31.amount.range",
+      "sep31.info.asset",
+    ]);
+    expect(calls.filter((x) => x.url.endsWith("/sep31/info"))).toHaveLength(1);
+  });
+
+  it("fails (not silently passes) when /info cannot be fetched or bounds cannot be compared", async () => {
+    const c = corridor({ transfer_server_sep31: "https://d.example/sep31" });
+    const down = amountRangeCheck({
+      getInfo: async () => fail("ANCHOR_UNAVAILABLE", "down"),
+    });
+    const r1 = await down.run(testGateContext(c, "100"));
+    expect(r1.passed).toBe(false);
+
+    const bad = amountRangeCheck({
+      getInfo: async () => ok({ receive: { USDC: { maxAmount: "not-a-number" } } }),
+    });
+    const r2 = await bad.run(testGateContext(c, "100"));
+    expect(r2.passed).toBe(false);
+    expect(r2.code).toBe("PRESETTLE_AMOUNT_OUT_OF_RANGE");
   });
 });

@@ -5,6 +5,8 @@
 
 import type { Money } from "@corridor/types";
 import type { CorridorState } from "./state";
+import type { LivenessState } from "@corridor/manifest";
+import type { CheckResult } from "./gate";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -44,18 +46,87 @@ export interface AuditEntry extends LogFields {
   readonly quoteFee?: Money;
   /** Stellar network fee charged for the settlement, in stroops (Horizon `fee_charged`). */
   readonly networkFee?: string;
+  readonly amountRefunded?: string;
+  readonly amountFee?: string;
+  /** Pre-settle gate results, recorded on the `verifying` transition. */
+  readonly checks?: readonly CheckResult[];
+}
+
+/** Verification decision recorded before the engine claims an idempotency key. */
+export interface AuditDetail {
+  readonly event: "verifying";
+  readonly idempotencyKey: string;
+  readonly corridorId: string;
+  readonly at: number;
+  readonly detail: {
+    readonly liveness: LivenessState;
+    readonly effectiveCap?: string;
+  };
 }
 
 export interface AuditSink {
   record(entry: AuditEntry): Promise<void> | void;
+  recordDetail?(detail: AuditDetail): Promise<void> | void;
+}
+
+export type AlertKind = "held" | "refund_pending" | "breaker_tripped";
+
+export interface Alert {
+  readonly kind: AlertKind;
+  readonly corridorId: string;
+  readonly idempotencyKey?: string;
+  readonly stellarTxHash?: string;
+  readonly lastError?: string;
+  readonly at: number;
+}
+
+/** Notifications are best-effort: an alert sink must never control payment state. */
+export interface Alerting {
+  raise(alert: Alert): Promise<void> | void;
+}
+
+export const noopAlerting: Alerting = { raise() {} };
+
+/** Small test sink; production deployments should inject an alert transport. */
+export class InMemoryAlerting implements Alerting {
+  readonly alerts: Alert[] = [];
+  raise(alert: Alert): void {
+    this.alerts.push({ ...alert });
+  }
+}
+
+/** Webhook transport sends only operational identifiers and never payment PII. */
+export class WebhookAlerting implements Alerting {
+  constructor(
+    private readonly url: string,
+    private readonly fetchImpl: typeof fetch = fetch,
+  ) {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.hostname !== "localhost") {
+      throw new Error("WebhookAlerting requires HTTPS (localhost is allowed for development)");
+    }
+  }
+
+  async raise(alert: Alert): Promise<void> {
+    const response = await this.fetchImpl(this.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(alert),
+    });
+    if (!response.ok) throw new Error(`alert webhook returned HTTP ${response.status}`);
+  }
 }
 
 /** In-memory audit log for tests/examples. Back this with an append-only table
  *  (or event stream) in production — never update or delete entries. */
 export class InMemoryAuditLog implements AuditSink {
   readonly entries: AuditEntry[] = [];
+  readonly details: AuditDetail[] = [];
   record(entry: AuditEntry): void {
     this.entries.push(entry);
+  }
+  recordDetail(detail: AuditDetail): void {
+    this.details.push(detail);
   }
 }
 

@@ -17,6 +17,7 @@ import {
   probeAnchor,
   probeBit,
   sepBit,
+  tomlHash as sharedTomlHash,
   tomlValue,
   type ProbeName,
 } from "@corridor/probe";
@@ -228,6 +229,19 @@ describe("probeAnchor — SSRF guard", () => {
     const { fetchImpl } = stub();
     const r = await probeAnchor("a.example", { fetchImpl });
     expect(passed(r, "sep10_auth")).toBe(true);
+  });
+});
+
+describe("shared TOML hash helper", () => {
+  it("matches the probe's raw-text SHA-256 output", async () => {
+    const toml = 'VERSION = "2.0.0"\n';
+    const r = await probeAnchor("a.example", {
+      fetchImpl: (async (url: string | URL | Request) => {
+        if (String(url).endsWith("/.well-known/stellar.toml")) return new Response(toml);
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch,
+    });
+    expect(r.tomlHash).toBe(sharedTomlHash(toml));
   });
 });
 

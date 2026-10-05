@@ -31,6 +31,7 @@ function source(over: Partial<AttestationSource> = {}): AttestationSource {
   return {
     servesSep31: async () => true,
     staleness: async () => 0,
+    tomlHash: async () => "0".repeat(64),
     ...over,
   };
 }

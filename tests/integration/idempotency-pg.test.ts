@@ -144,6 +144,7 @@ run("PostgresIdempotencyStore (live Postgres)", () => {
     // fresh table, the whole migration on an existing one. Putting the column
     // only in CREATE_TABLE_SQL would leave every existing deployment without
     // it, silently.
+    await pool.query("drop table if exists corridor_resolutions");
     await pool.query("drop table if exists corridor_runs");
     await pool.query(`
       create table corridor_runs (

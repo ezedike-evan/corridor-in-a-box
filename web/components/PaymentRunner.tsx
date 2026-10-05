@@ -149,13 +149,15 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
             are simulations and do not touch live network endpoints. */}
         <div className="rounded-lg border border-border bg-bg-subtle px-3 py-2 text-xs text-secondary-text">
           <span className="font-medium">
-            {live.state === "verified"
-              ? `Endpoints verified ${live.verifiedAt}.`
-              : live.state === "unverified"
-                ? "Endpoints UNVERIFIED."
-                : "Corridor NOT RUNNABLE."}
+            {live.state === "proven"
+              ? "A canary payment completed on this lane."
+              : live.state === "verified"
+                ? `Endpoints verified ${live.verifiedAt}.`
+                : live.state === "unverified"
+                  ? "Endpoints UNVERIFIED."
+                  : "Corridor NOT RUNNABLE."}
           </span>{" "}
-          {live.state === "verified"
+          {live.state === "proven" || live.state === "verified"
             ? "This run is still a simulation — it does not touch the network."
             : "No anchor here has been confirmed to exist. This run is a simulation of what the engine would do, not evidence the lane works."}
         </div>

@@ -32,8 +32,9 @@ for any standards-compliant anchor.
 - **One adapter for every standards-compliant anchor**, plus a port for bespoke
   OTC/exchange desks that don't speak SEP-31.
 - **An explicit, persisted state machine** with idempotency, crash-resume,
-  timeout enforcement, retry/backoff, and a real refund/hold recovery path —
-  the things you need to not lose an in-flight payment.
+  timeout enforcement, retry/backoff, and fail-closed recovery: a payment that
+  cannot complete is parked in `held` for a human — nothing is ever re-sent.
+  See the [operations runbook](./operations.md).
 - **A route seam.** The open repo ships the `RouteResolver` interface plus two
   resolvers: `StaticRouteResolver` (trust the manifest) and
   `RegistryRouteResolver` (require a fresh on-chain attestation). A

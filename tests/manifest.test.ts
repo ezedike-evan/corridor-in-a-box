@@ -5,9 +5,9 @@ const valid = {
   id: "t",
   source: { name: "S", asset: "USDC", endpoints: { home_domain: "s.example" } },
   dest: {
+    protocol: "sep31",
     name: "D",
     asset: "iso4217:ARS",
-    protocol: "sep31" as const,
     endpoints: {
       home_domain: "d.example",
       transfer_server_sep31: "https://d.example/sep31",
@@ -27,20 +27,6 @@ const validProof = {
   amount: "50.00",
 };
 
-// Legacy manifest shape (no protocol field) — backward compat.
-const legacyValid = {
-  ...valid,
-  dest: {
-    name: "D",
-    asset: "iso4217:ARS",
-    endpoints: {
-      home_domain: "d.example",
-      transfer_server_sep31: "https://d.example/sep31",
-      quote_server: "https://d.example/sep38",
-    },
-  },
-};
-
 describe("manifest", () => {
   it("parses a valid corridor and applies defaults", () => {
     const r = parseCorridor(valid);
@@ -50,6 +36,7 @@ describe("manifest", () => {
       expect(r.value.fx.quote_ttl_seconds).toBe(60); // default applied
       expect(r.value.settlement.bridge_asset).toBe("USDC"); // default applied
       expect(r.value.recovery.rollback).toBe("refund_sender"); // default applied
+      expect(r.value.recovery.reconcile.external_stall_seconds).toBe(21_600);
     }
   });
 
@@ -64,6 +51,45 @@ describe("manifest", () => {
     void source;
     const r = parseCorridor(rest);
     expect(r.ok).toBe(false);
+  });
+
+  it("accepts a SEP-31 destination and flags a missing SEP-31 endpoint as not runnable", () => {
+    expect(parseCorridor(valid).ok).toBe(true);
+    const legacy: { dest: { protocol?: string } } = structuredClone(valid);
+    delete legacy.dest.protocol;
+    const legacyResult = parseCorridor(legacy);
+    expect(legacyResult.ok).toBe(true);
+    if (legacyResult.ok) expect(legacyResult.value.dest.protocol).toBe("sep31");
+    const bad: { dest: { endpoints: { transfer_server_sep31?: string } } } =
+      structuredClone(valid);
+    delete bad.dest.endpoints.transfer_server_sep31;
+    const badResult = parseCorridor(bad);
+    expect(badResult.ok).toBe(true);
+    if (badResult.ok) expect(liveness(badResult.value).state).toBe("not-runnable");
+  });
+
+  it("accepts SEP-6 and rejects missing TRANSFER_SERVER", () => {
+    const dest = {
+      ...valid.dest,
+      protocol: "sep6",
+      endpoints: { home_domain: "d.example", transfer_server: "https://d.example/sep6" },
+    };
+    expect(parseCorridor({ ...valid, dest }).ok).toBe(true);
+    expect(
+      parseCorridor({ ...valid, dest: { ...dest, endpoints: { home_domain: "d.example" } } })
+        .ok,
+    ).toBe(false);
+  });
+
+  it("accepts a valid custom protocol and rejects malformed ids", () => {
+    const dest = {
+      ...valid.dest,
+      protocol: "custom:acme",
+      endpoints: { home_domain: "d.example", base_url: "https://api.d.example", extra: {} },
+    };
+    expect(parseCorridor({ ...valid, dest }).ok).toBe(true);
+    expect(parseCorridor({ ...valid, dest: { ...dest, protocol: "custom:" } }).ok).toBe(false);
+    expect(parseCorridor({ ...valid, dest: { ...dest, protocol: "sep24" } }).ok).toBe(false);
   });
 
   describe("source.protocol", () => {
@@ -318,7 +344,10 @@ describe("recovery.reconcile", () => {
   it("is optional and leaves the fields unset by default", () => {
     const r = parseCorridor(valid);
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.value.recovery.reconcile).toBeUndefined();
+    if (r.ok) {
+      expect(r.value.recovery.reconcile.poll_seconds).toBeUndefined();
+      expect(r.value.recovery.reconcile.stall_polls).toBeUndefined();
+    }
   });
 
   it("parses poll_seconds and stall_polls (0 allowed to disable)", () => {
@@ -327,9 +356,10 @@ describe("recovery.reconcile", () => {
       recovery: { reconcile: { poll_seconds: 5, stall_polls: 0 } },
     });
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.value.recovery.reconcile).toEqual({ poll_seconds: 5, stall_polls: 0 });
+    if (r.ok)
+      expect(r.value.recovery.reconcile).toMatchObject({ poll_seconds: 5, stall_polls: 0 });
     const partial = parseCorridor({ ...valid, recovery: { reconcile: { stall_polls: 4 } } });
-    expect(partial.ok && partial.value.recovery.reconcile?.poll_seconds).toBeUndefined();
+    expect(partial.ok && partial.value.recovery.reconcile.poll_seconds).toBeUndefined();
   });
 
   it("rejects non-positive poll_seconds and negative stall_polls", () => {
@@ -356,30 +386,147 @@ describe("recovery.reconcile", () => {
     expect(mk({ poll_seconds: 10, stall_polls: 0 })).toHaveLength(0);
   });
 
-  it("emits no warnings when dest.protocol is explicitly set to sep31", () => {
+  // fx.min_quote_remaining_seconds (#152): the settle+confirm margin the
+  // quote.window gate check enforces.
+  it("defaults min_quote_remaining_seconds to 45", () => {
     const r = parseCorridor(valid);
     expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.warnings).toEqual([]);
-      expect(r.value.dest.protocol).toBe("sep31");
+    if (r.ok) expect(r.value.fx.min_quote_remaining_seconds).toBe(45);
+  });
+
+  it("accepts a margin smaller than the quote TTL", () => {
+    const r = parseCorridor({
+      ...valid,
+      fx: { ...valid.fx, quote_ttl_seconds: 120, min_quote_remaining_seconds: 90 },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.fx.min_quote_remaining_seconds).toBe(90);
+  });
+
+  it("rejects a margin at or above the quote TTL", () => {
+    // margin == ttl refuses every firm quote the moment it is minted — a
+    // corridor that can never settle is a misconfiguration, not caution.
+    for (const min_quote_remaining_seconds of [60, 61]) {
+      const r = parseCorridor({
+        ...valid,
+        fx: { ...valid.fx, quote_ttl_seconds: 60, min_quote_remaining_seconds },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error.code).toBe("MANIFEST_INVALID");
+        expect(r.error.message).toContain("min_quote_remaining_seconds");
+      }
     }
   });
 
-  it("defaults dest.protocol to sep31 and emits a deprecation warning for legacy manifests", () => {
-    const r = parseCorridor(legacyValid);
+  it("rejects a non-positive or fractional margin", () => {
+    for (const bad of [0, -5, 1.5]) {
+      const r = parseCorridor({
+        ...valid,
+        fx: { ...valid.fx, min_quote_remaining_seconds: bad },
+      });
+      expect(r.ok).toBe(false);
+    }
+  });
+});
+
+describe("limits", () => {
+  it("accepts valid min_amount without max_amount", () => {
+    const r = parseCorridor({ ...valid, limits: { min_amount: "10.50" } });
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.value.dest.protocol).toBe("sep31");
-      expect(r.warnings.length).toBeGreaterThan(0);
-      expect(r.warnings[0]).toMatch(/dest\.protocol/);
+      expect(r.value.limits?.min_amount).toBe("10.50");
     }
   });
 
-  it("does not include _legacyProtocol in the parsed corridor value", () => {
-    const r = parseCorridor(legacyValid);
+  it("rejects malformed min_amount", () => {
+    const r = parseCorridor({ ...valid, limits: { min_amount: "not-a-number" } });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("MANIFEST_INVALID");
+      expect(r.error.message).toContain("limits");
+    }
+  });
+
+  it("rejects min_amount > max_amount", () => {
+    const r = parseCorridor({
+      ...valid,
+      limits: { min_amount: "100.00", max_amount: "50.00" },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("MANIFEST_INVALID");
+      expect(r.error.message).toContain("min_amount");
+    }
+  });
+
+  it("accepts min_amount == max_amount", () => {
+    const r = parseCorridor({
+      ...valid,
+      limits: { min_amount: "50.00", max_amount: "50.00" },
+    });
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect("_legacyProtocol" in r.value.dest).toBe(false);
+      expect(r.value.limits?.min_amount).toBe("50.00");
+      expect(r.value.limits?.max_amount).toBe("50.00");
     }
+  });
+
+  it("accepts min_amount < max_amount", () => {
+    const r = parseCorridor({
+      ...valid,
+      limits: { min_amount: "10.00", max_amount: "50.00" },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.limits?.min_amount).toBe("10.00");
+      expect(r.value.limits?.max_amount).toBe("50.00");
+    }
+  });
+
+  describe("legacy flat SEP-31 dest (no protocol)", () => {
+    const { protocol: _p, ...legacyDest } = valid.dest;
+    const legacy = { ...valid, dest: legacyDest };
+
+    it("parses as sep31 and returns a deprecation warning", () => {
+      const r = parseCorridor(legacy);
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.value.dest.protocol).toBe("sep31");
+        expect(r.warnings.some((w) => w.includes("sep31") && w.includes("deprecated"))).toBe(
+          true,
+        );
+      }
+    });
+
+    it("emits no warning when protocol is explicit", () => {
+      const r = parseCorridor(valid);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.warnings).toEqual([]);
+    });
+
+    it("rejects transfer_server without protocol, telling the author to set sep6", () => {
+      const r = parseCorridor({
+        ...valid,
+        dest: {
+          ...legacyDest,
+          endpoints: { home_domain: "d.example", transfer_server: "https://d.example/sep6" },
+        },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.message).toContain("protocol: sep6");
+    });
+
+    it("rejects base_url without protocol, telling the author to set custom:<name>", () => {
+      const r = parseCorridor({
+        ...valid,
+        dest: {
+          ...legacyDest,
+          endpoints: { home_domain: "d.example", base_url: "https://d.example/api" },
+        },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.message).toContain("custom:<name>");
+    });
   });
 });

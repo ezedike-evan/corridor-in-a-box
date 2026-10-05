@@ -23,12 +23,20 @@ function corridor(): Corridor {
       endpoints: {
         home_domain: "d.example",
         transfer_server_sep31: "https://d.example/sep31",
+        endpoints_verified_at: "1970-01-01",
       },
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery: {},
+    proof: {
+      canary_completed_at: "1970-01-01T00:00:00Z",
+      stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      anchor_transaction_id: "canary-test",
+      amount: "1",
+      max_age_days: 50000,
+    },
   });
   if (!r.ok) throw new Error("fixture invalid");
   return r.value;
@@ -53,6 +61,7 @@ function deps(adapterOpts = {}): EngineDeps {
     idempotency: new InMemoryIdempotencyStore(),
     sleep: async () => {},
     trustManifestWithoutAttestation: true,
+    unsafeSkipPreSettleGate: true,
   };
 }
 
@@ -338,5 +347,60 @@ describe("service documentation sync", () => {
     }
 
     expect(body).toContain("GET /metrics");
+  });
+});
+
+import { CallbackVerifier } from "@corridor/service";
+import { vi } from "vitest";
+import { InMemoryWaker } from "@corridor/engine";
+
+describe("service: POST /callbacks/sep31/:corridorId", () => {
+  it("callback wakes a pending reconcile", async () => {
+    const waker = new InMemoryWaker();
+    const s = createService({
+      corridors: new Map([["test", corridor()]]),
+      deps: { ...deps(), waker },
+    });
+
+    const origFetch = global.fetch;
+    const spy = vi.spyOn(CallbackVerifier.prototype, "verify").mockResolvedValue(true);
+    global.fetch = (async () => ({
+      ok: true,
+      text: async () =>
+        'SIGNING_KEY="GB5K2F7N7XZK22RKV4K7XZK22RKV4K7XZK22RKV4K7XZK22RKV4K7XZK22"',
+    })) as unknown as typeof fetch;
+
+    try {
+      let woken = false;
+      waker.signal("tx-123").addEventListener("abort", () => {
+        woken = true;
+      });
+
+      const tStr = Math.floor(Date.now() / 1000).toString();
+      const r = await s.route({
+        method: "POST",
+        path: "/callbacks/sep31/test",
+        headers: { signature: `t=${tStr}, s=abc` },
+        body: { transaction: { id: "tx-123" } },
+        rawBody: '{"transaction":{"id":"tx-123"}}',
+      });
+
+      if (r.status !== 200) console.log(r);
+      expect(r.status).toBe(200);
+      expect(woken).toBe(true);
+    } finally {
+      global.fetch = origFetch;
+      spy.mockRestore();
+    }
+  });
+
+  it("unsigned callback 401", async () => {
+    const s = createService({ corridors: new Map([["test", corridor()]]), deps: deps() });
+    const r = await s.route({
+      method: "POST",
+      path: "/callbacks/sep31/test",
+      body: { transaction: { id: "tx-123" } },
+    });
+    expect(r.status).toBe(401);
   });
 });

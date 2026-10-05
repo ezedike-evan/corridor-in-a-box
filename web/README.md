@@ -2,13 +2,19 @@
 
 A small Next.js (App Router, Tailwind v4) frontend for the engine:
 
-- **Dashboard** — the corridors with build-time liveness (runnable / not runnable).
+- **Dashboard** — the corridors with build-time liveness in three states —
+  `verified` / `unverified` / `not runnable` — where only `verified` counts as
+  runnable (`lib/corridors.ts`, `liveness()`).
 - **Run a payment** — drive a payment through the engine and watch it walk the
   state machine, including the idempotent replay.
-- **Docs** — overview, getting started, architecture, HTTP API, key management.
+- **Docs** — overview, getting started, architecture, HTTP API, key management, and
+  why not Anchor Platform? (the six pages in `lib/docs.ts`).
 
-It is a standalone app (not part of the pnpm workspace), so it builds and runs on
-its own without touching the monorepo's test/lint gate.
+Since [#80](https://github.com/ezedike-evan/corridor-in-a-box/pull/80) `web/` is
+its own pnpm workspace root (`web/pnpm-workspace.yaml`, with its own lockfile), so
+it builds and runs on its own — gated by its own CI job (`pnpm typecheck` +
+`pnpm build`, see `.github/workflows/ci.yml`) rather than by the monorepo's
+test/lint gate.
 
 ## Develop
 

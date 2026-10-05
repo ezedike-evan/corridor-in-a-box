@@ -11,6 +11,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import * as crypto from "node:crypto";
 import type { Corridor } from "@corridor/manifest";
 import { execute, type EngineDeps } from "@corridor/engine";
 import {
@@ -85,6 +86,7 @@ export interface RouteRequest {
   method: string;
   path: string;
   body?: unknown;
+  rawBody?: string;
   headers?: Record<string, string>;
   /** Resolved client IP from the transport (see `trustProxy`). Used for rate-limit keying. */
   clientIp?: string;
@@ -113,6 +115,7 @@ const STATUS_BY_CODE: Record<CorridorErrorCode, number> = {
   PRESETTLE_RECEIVER_NOT_ACCEPTED: 403,
   CORRIDOR_UNPROVEN: 422,
   CORRIDOR_HALTED: 503,
+  ENGINE_MISCONFIGURED: 500,
 };
 
 /** Token-bucket rate limiter, keyed per client. In-memory; swap for Redis at scale. */
@@ -191,6 +194,7 @@ export function createService(options: ServiceOptions): Service {
   const limiter: RateLimiter | undefined =
     options.rateLimiter ??
     (options.rateLimit ? new TokenBucket(options.rateLimit, now) : undefined);
+  const cbVerifier = new CallbackVerifier();
 
   // Rate-limit identity: a VALIDATED API key if present (most specific), else
   // the client IP resolved by the transport.
@@ -277,6 +281,48 @@ export function createService(options: ServiceOptions): Service {
         status: STATUS_BY_CODE[result.error.code] ?? 500,
         body: { error: result.error.code, message: result.error.message },
       };
+    }
+
+    // --- POST /callbacks/sep31/:corridorId ---
+    const cbMatch = path.match(/^\/callbacks\/sep31\/([^/]+)$/);
+    if (req.method === "POST" && cbMatch) {
+      const corridorId = decodeURIComponent(cbMatch[1]);
+      const corridor = options.corridors.get(corridorId);
+      if (!corridor) {
+        return { status: 404, body: { error: "unknown corridor" } };
+      }
+      const sigHeader = headers["signature"] || headers["x-stellar-signature"];
+      if (!sigHeader) {
+        return { status: 401, body: { error: "missing signature header" } };
+      }
+      // Linear-time parse (no backtracking regex): "t=<unix>, s=<base64>".
+      const commaAt = sigHeader.indexOf(",");
+      const tPart = commaAt < 0 ? "" : sigHeader.slice(0, commaAt).trim();
+      const sPart = commaAt < 0 ? "" : sigHeader.slice(commaAt + 1).trim();
+      if (!tPart.startsWith("t=") || !sPart.startsWith("s=") || sigHeader.length > 2048) {
+        return { status: 401, body: { error: "invalid signature format" } };
+      }
+      const tStr = tPart.slice(2);
+      const s = sPart.slice(2);
+      if (!/^\d{1,15}$/.test(tStr) || s.length === 0) {
+        return { status: 401, body: { error: "invalid signature format" } };
+      }
+      const t = parseInt(tStr, 10);
+      const currentT = Math.floor(now() / 1000);
+      if (isNaN(t) || Math.abs(currentT - t) > 120) {
+        return { status: 401, body: { error: "signature expired or invalid timestamp" } };
+      }
+      const payload = Buffer.from(tStr + "." + (req.rawBody ?? ""));
+      const valid = await cbVerifier.verify(corridor.dest.endpoints.home_domain, payload, s);
+      if (!valid) {
+        return { status: 401, body: { error: "invalid signature" } };
+      }
+      const body = req.body as { transaction?: { id?: string } };
+      const txId = body?.transaction?.id;
+      if (txId && options.deps.waker) {
+        options.deps.waker.wake(txId);
+      }
+      return { status: 200, body: {} };
     }
 
     // --- GET /payments/:key ---
@@ -375,6 +421,7 @@ export function createService(options: ServiceOptions): Service {
             method: incoming.method ?? "GET",
             path: url.pathname,
             body,
+            rawBody: raw,
             headers,
             clientIp: resolveClientIp(incoming, headers, options.trustProxy ?? false),
           });
@@ -495,4 +542,56 @@ export function gracefulShutdown(
     }, graceMs);
     timer.unref?.();
   });
+}
+
+function decodeBase32(str: string): Buffer {
+  const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const buf = Buffer.alloc(Math.ceil((str.length * 5) / 8));
+  let bits = 0,
+    val = 0,
+    idx = 0;
+  for (let i = 0; i < str.length; i++) {
+    if (str[i] === "=") break;
+    val = (val << 5) | ALPHABET.indexOf(str[i]);
+    bits += 5;
+    if (bits >= 8) {
+      buf[idx++] = (val >>> (bits - 8)) & 255;
+      bits -= 8;
+    }
+  }
+  return buf.subarray(0, idx);
+}
+
+export class CallbackVerifier {
+  private readonly keys = new Map<string, { key: crypto.KeyObject; expires: number }>();
+
+  async verify(
+    homeDomain: string,
+    payload: Buffer,
+    signatureBase64: string,
+  ): Promise<boolean> {
+    const now = Date.now();
+    let cached = this.keys.get(homeDomain);
+    if (!cached || cached.expires < now) {
+      try {
+        const res = await fetch(`https://${homeDomain}/.well-known/stellar.toml`);
+        if (!res.ok) return false;
+        const text = await res.text();
+        const match = text.match(/^SIGNING_KEY\s*=\s*"([^"]+)"/m);
+        if (!match) return false;
+        const rawPub = decodeBase32(match[1]).subarray(1, 33);
+        const der = Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), rawPub]);
+        const key = crypto.createPublicKey({ key: der, format: "der", type: "spki" });
+        cached = { key, expires: now + 5 * 60_000 };
+        this.keys.set(homeDomain, cached);
+      } catch {
+        return false;
+      }
+    }
+    try {
+      return crypto.verify(null, payload, cached.key, Buffer.from(signatureBase64, "base64"));
+    } catch {
+      return false;
+    }
+  }
 }

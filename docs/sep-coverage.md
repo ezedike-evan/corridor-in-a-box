@@ -72,9 +72,39 @@ another transfer SEP is a new adapter, not an engine change:
   and the engine would park in a `pending_user` state — a genuine engine change,
   which is why it is out of scope today.
 
+## External quotes (`fx.quote_source: external`)
+
+Some anchors (Cowrie, for one) publish no SEP-38 server. For those corridors the
+operator injects `EngineDeps.externalQuote`, a function
+`(intent, corridor) => Promise<Outcome<{ price; destAmount?; expiresAt? }>>`.
+The engine wraps it in `ExternalQuoteProvider` and never calls the adapter's
+`requestQuote`, so no SEP-38 request is made. The resulting `Quote` is always
+`firm: false`, so the firm-quote expiry checks do not apply to it.
+
+A non-firm rate cannot bind the receiving anchor, so `external` combined with
+`who_holds_risk: receiving_anchor` is refused before `open` (`MANIFEST_INVALID`)
+unless the adapter's `capabilities().quotes` includes `"native"`. A corridor with
+`quote_source: external` and no injected provider fails with `QUOTE_UNAVAILABLE`.
+
 The manifest already abstracts the corridor; the adapter port already abstracts
 the protocol. SEP-31 is the first and primary target because it is the flow whose
 shape actually matches an automated cross-border orchestrator.
+
+### Destination protocol schema and backward compatibility
+
+A corridor manifest declares how the destination anchor is reached via `dest.protocol`:
+
+- `protocol: "sep31"`: Standard SEP-31 anchor, exposing `transfer_server_sep31`.
+- `protocol: "sep6"`: Programmatic deposit/withdraw anchor, requiring `transfer_server`.
+- `protocol: "custom:<name>"`: Bespoke API integration, requiring `base_url`.
+
+**Backward compatibility:** Existing manifests without a `protocol` field default to
+`protocol: "sep31"` at parse time (provided their endpoints match the SEP-31 shape with
+no `transfer_server` or `base_url` keys). When a legacy manifest without `protocol` is
+parsed, `parseCorridor` and `loadCorridor` return a deprecation warning in `warnings: string[]`
+recommending explicit declaration of `dest.protocol: sep31`. Manifests omitting `protocol`
+while supplying `transfer_server` are rejected with an error instructing the author to set
+`protocol: sep6`.
 
 See also [why-not-anchor-platform.md](./why-not-anchor-platform.md) for how this
 relates to the SDF Anchor Platform (the server side an anchor runs).
