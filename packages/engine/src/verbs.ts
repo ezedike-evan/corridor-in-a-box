@@ -14,6 +14,7 @@ import {
 } from "@corridor/types";
 import type {
   AnchorAdapter,
+  QuoteProvider,
   KycResult,
   OpenTransaction,
   Quote,
@@ -29,8 +30,11 @@ export async function quote(
   intent: PaymentIntent,
   corridor: Corridor,
   now: number,
+  provider?: QuoteProvider,
 ): Promise<Outcome<Quote>> {
-  const q = await adapter.requestQuote(intent, corridor);
+  const q = provider
+    ? await provider.quote(intent, corridor)
+    : await adapter.requestQuote(intent, corridor);
   if (!q.ok) return q;
   if (q.value.firm && q.value.expiresAt <= now) {
     return fail("QUOTE_EXPIRED", `quote ${q.value.id} expired before use`, {

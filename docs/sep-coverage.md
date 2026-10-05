@@ -72,6 +72,20 @@ another transfer SEP is a new adapter, not an engine change:
   and the engine would park in a `pending_user` state — a genuine engine change,
   which is why it is out of scope today.
 
+## External quotes (`fx.quote_source: external`)
+
+Some anchors (Cowrie, for one) publish no SEP-38 server. For those corridors the
+operator injects `EngineDeps.externalQuote`, a function
+`(intent, corridor) => Promise<Outcome<{ price; destAmount?; expiresAt? }>>`.
+The engine wraps it in `ExternalQuoteProvider` and never calls the adapter's
+`requestQuote`, so no SEP-38 request is made. The resulting `Quote` is always
+`firm: false`, so the firm-quote expiry checks do not apply to it.
+
+A non-firm rate cannot bind the receiving anchor, so `external` combined with
+`who_holds_risk: receiving_anchor` is refused before `open` (`MANIFEST_INVALID`)
+unless the adapter's `capabilities().quotes` includes `"native"`. A corridor with
+`quote_source: external` and no injected provider fails with `QUOTE_UNAVAILABLE`.
+
 The manifest already abstracts the corridor; the adapter port already abstracts
 the protocol. SEP-31 is the first and primary target because it is the flow whose
 shape actually matches an automated cross-border orchestrator.

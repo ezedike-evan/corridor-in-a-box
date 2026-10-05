@@ -7,6 +7,14 @@
 // To make it move real money: swap createMockAdapter() -> new Sep31Adapter(corridor)
 // and createMockSubmitter() -> your @stellar/stellar-sdk-backed SettlementSubmitter,
 // then point the manifest at a live testnet/mainnet anchor.
+//
+// Corridors with `fx.quote_source: external` (e.g. ng-cowrie) have no SEP-38
+// server. Inject your own pricing function as `deps.externalQuote`:
+//
+//   externalQuote: async (intent, corridor) => ok({ price: await myFeed(corridor) }),
+//
+// The quote is non-firm. With `who_holds_risk: receiving_anchor` the engine
+// refuses an external quote unless the adapter's capabilities() lists "native".
 
 import { fileURLToPath } from "node:url";
 import { loadCorridor } from "@corridor/manifest";

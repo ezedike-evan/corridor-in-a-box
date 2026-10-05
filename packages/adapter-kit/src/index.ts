@@ -7,7 +7,14 @@
 // could be implemented separately; no private implementation is included here.
 
 import type { Corridor } from "@corridor/manifest";
-import { ok, type Money, type Outcome, type PaymentIntent } from "@corridor/types";
+import {
+  applyPrice,
+  fail,
+  ok,
+  type Money,
+  type Outcome,
+  type PaymentIntent,
+} from "@corridor/types";
 
 /** A SEP-38 quote. `firm` quotes carry an id + expiry and bind the deliverer to a rate. */
 export interface Quote {
@@ -155,8 +162,95 @@ export interface RefundRef {
   readonly message?: string;
 }
 
+/**
+ * SHIM for #187 (minimal, to be reconciled with that issue's PR).
+ * What an adapter supports, discoverable up front instead of by failing.
+ * `settlement` is `readonly string[]` here because `DepositInstructions` (the
+ * type #187 names) does not exist in this tree yet.
+ */
+export interface AdapterCapabilities {
+  readonly protocol: string;
+  readonly quotes: readonly ("sep38_firm" | "sep38_indicative" | "native" | "none")[];
+  readonly kyc: "sep12" | "sep6_fields" | "bespoke" | "none";
+  readonly settlement: readonly string[];
+  readonly refunds: "request" | "report_only" | "none";
+  readonly callbacks: boolean;
+}
+
+/**
+ * SHIM for #189 (interface only, to be reconciled with that issue's PR).
+ * A source of quotes, independent of the receiving adapter.
+ */
+export interface QuoteProvider {
+  readonly source: "sep38" | "native" | "external";
+  quote(intent: PaymentIntent, corridor: Corridor): Promise<Outcome<Quote>>;
+}
+
+/** What the operator's pricing feed returns for an external quote. */
+export interface ExternalQuote {
+  /** Dest units per 1 source unit. */
+  readonly price: string;
+  /** Overrides the amount derived from `price` x source amount. */
+  readonly destAmount?: Money;
+  /** Epoch ms. Defaults to now + `fx.quote_ttl_seconds`. */
+  readonly expiresAt?: number;
+}
+
+/** Operator-injected pricing function for `fx.quote_source: external`. */
+export type ExternalQuoteFn = (
+  intent: PaymentIntent,
+  corridor: Corridor,
+) => Promise<Outcome<ExternalQuote>>;
+
+/**
+ * Quote provider for `fx.quote_source: external`. The rate comes from an
+ * operator-injected function; the returned Quote is always `firm: false`
+ * because nobody at the receiving anchor has committed to it.
+ */
+export class ExternalQuoteProvider implements QuoteProvider {
+  readonly source = "external" as const;
+  private counter = 0;
+
+  constructor(
+    private readonly fn: ExternalQuoteFn,
+    private readonly now: () => number = () => Date.now(),
+  ) {}
+
+  async quote(intent: PaymentIntent, corridor: Corridor): Promise<Outcome<Quote>> {
+    let r: Outcome<ExternalQuote>;
+    try {
+      r = await this.fn(intent, corridor);
+    } catch (e) {
+      return fail(
+        "QUOTE_UNAVAILABLE",
+        `external quote provider threw: ${e instanceof Error ? e.message : String(e)}`,
+        { retryable: true },
+      );
+    }
+    if (!r.ok) return r;
+    const { price, destAmount, expiresAt } = r.value;
+    const derived = applyPrice(intent.sourceAmount.amount, price);
+    if (!derived.ok || !/^\d+(\.\d+)?$/.test(price) || Number(price) <= 0) {
+      return fail(
+        "QUOTE_UNAVAILABLE",
+        `external quote price "${price}" is not a positive decimal`,
+      );
+    }
+    return ok<Quote>({
+      id: `ext_${this.now()}_${++this.counter}`,
+      price,
+      expiresAt: expiresAt ?? this.now() + corridor.fx.quote_ttl_seconds * 1000,
+      sourceAmount: intent.sourceAmount,
+      destAmount: destAmount ?? { asset: corridor.dest.asset, amount: derived.value },
+      firm: false,
+    });
+  }
+}
+
 export interface AnchorAdapter {
   readonly name: string;
+  /** Up-front description of what this adapter supports (see #187). */
+  capabilities(): AdapterCapabilities;
   /** SEP-38: request an FX quote for this intent on this corridor. */
   requestQuote(intent: PaymentIntent, corridor: Corridor): Promise<Outcome<Quote>>;
   /** SEP-10 auth + SEP-12 KYC handoff. Verify once; pass identity through. */
@@ -248,6 +342,8 @@ export interface MockAdapterOptions {
   refundResult?: Outcome<RefundRef>;
   /** Refund detail for getTransaction to report, on the `refunds` field. */
   refundStatus?: RefundInfo;
+  /** Override individual fields of the reported `capabilities()`. */
+  capabilities?: Partial<AdapterCapabilities>;
 }
 
 export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter {
@@ -262,6 +358,17 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
   >();
   return {
     name,
+    capabilities() {
+      return {
+        protocol: "mock",
+        quotes: ["sep38_firm"],
+        kyc: "sep12",
+        settlement: ["stellar_payment"],
+        refunds: "request",
+        callbacks: false,
+        ...opts.capabilities,
+      };
+    },
     async requestQuote(intent) {
       const now = Date.now();
       return ok<Quote>({

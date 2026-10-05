@@ -17,6 +17,7 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type { RouteResolver } from "@corridor/router";
+import { ExternalQuoteProvider, type ExternalQuoteFn } from "@corridor/adapter-kit";
 import { canTransition, isTerminal, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
@@ -105,6 +106,11 @@ export interface EngineDeps {
    * on-chain attestation.
    */
   trustManifestWithoutAttestation?: boolean;
+  /**
+   * Pricing function for corridors with `fx.quote_source: external`. Required
+   * for those corridors; the engine never makes a SEP-38 call for them.
+   */
+  externalQuote?: ExternalQuoteFn;
   /**
    * Explicit escape hatch skipping pre-settle verification. When true, execute() bypasses gate
    * evaluation while recording `gate.skipped` in the audit log and emitting a warning.
@@ -308,8 +314,34 @@ export async function execute(
     });
   }
 
+  let externalProvider: ExternalQuoteProvider | undefined;
+  if (corridor.fx.quote_source === "external") {
+    // A non-firm external rate cannot bind the receiving anchor, so when that
+    // anchor is the one holding FX risk we refuse unless it prices natively.
+    if (
+      corridor.fx.who_holds_risk === "receiving_anchor" &&
+      !adapter.capabilities().quotes.includes("native")
+    ) {
+      return die({
+        code: "MANIFEST_INVALID",
+        message: `corridor ${corridor.id}: fx.quote_source "external" with who_holds_risk "receiving_anchor" requires an adapter that reports firm native quotes; a non-firm external rate cannot bind the receiving anchor`,
+        retryable: false,
+      });
+    }
+    if (!deps.externalQuote) {
+      return die({
+        code: "QUOTE_UNAVAILABLE",
+        message: `corridor ${corridor.id} sets fx.quote_source "external" but no EngineDeps.externalQuote was provided`,
+        retryable: false,
+      });
+    }
+    externalProvider = new ExternalQuoteProvider(deps.externalQuote, now);
+  }
+
   // --- 1. quote ---------------------------------------------------------
-  const q = await timed("quote", () => quote(adapter, intent, corridor, now()));
+  const q = await timed("quote", () =>
+    quote(adapter, intent, corridor, now(), externalProvider),
+  );
   if (!q.ok) return die(q.error);
   run.quoteId = q.value.id;
   run.quoteExpiresAt = q.value.expiresAt;

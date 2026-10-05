@@ -26,6 +26,7 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type {
+  AdapterCapabilities,
   AnchorAdapter,
   KycResult,
   OpenTransaction,
@@ -368,6 +369,18 @@ export class Sep31Adapter implements AnchorAdapter {
       );
     }
     return ok({ sep31, sep38: this.anchor.endpoints.quote_server });
+  }
+
+  capabilities(): AdapterCapabilities {
+    const e = this.anchor.endpoints;
+    return {
+      protocol: "sep31",
+      quotes: e.quote_server ? ["sep38_firm"] : ["none"],
+      kyc: e.kyc_server ? "sep12" : "none",
+      settlement: ["stellar_payment"],
+      refunds: "report_only",
+      callbacks: false,
+    };
   }
 
   async requestQuote(intent: PaymentIntent, corridor: Corridor): Promise<Outcome<Quote>> {
