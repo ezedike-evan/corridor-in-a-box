@@ -10,11 +10,26 @@
 // reduced to one command.
 
 import { liveness, loadCorridor, type Corridor } from "@corridor/manifest";
+import { PostgresIdempotencyStore, migrate } from "@corridor/engine";
+import {
+  RESOLVE_USAGE,
+  listHeldRuns,
+  parseListArgs,
+  parseResolveArgs,
+  resolveHeldRun,
+} from "./runs.js";
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
   const [cmd, file] = argv;
+  if (cmd === "runs") {
+    const parsed = parseListArgs(argv.slice(1));
+    return parsed ? withStore((store) => listHeldRuns(store, parsed)) : 2;
+  }
+  if (cmd === "resolve") return resolveCommand(argv.slice(1));
   if (!cmd || (cmd !== "validate" && cmd !== "plan")) {
-    console.error("usage: corridor <validate|plan> <file.corridor.yaml>");
+    console.error(
+      "usage: corridor <validate|plan> <file.corridor.yaml> | runs list --state held | resolve <key> --outcome <outcome> --note <text>",
+    );
     return 2;
   }
   if (!file) {
@@ -36,6 +51,46 @@ function main(argv: string[]): number {
 
   printPlan(c);
   return 0;
+}
+
+async function openStore(): Promise<
+  { store: PostgresIdempotencyStore; close: () => Promise<void> } | undefined
+> {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    console.error("✗ DATABASE_URL is required for corridor run operations");
+    return undefined;
+  }
+  const { Pool } = await import("pg");
+  const pool = new Pool({ connectionString });
+  await migrate(pool);
+  return { store: new PostgresIdempotencyStore(pool), close: () => pool.end() };
+}
+
+async function resolveCommand(args: string[]): Promise<number> {
+  const parsed = parseResolveArgs(args);
+  if (!parsed) {
+    console.error(RESOLVE_USAGE);
+    return 2;
+  }
+  const resolvedBy = process.env.CORRIDOR_OPERATOR_ID?.trim();
+  if (!resolvedBy) {
+    console.error("✗ CORRIDOR_OPERATOR_ID is required to record who resolved the run");
+    return 1;
+  }
+  return withStore((store) => resolveHeldRun(store, parsed, resolvedBy));
+}
+
+async function withStore(
+  fn: (store: PostgresIdempotencyStore) => Promise<number>,
+): Promise<number> {
+  const opened = await openStore();
+  if (!opened) return 1;
+  try {
+    return await fn(opened.store);
+  } finally {
+    await opened.close();
+  }
 }
 
 function printPlan(c: Corridor): void {
@@ -113,4 +168,11 @@ function printPlan(c: Corridor): void {
   }
 }
 
-process.exit(main(process.argv.slice(2)));
+void main(process.argv.slice(2))
+  .then((code) => process.exit(code))
+  .catch((error: unknown) => {
+    console.error(
+      `✗ corridor command failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(1);
+  });

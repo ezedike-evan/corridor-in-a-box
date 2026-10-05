@@ -140,6 +140,51 @@ describe("concurrent claim", () => {
   });
 });
 
+describe("held run resolution", () => {
+  it("lists only held runs with limits and corridor filtering", async () => {
+    const store = new InMemoryIdempotencyStore();
+    await store.put({ idempotencyKey: "held-a", corridorId: "a", state: "held", version: 4 });
+    await store.put({ idempotencyKey: "held-b", corridorId: "b", state: "held", version: 2 });
+    await store.put({
+      idempotencyKey: "done",
+      corridorId: "a",
+      state: "completed",
+      version: 8,
+    });
+
+    expect(await store.listByState("held", { corridorId: "a" })).toMatchObject([
+      { idempotencyKey: "held-a", state: "held" },
+    ]);
+    expect(await store.listByState("held", { limit: 1 })).toHaveLength(1);
+  });
+
+  it("records one append-only resolution for a held run only", async () => {
+    const store = new InMemoryIdempotencyStore();
+    await store.put({ idempotencyKey: "held", corridorId: "a", state: "held", version: 4 });
+    await store.put({
+      idempotencyKey: "done",
+      corridorId: "a",
+      state: "completed",
+      version: 8,
+    });
+    const resolution = {
+      idempotencyKey: "held",
+      outcome: "refunded-offchain" as const,
+      note: "Operations confirmed bank refund",
+      resolvedBy: "operator-1",
+      resolvedAt: 1700000000000,
+    };
+
+    expect(await store.recordResolution(resolution)).toBe(true);
+    expect(await store.recordResolution(resolution)).toBe(false);
+    expect(await store.recordResolution({ ...resolution, idempotencyKey: "done" })).toBe(
+      false,
+    );
+    expect(await store.getResolution("held")).toEqual(resolution);
+    expect((await store.get("held"))?.state).toBe("held");
+  });
+});
+
 describe("PostgresIdempotencyStore.create", () => {
   it("claims a fresh key once and rejects a second claim", async () => {
     const db = fakeDb();
@@ -329,6 +374,9 @@ describe("refund state round-trips", () => {
       },
     });
     expect(seen[0]).toContain("refund_id");
+    expect(
+      seen.some((sql) => sql.includes("create table if not exists corridor_resolutions")),
+    ).toBe(true);
     expect(seen.slice(1).join("\n")).toContain("add column if not exists refund_id");
     expect(seen[0]).toContain("deposit_address");
     expect(seen[0]).toContain("memo");
@@ -359,6 +407,58 @@ describe("refund state round-trips", () => {
 });
 
 describe("PostgresIdempotencyStore", () => {
+  it("queries held runs with parameterized filters and bounded limits", async () => {
+    let captured = { text: "", params: [] as unknown[] };
+    const db: Queryable = {
+      async query(text, params = []) {
+        captured = { text, params };
+        return {
+          rows: [
+            {
+              idempotency_key: "held-1",
+              corridor_id: "corridor-a",
+              state: "held",
+              version: 4,
+              transaction_id: null,
+              quote_id: null,
+              stellar_tx_hash: "tx-hash",
+              refund_id: null,
+              last_error: "needs operator",
+              owner: null,
+            },
+          ] as never,
+        };
+      },
+    };
+    const store = new PostgresIdempotencyStore(db);
+    const runs = await store.listByState("held", { corridorId: "corridor-a", limit: 20 });
+    expect(captured.text).toContain("where state = $1 and corridor_id = $2");
+    expect(captured.text).toContain("limit $3");
+    expect(captured.params).toEqual(["held", "corridor-a", 20]);
+    expect(runs[0]).toMatchObject({ idempotencyKey: "held-1", stellarTxHash: "tx-hash" });
+  });
+
+  it("inserts out-of-band resolutions only when the run is held", async () => {
+    let captured = "";
+    const db: Queryable = {
+      async query(text) {
+        captured = text;
+        return { rows: [{ idempotency_key: "held-1" }] as never };
+      },
+    };
+    const store = new PostgresIdempotencyStore(db);
+    const inserted = await store.recordResolution({
+      idempotencyKey: "held-1",
+      outcome: "written-off",
+      note: "approved",
+      resolvedBy: "operator",
+      resolvedAt: 1_700_000_000_000,
+    });
+    expect(inserted).toBe(true);
+    expect(captured).toContain("state = 'held'");
+    expect(captured).toContain("on conflict (idempotency_key) do nothing");
+  });
+
   it("round-trips a run and maps null columns to undefined", async () => {
     const db = fakeDb();
     const store = new PostgresIdempotencyStore(db);

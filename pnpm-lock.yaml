@@ -102,6 +102,12 @@ importers:
 
   packages/cli:
     dependencies:
+      '@corridor/engine':
+        specifier: workspace:*
+        version: link:../engine
+      pg:
+        specifier: ^8.13.0
+        version: 8.22.0
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
