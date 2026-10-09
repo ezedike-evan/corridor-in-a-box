@@ -20,7 +20,7 @@
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.0",
-    "@stellar/stellar-sdk": "^17.2.0"
+    "@stellar/stellar-sdk": "^17.2.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
