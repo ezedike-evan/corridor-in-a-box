@@ -7,6 +7,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — QuoteProvider abstraction: SEP-38, adapter-native, and external pricing (#189)
+
+- Introduces `Sep38QuoteProvider` and `AdapterQuoteProvider` implementing `QuoteProvider`.
+- Refactors `Sep31Adapter.requestQuote` to delegate to `Sep38QuoteProvider`.
+- Extends corridor manifest `fx.quote_source` enum with `"native"`.
+- Adds `EngineDeps.quoteProvider` allowing operators to inject custom quote providers or factories `(corridor, adapter) => QuoteProvider`.
+- Engine validates adapter capabilities when `quote_source: "native"` is configured and dispatches quoting to `AdapterQuoteProvider`.
+
 ### Fixed — a resumed recovery run reports its real cause to the circuit breaker
 
 After a restart, a run resumed from `recovering` or `refund_pending` used to be

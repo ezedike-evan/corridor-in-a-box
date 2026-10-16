@@ -152,7 +152,7 @@ export const FxSchema = z
   .object({
     /** The conversion path, in order. e.g. ["NGN","USDC","ARS"]. >= 2 hops. */
     path: z.array(z.string().min(1)).min(2),
-    quote_source: z.enum(["sep38", "external"]).default("sep38"),
+    quote_source: z.enum(["sep38", "native", "external"]).default("sep38"),
     /** Who carries the rate risk between quote-time and settlement. */
     who_holds_risk: z.enum(["sender", "sending_anchor", "receiving_anchor"]),
     /** Firm-quote TTL. The settle leg must hit the chain before this elapses. */

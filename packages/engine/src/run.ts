@@ -17,7 +17,12 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type { RouteResolver } from "@corridor/router";
-import { ExternalQuoteProvider, type ExternalQuoteFn } from "@corridor/adapter-kit";
+import {
+  AdapterQuoteProvider,
+  ExternalQuoteProvider,
+  type ExternalQuoteFn,
+  type QuoteProvider,
+} from "@corridor/adapter-kit";
 import { canTransition, isTerminal, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
@@ -134,6 +139,12 @@ export interface EngineDeps {
    * for those corridors; the engine never makes a SEP-38 call for them.
    */
   externalQuote?: ExternalQuoteFn;
+  /**
+   * Optional custom quote provider or factory. Overrides the default provider
+   * derived from the corridor manifest and adapter capabilities.
+   */
+  quoteProvider?:
+    QuoteProvider | ((corridor: Corridor, adapter: AnchorAdapter) => QuoteProvider);
   /**
    * Explicit escape hatch skipping pre-settle verification. When true, execute() bypasses gate
    * evaluation while recording `gate.skipped` in the audit log and emitting a warning.
@@ -421,8 +432,13 @@ export async function execute(
     });
   }
 
-  let externalProvider: ExternalQuoteProvider | undefined;
-  if (corridor.fx.quote_source === "external") {
+  let provider: QuoteProvider | undefined;
+  if (deps.quoteProvider) {
+    provider =
+      typeof deps.quoteProvider === "function"
+        ? deps.quoteProvider(corridor, adapter)
+        : deps.quoteProvider;
+  } else if (corridor.fx.quote_source === "external") {
     // A non-firm external rate cannot bind the receiving anchor, so when that
     // anchor is the one holding FX risk we refuse unless it prices natively.
     if (
@@ -442,13 +458,20 @@ export async function execute(
         retryable: false,
       });
     }
-    externalProvider = new ExternalQuoteProvider(deps.externalQuote, now);
+    provider = new ExternalQuoteProvider(deps.externalQuote, now);
+  } else if (corridor.fx.quote_source === "native") {
+    if (!adapter.capabilities().quotes.includes("native")) {
+      return die({
+        code: "MANIFEST_INVALID",
+        message: `corridor ${corridor.id}: fx.quote_source "native" requires an adapter that reports native quotes`,
+        retryable: false,
+      });
+    }
+    provider = new AdapterQuoteProvider(adapter);
   }
 
   // --- 1. quote ---------------------------------------------------------
-  const q = await timed("quote", () =>
-    quote(adapter, intent, corridor, now(), externalProvider),
-  );
+  const q = await timed("quote", () => quote(adapter, intent, corridor, now(), provider));
   if (!q.ok) return die(q.error);
   run.quoteId = q.value.id;
   run.quoteExpiresAt = q.value.expiresAt;
