@@ -33,6 +33,7 @@
     "verify:corridor": "tsx examples/verify-corridor.ts",
     "fund:testnet": "tsx examples/fund-testnet-sender.ts",
     "probe:anchor": "tsx examples/probe-anchor.ts",
+    "probe:sweep": "tsx examples/sweep-anchors.ts",
     "registry:read": "tsx examples/read-registry.ts",
     "attest": "tsx examples/attest.ts"
   },
