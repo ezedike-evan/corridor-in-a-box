@@ -6,13 +6,14 @@
 // actually hold" stays visible in one place — every one of these passed the type
 // checker and the old test suite while being wrong.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createService } from "@corridor/service";
 import { createMockAdapter } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
 import { loadCorridor, type Corridor } from "@corridor/manifest";
 import { InMemoryIdempotencyStore, type SettlementRef } from "@corridor/engine";
 import { Sep31Adapter } from "@corridor/sep31";
+import * as corridorTypes from "@corridor/types";
 import { isSettleableAmount, isValidAmount, type Outcome } from "@corridor/types";
 
 const loaded = loadCorridor("corridors/reference.corridor.yaml");
@@ -57,13 +58,17 @@ function recordingSubmitter() {
 function service(opts: {
   apiKeys?: Set<string>;
   rateLimit?: { capacity: number; refillPerSec: number };
+  rateLimiter?: { take(key: string): boolean | Promise<boolean> };
   store?: InMemoryIdempotencyStore;
   submitter?: ReturnType<typeof recordingSubmitter>["submitter"];
+  now?: () => number;
 }) {
   return createService({
     corridors: new Map([[CORRIDOR.id, CORRIDOR]]),
     apiKeys: opts.apiKeys,
     rateLimit: opts.rateLimit,
+    rateLimiter: opts.rateLimiter,
+    now: opts.now,
     deps: {
       resolver: new StaticRouteResolver(() => createMockAdapter(), {
         trustManifestWithoutAttestation: true,
@@ -157,6 +162,136 @@ describe("run ownership (IDOR)", () => {
     expect(JSON.stringify(asBob.body)).not.toContain("hash");
   });
 
+  it("lets two named API keys for the same tenant read the same run", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const apiKeys = new Map([
+      ["primary", { secret: "tenant-a-primary", tenant: "tenant-a" }],
+      ["rotated", { secret: "tenant-a-rotated", tenant: "tenant-a" }],
+    ]);
+    const svc = service({
+      apiKeys,
+      store,
+    });
+
+    const created = await svc.route({
+      method: "POST",
+      path: "/payments",
+      headers: { authorization: "Bearer tenant-a-primary" },
+      body: intent({ idempotencyKey: "tenant-a-invoice-0001" }),
+    });
+    expect(created.status).toBe(200);
+
+    const readWithRotatedKey = await svc.route({
+      method: "GET",
+      path: "/payments/tenant-a-invoice-0001",
+      headers: { authorization: "Bearer tenant-a-rotated" },
+    });
+    expect(readWithRotatedKey.status).toBe(200);
+  });
+
+  it.each([
+    ["an expired", { notAfter: 999 }],
+  ] as const)("rejects %s named API key with HTTP 401", async (stateName, state) => {
+    const apiKeys = new Map([
+      ["active", { secret: "active-key", tenant: "tenant-a" }],
+      ["inactive", { secret: "inactive-key", tenant: "tenant-a", ...state }],
+    ]);
+    const svc = service({
+      apiKeys,
+      now: () => 1_000,
+    });
+
+    const activeResponse = await svc.route({
+      method: "GET",
+      path: "/payments/anything",
+      headers: { authorization: "Bearer active-key" },
+    });
+    expect(activeResponse.status, "active Map entry must authenticate").toBe(404);
+
+    const response = await svc.route({
+      method: "GET",
+      path: "/payments/anything",
+      headers: { authorization: "Bearer inactive-key" },
+    });
+    expect(response.status, `${stateName} keys must be unauthorized`).toBe(401);
+  });
+
+  it("accepts a named API key at its notAfter boundary", async () => {
+    const apiKeys = new Map([
+      ["boundary", { secret: "boundary-key", tenant: "tenant-a", notAfter: 1_000 }],
+    ]);
+    const svc = service({ apiKeys, now: () => 1_000 });
+
+    const response = await svc.route({
+      method: "GET",
+      path: "/payments/missing",
+      headers: { authorization: "Bearer boundary-key" },
+    });
+    expect(response.status).toBe(404);
+  });
+
+  it("rejects a revoked named API key after its key ID is deleted from the Map", async () => {
+    const apiKeys = new Map([
+      ["active", { secret: "active-key", tenant: "tenant-a" }],
+      ["revoked", { secret: "revoked-key", tenant: "tenant-a" }],
+    ]);
+    apiKeys.delete("revoked");
+    const svc = service({ apiKeys });
+
+    const activeResponse = await svc.route({
+      method: "GET",
+      path: "/payments/anything",
+      headers: { authorization: "Bearer active-key" },
+    });
+    expect(activeResponse.status, "active Map entry must authenticate").toBe(404);
+
+    const response = await svc.route({
+      method: "GET",
+      path: "/payments/anything",
+      headers: { authorization: "Bearer revoked-key" },
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it("does not let a named API key from another tenant read a run", async () => {
+    const store = new InMemoryIdempotencyStore();
+    const apiKeys = new Map([
+      ["tenant-a-key-id", { secret: "tenant-a-key", tenant: "tenant-a" }],
+      ["tenant-b-key-id", { secret: "tenant-b-key", tenant: "tenant-b" }],
+    ]);
+    const svc = service({
+      apiKeys,
+      store,
+    });
+
+    const created = await svc.route({
+      method: "POST",
+      path: "/payments",
+      headers: { authorization: "Bearer tenant-a-key" },
+      body: intent({ idempotencyKey: "tenant-a-private-run" }),
+    });
+    expect(created.status).toBe(200);
+
+    const otherTenantRead = await svc.route({
+      method: "GET",
+      path: "/payments/tenant-a-private-run",
+      headers: { authorization: "Bearer tenant-b-key" },
+    });
+    expect(otherTenantRead.status).toBe(404);
+    expect(JSON.stringify(otherTenantRead.body)).not.toContain("hash");
+  });
+
+  it("continues to accept legacy Set<string> API keys", async () => {
+    const svc = service({ apiKeys: new Set(["legacy-key"]) });
+    const response = await svc.route({
+      method: "GET",
+      path: "/payments/missing",
+      headers: { authorization: "Bearer legacy-key" },
+    });
+    // Authentication succeeded; the requested run simply does not exist.
+    expect(response.status).toBe(404);
+  });
+
   it("never returns the raw lastError message to a caller", async () => {
     const store = new InMemoryIdempotencyStore();
     await store.create({
@@ -182,6 +317,51 @@ describe("run ownership (IDOR)", () => {
 });
 
 describe("rate limiting", () => {
+  it("compares every configured secret using constantTimeEqual", async () => {
+    const comparisons: string[] = [];
+    const constantTimeEqual = corridorTypes.constantTimeEqual;
+    const compareSpy = vi
+      .spyOn(corridorTypes, "constantTimeEqual")
+      .mockImplementation((candidate, presented) => {
+        comparisons.push(candidate);
+        return constantTimeEqual(candidate, presented);
+      });
+    try {
+      const svc = service({
+        apiKeys: new Set(["before", "matched", "after"]),
+        rateLimit: { capacity: 10, refillPerSec: 1 },
+      });
+      const response = await svc.route({
+        method: "GET",
+        path: "/payments/missing",
+        headers: { authorization: "Bearer matched" },
+      });
+      expect(response.status).toBe(404);
+      // Matching occurs once for limiter identity and once for authentication.
+      // Each pass must compare every configured candidate, including after a match.
+      expect(comparisons).toEqual([
+        "before",
+        "matched",
+        "after",
+        "before",
+        "matched",
+        "after",
+      ]);
+    } finally {
+      compareSpy.mockRestore();
+    }
+  });
+
+  it("returns 401 for an invalid bearer credential", async () => {
+    const svc = service({ apiKeys: new Set(["configured-key"]) });
+    const response = await svc.route({
+      method: "GET",
+      path: "/payments/missing",
+      headers: { authorization: "Bearer invalid-key" },
+    });
+    expect(response.status).toBe(401);
+  });
+
   // The 401 used to return BEFORE the limiter, so wrong keys cost the attacker
   // nothing and could be tried at line rate.
   it("rate-limits failed authentication attempts", async () => {
