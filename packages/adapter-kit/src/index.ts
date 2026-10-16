@@ -34,17 +34,69 @@ export interface KycResult {
   readonly customerId?: string;
 }
 
+/**
+ * Deposit instructions returned by an anchor describing where or how to settle funds.
+ * Discriminated union supporting on-chain Stellar payments, claimable balance funding,
+ * and off-chain / adapter-settled transactions (#183).
+ */
+export type DepositInstructions =
+  | {
+      readonly kind: "stellar_payment";
+      readonly to: string;
+      readonly memo?: string;
+      readonly memoType?: "text" | "hash" | "id";
+      readonly asset?: string;
+    }
+  | {
+      readonly kind: "claimable_balance";
+      readonly claimant: string;
+      readonly asset?: string;
+      readonly predicateSeconds?: number;
+    }
+  | {
+      readonly kind: "adapter_settled";
+      readonly reference?: string;
+    };
+
+/**
+ * Extract legacy flat address and memo fields from an OpenTransaction.
+ * Retained for backward compatibility during transition to instructions union.
+ */
+export function toLegacy(tx: OpenTransaction): {
+  readonly depositAddress?: string;
+  readonly memo?: string;
+  readonly memoType?: "text" | "hash" | "id";
+} {
+  if (tx.instructions && tx.instructions.kind === "stellar_payment") {
+    return {
+      depositAddress: tx.instructions.to,
+      memo: tx.instructions.memo,
+      memoType: tx.instructions.memoType,
+    };
+  }
+  return {
+    depositAddress: tx.depositAddress,
+    memo: tx.memo,
+    memoType: tx.memoType,
+  };
+}
+
 /** Returned by the receiving anchor's SEP-31 POST /transactions — where to send the bridge asset. */
 export interface OpenTransaction {
   readonly transactionId: string;
-  readonly depositAddress: string;
+  readonly instructions: DepositInstructions;
+  readonly amountIn?: Money;
+  /**
+   * @deprecated Read from `instructions` instead. Retained for single-release compatibility.
+   */
+  readonly depositAddress?: string;
+  /**
+   * @deprecated Read from `instructions` instead. Retained for single-release compatibility.
+   */
   readonly memo?: string;
   /**
-   * How to encode `memo` on the settlement transaction. SEP-31 anchors return
-   * this alongside the memo and it is NOT always "text" — the Anchor Platform
-   * reference server issues base64 `hash` memos, which are 32 bytes and blow
-   * past the 28-byte text limit if encoded as text. Defaults to "text" only when
-   * the anchor says nothing.
+   * How to encode `memo` on the settlement transaction.
+   * @deprecated Read from `instructions` instead. Retained for single-release compatibility.
    */
   readonly memoType?: "text" | "hash" | "id";
 }
@@ -384,10 +436,17 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
       return ok<KycResult>({ status: opts.kyc ?? "accepted", customerId: "cust_mock" });
     },
     async openTransaction(_intent, quote) {
+      const instructions: DepositInstructions = {
+        kind: "stellar_payment",
+        to: "GMOCK000000000000000000000000000000000000000000000000",
+        memo: "mock-memo",
+      };
       const tx: OpenTransaction = {
         transactionId: `tx_${++counter}`,
-        depositAddress: "GMOCK000000000000000000000000000000000000000000000000",
-        memo: "mock-memo",
+        instructions,
+        amountIn: quote.sourceAmount,
+        depositAddress: instructions.to,
+        memo: instructions.memo,
       };
       opened.set(tx.transactionId, {
         amountIn: quote.sourceAmount,

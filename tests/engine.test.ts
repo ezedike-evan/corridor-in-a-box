@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
-import { createMockAdapter } from "@corridor/adapter-kit";
+import { createMockAdapter, type OpenTransaction } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
 import { amountRangeCheck } from "@corridor/sep31";
 import {
@@ -2185,8 +2185,14 @@ describe("SettlementStrategy", () => {
     mockAdapter.openTransaction = async (intent, quote, corridor) => {
       const r = await originalOpen(intent, quote, corridor);
       if (!r.ok) return r;
-      // Inject a `kind` field onto the opened tx to simulate claimable_balance.
-      return ok({ ...r.value, kind: "claimable_balance" });
+      // Return a claimable_balance deposit instruction.
+      return ok<OpenTransaction>({
+        ...r.value,
+        instructions: {
+          kind: "claimable_balance",
+          claimant: "GCLAIMANT000000000000000000000000000000000000000000000000",
+        },
+      });
     };
 
     const resolver = new StaticRouteResolver(() => mockAdapter, {
