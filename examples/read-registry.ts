@@ -56,12 +56,18 @@ async function main(): Promise<void> {
       `  attested at    ledger ${a.attestedLedger} (${await registry.staleness(domain)} ledgers ago)`,
     );
     console.log(`  serves SEP-31  ${(await registry.servesSep31(domain)) ? "YES" : "NO"}`);
+    console.log(`  serves SEP-6   ${(await registry.servesSep6(domain)) ? "YES" : "NO"}`);
     console.log();
   }
 
-  const live = await registry.liveSep31Anchors();
+  const live31 = await registry.liveSep31Anchors();
   console.log(
-    `usable SEP-31 off-ramps (attested + fresh): ${live.length ? live.join(", ") : "none"}`,
+    `usable SEP-31 off-ramps (attested + fresh): ${live31.length ? live31.join(", ") : "none"}`,
+  );
+
+  const live6 = await registry.liveAnchors(6);
+  console.log(
+    `usable SEP-6 off-ramps (attested + fresh): ${live6.length ? live6.join(", ") : "none"}`,
   );
 }
 

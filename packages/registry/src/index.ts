@@ -19,6 +19,8 @@ import {
 
 /** SEP numbers in the registry's bit order. Mirrors SEP_NUMBERS in the contract. */
 export const SEP_NUMBERS = [1, 6, 10, 12, 24, 31, 38] as const;
+/** The possible SEP numbers for a registry query. */
+export type SepNumber = (typeof SEP_NUMBERS)[number];
 /** Probe names in the registry's bit order. Mirrors PROBE_NAMES in the contract. */
 export const PROBE_NAMES = [
   "toml_fetch",
@@ -26,6 +28,8 @@ export const PROBE_NAMES = [
   "sep38_quote",
   "sep12_status",
   "sep31_info",
+  "sep6_info",
+  "sep6_auth",
 ] as const;
 
 export type ProbeName = (typeof PROBE_NAMES)[number];
@@ -152,6 +156,13 @@ export class AnchorRegistry {
   }
 
   /**
+   * Whether the anchor both ADVERTISES SEP-6 and PASSED the SEP-6 probe.
+   */
+  async servesSep6(domain: string): Promise<boolean> {
+    return this.read<boolean>("serves_sep6", nativeToScValString(domain));
+  }
+
+  /**
    * Whether the anchor both ADVERTISES SEP-31 and PASSED the SEP-31 probe.
    *
    * These are not the same thing, and the difference is the entire point of the
@@ -177,17 +188,50 @@ export class AnchorRegistry {
    * evidence about today, and letting callers forget to check would rebuild the
    * problem this registry exists to solve.
    */
-  async liveSep31Anchors(maxStalenessLedgers = 120_960): Promise<string[]> {
+  /**
+   * Generic checker: whether the anchor both advertises a given SEP and passed
+   * its probe. For SEPs with no defined probe (e.g., SEP-10), this returns
+   * false.
+   */
+  async serves(domain: string, sep: SepNumber): Promise<boolean> {
+    switch (sep) {
+      case 6:
+        return this.servesSep6(domain);
+      case 31:
+        return this.servesSep31(domain);
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Generic freshness filter: domains attested as genuinely serving a given SEP
+   * receive-side AND whose attestation is fresher than `maxStalenessLedgers`.
+   */
+  async liveAnchors(sep: SepNumber, maxStalenessLedgers = 120_960): Promise<string[]> {
     const all = await this.domains();
     const out: string[] = [];
     for (const domain of all) {
       const [serves, age] = await Promise.all([
-        this.servesSep31(domain),
+        this.serves(domain, sep),
         this.staleness(domain),
       ]);
       if (serves && age <= maxStalenessLedgers) out.push(domain);
     }
     return out;
+  }
+
+  /**
+   * Domains that are attested as genuinely serving SEP-31 receive-side AND whose
+   * attestation is fresher than `maxStalenessLedgers` (default ~1 week at 5s
+   * ledgers). The query an operator looking for an off-ramp actually has.
+   *
+   * Freshness is not optional here: an attestation from six months ago is not
+   * evidence about today, and letting callers forget to check would rebuild the
+   * problem this registry exists to solve.
+   */
+  async liveSep31Anchors(maxStalenessLedgers = 120_960): Promise<string[]> {
+    return this.liveAnchors(31, maxStalenessLedgers);
   }
 }
 
