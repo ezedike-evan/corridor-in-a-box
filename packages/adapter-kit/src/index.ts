@@ -428,3 +428,5 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
     },
   };
 }
+
+export * from "./conformance";
