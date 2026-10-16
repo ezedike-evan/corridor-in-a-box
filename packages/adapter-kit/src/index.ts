@@ -163,10 +163,8 @@ export interface RefundRef {
 }
 
 /**
- * SHIM for #187 (minimal, to be reconciled with that issue's PR).
  * What an adapter supports, discoverable up front instead of by failing.
- * `settlement` is `readonly string[]` here because `DepositInstructions` (the
- * type #187 names) does not exist in this tree yet.
+ * Exposes supported quote styles, KYC mechanism, settlement kinds, refunds and callbacks.
  */
 export interface AdapterCapabilities {
   readonly protocol: string;
