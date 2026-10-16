@@ -102,3 +102,4 @@ export {
   type MetricTags,
 } from "./observability";
 export { quoteWindowCheck } from "./quoteWindow";
+export { checkCompatibility } from "./compat";

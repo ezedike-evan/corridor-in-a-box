@@ -2405,3 +2405,101 @@ describe("circuit breaker x resumed recovery", () => {
     },
   );
 });
+
+describe("engine adapter capabilities compatibility (#188)", () => {
+  it("fails with CAPABILITY_MISMATCH when adapter reports quotes: ['none'] on quote_source: sep38 corridor before any other adapter call", async () => {
+    let quoteCalled = false;
+    let complyCalled = false;
+    let openCalled = false;
+    const adapter = createMockAdapter({
+      capabilities: { quotes: ["none"] },
+    });
+    const originalQuote = adapter.requestQuote.bind(adapter);
+    adapter.requestQuote = async (...args) => {
+      quoteCalled = true;
+      return originalQuote(...args);
+    };
+    adapter.ensureCompliance = async () => {
+      complyCalled = true;
+      return ok({ status: "accepted", customerId: "mock" });
+    };
+    adapter.openTransaction = async () => {
+      openCalled = true;
+      return ok({ transactionId: "mock", depositAddress: "G...", memo: "memo" });
+    };
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => adapter, {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: createMockSubmitter(),
+      idempotency: new InMemoryIdempotencyStore(),
+      unsafeSkipPreSettleGate: true,
+    };
+
+    const r = await execute(intent("cap-quotes-none"), corridor(), d);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("CAPABILITY_MISMATCH");
+    }
+    expect(quoteCalled).toBe(false);
+    expect(complyCalled).toBe(false);
+    expect(openCalled).toBe(false);
+  });
+
+  it("fails before open when settlement kind is not covered by strategies", async () => {
+    let openCalled = false;
+    const adapter = createMockAdapter({
+      capabilities: { settlement: ["claimable_balance"] },
+    });
+    adapter.openTransaction = async () => {
+      openCalled = true;
+      return ok({ transactionId: "mock", depositAddress: "G...", memo: "memo" });
+    };
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => adapter, {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: createMockSubmitter(),
+      idempotency: new InMemoryIdempotencyStore(),
+      unsafeSkipPreSettleGate: true,
+    };
+
+    const r = await execute(intent("cap-settlement-uncovered"), corridor(), d);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("CAPABILITY_MISMATCH");
+    }
+    expect(openCalled).toBe(false);
+  });
+
+  it("skips comply when caps.kyc === 'none' without calling ensureCompliance", async () => {
+    let complyCalled = false;
+    const adapter = createMockAdapter({
+      capabilities: { kyc: "none" },
+    });
+    adapter.ensureCompliance = async () => {
+      complyCalled = true;
+      return ok({ status: "accepted", customerId: "mock" });
+    };
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => adapter, {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter: createMockSubmitter(),
+      idempotency: new InMemoryIdempotencyStore(),
+      trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
+    };
+
+    const r = await execute(intent("cap-kyc-none"), corridor(), d);
+    expect(r.ok).toBe(true);
+    expect(complyCalled).toBe(false);
+    if (r.ok) {
+      expect(r.value.state).toBe("completed");
+      expect(r.value.trail).toContain("compliant");
+    }
+  });
+});

@@ -48,6 +48,7 @@ import {
 } from "./verbs";
 import type { AnchorAdapter, TransactionStatus } from "@corridor/adapter-kit";
 import { defaultStrategies } from "./ports";
+import { checkCompatibility } from "./compat";
 import {
   noopMetrics,
   silentLogger,
@@ -407,6 +408,17 @@ export async function execute(
   });
   const { advance, die, finishFailure } = context;
 
+  const strategies = deps.strategies ?? defaultStrategies(deps.submitter);
+  const caps = adapter.capabilities();
+  const compat = checkCompatibility(corridor, caps, strategies);
+  if (!compat.ok) {
+    return die({
+      code: compat.error.code,
+      message: compat.error.message,
+      retryable: false,
+    });
+  }
+
   if (
     corridor.settlement.network === "public" &&
     route.trust === "manifest" &&
@@ -460,8 +472,10 @@ export async function execute(
   }
 
   // --- 2. comply --------------------------------------------------------
-  const c = await timed("comply", () => comply(adapter, intent, corridor));
-  if (!c.ok) return die(c.error);
+  if (caps.kyc !== "none") {
+    const c = await timed("comply", () => comply(adapter, intent, corridor));
+    if (!c.ok) return die(c.error);
+  }
   {
     const t = await advance("compliant");
     if (!t.ok) return die(t.error);
@@ -1166,8 +1180,10 @@ async function resumeRun(
           "pre-settle gate cannot be re-evaluated on resume; operator review needed",
         );
       }
-      const compliance = await comply(route.receiving, intent, corridor);
-      if (!compliance.ok) return context.die(compliance.error);
+      if (route.receiving.capabilities().kyc !== "none") {
+        const compliance = await comply(route.receiving, intent, corridor);
+        if (!compliance.ok) return context.die(compliance.error);
+      }
       const entered = await enterSettling();
       if (!entered.ok) return context.die(entered.error);
       const submitted = await deps.submitter.submit(request);

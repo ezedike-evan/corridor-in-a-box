@@ -7,6 +7,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — Engine: read adapter capabilities instead of assuming SEP-31 behaviour (#188)
+
+- Engine executes `checkCompatibility(corridor, caps, strategies)` before external adapter calls.
+- Adds `CAPABILITY_MISMATCH` to `CorridorErrorCode` (mapped to HTTP 422 in service layer and documented in API docs).
+- Fails execution with `CAPABILITY_MISMATCH` if corridor requires quotes (e.g. `sep38`) but adapter capabilities report `quotes: ["none"]`, or if adapter settlement capabilities are empty or have unsupported settlement kinds not covered by available settlement strategies.
+- Skips compliance / KYC step during execution and resume when adapter capabilities declare `kyc: "none"`.
+
 ### Fixed — a resumed recovery run reports its real cause to the circuit breaker
 
 After a restart, a run resumed from `recovering` or `refund_pending` used to be
