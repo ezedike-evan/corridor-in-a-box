@@ -12,12 +12,14 @@ corridor is a new `*.corridor.yaml` file — not a fork.
 **Live demo:** [corridor-in-a-box.vercel.app](https://corridor-in-a-box.vercel.app)
 — the corridor dashboard and a payment walkthrough. **The walkthrough is a
 simulation**: it drives a re-implementation of the state machine and never
-touches the Stellar network. `ng-cowrie` is the one exception: its endpoints
-were probed against Cowrie's production API on 2026-08-11 — SEP-10 signed a
-challenge, SEP-12 answered, and SEP-31 `/info` returned a non-empty receive
-list — so it renders `VERIFIED`. That means endpoints were checked, not that
-money moved: Cowrie publishes no SEP-38 quote server, no payment has been
-attempted, and no business relationship is in place. Every other shipped
+touches the Stellar network. `ng-cowrie` is the one exception **in the demo's
+bundled lanes**: its endpoints were probed against Cowrie's production API on
+2026-08-11 — SEP-10 signed a challenge, SEP-12 answered, and SEP-31 `/info`
+returned a non-empty receive list — so it renders `VERIFIED`. That means
+endpoints were checked, not that money moved: Cowrie publishes no SEP-38 quote
+server, no payment has been attempted, and no business relationship is in place.
+`corridors/zeam.corridor.yaml` is a second probed lane in the repo — `VERIFIED`
+since 2026-10-17, see the sequencing table below — and every other shipped
 manifest renders `UNVERIFIED` or `NOT RUNNABLE` (see [Liveness](#liveness-has-four-states-and-green-has-to-be-earned)).
 
 This repo contains the **open, runnable corridor engine** and the `RouteResolver`
@@ -149,10 +151,11 @@ type a URL into a YAML file. So `corridor plan` and the dashboard report:
 | `PROVEN`       | A canary payment also completed through the lane, and that proof is still fresh.         |
 
 `VERIFIED` requires `dest.endpoints.endpoints_verified_at` — a date a human sets
-only after actually looking. `ng-cowrie` is `VERIFIED`: its endpoints were
-probed on 2026-08-11, and SEP-10, SEP-12, and SEP-31 answered. This does not
-mean money moved — Cowrie publishes no SEP-38 quote server, no payment has
-been attempted, and no business relationship is in place. Every other shipped
+only after actually looking. Two shipped manifests have it: `ng-cowrie`, probed
+on 2026-08-11 (SEP-10, SEP-12 and SEP-31 answered), and `zeam`, probed on
+2026-10-17 (SEP-10, SEP-12, SEP-31 and a firm SEP-38 quote). For both, this does
+not mean money moved — no payment has been attempted and no business relationship
+is in place, and Cowrie publishes no SEP-38 quote server. Every other shipped
 manifest is currently `UNVERIFIED` or `NOT RUNNABLE`. Green has to be earned;
 here, `VERIFIED` means endpoints were checked, not that a payment was made.
 
