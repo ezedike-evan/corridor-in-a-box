@@ -19,7 +19,18 @@
     "hold records in the registry. They are listed here because a record nobody",
     "refreshes decays into a stale row the scheduled job will never touch — the",
     "registry's whole claim is that staleness is visible AND fixable, so every",
-    "domain it holds belongs in this list."
+    "domain it holds belongs in this list.",
+    "",
+    "connect.clickpesa.com is ClickPesa (Tanzania, Kenya, Rwanda; sourced from",
+    "https://anchors.stellar.org/?s=ClickPesa). Probed 2026-10-17: toml_fetch fails",
+    "(DNS ENODATA / getaddrinfo ENOTFOUND; clickpesa.com returns HTTP 404). SEP-31",
+    "is not functional and no manifest is written; blocked on active stellar.toml/SEP-6."
   ],
-  "domains": ["testanchor.stellar.org", "cowrie.exchange", "stellar.org", "lobstr.co"]
+  "domains": [
+    "testanchor.stellar.org",
+    "cowrie.exchange",
+    "stellar.org",
+    "lobstr.co",
+    "connect.clickpesa.com"
+  ]
 }
