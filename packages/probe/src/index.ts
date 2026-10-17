@@ -64,6 +64,8 @@ export interface ProbeResult {
   readonly tomlHash: string;
   /** Per-probe detail, in the order probes were attempted. */
   readonly outcomes: readonly ProbeOutcome[];
+  /** Receive assets accepted by the anchor if SEP-31 probe passed. */
+  readonly receiveAssets?: readonly string[];
 }
 
 export interface ProbeOptions {
@@ -251,6 +253,7 @@ export async function probeAnchor(
   }
 
   // --- SEP-31: does it receive anything? ---------------------------------
+  let receiveAssets: string[] | undefined;
   const sep31 = endpoint.get(31);
   if (sep31) {
     try {
@@ -263,13 +266,22 @@ export async function probeAnchor(
         // exists, the lane does not.
         throw new Error("receive list is EMPTY — advertises SEP-31 but accepts nothing");
       }
+      receiveAssets = assets;
       record("sep31_info", true, `receives ${assets.join(", ")}`);
     } catch (e) {
       record("sep31_info", false, why(e));
     }
   }
 
-  return { domain, seps, probesRun, probesPassed, tomlHash, outcomes };
+  return {
+    domain,
+    seps,
+    probesRun,
+    probesPassed,
+    tomlHash,
+    outcomes,
+    ...(receiveAssets ? { receiveAssets } : {}),
+  };
 }
 
 export interface FormattedProbeResultJson {
@@ -319,3 +331,5 @@ export function parseProbeArgs(args: readonly string[]): { domain?: string; json
   }
   return { domain, json };
 }
+
+export * from "./report";
