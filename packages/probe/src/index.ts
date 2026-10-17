@@ -20,6 +20,15 @@ import { isSafeUrl } from "./url-safety";
 
 export { tomlHash } from "./toml-hash";
 export { isSafeUrl } from "./url-safety";
+export {
+  ANCHOR_KINDS,
+  isValidAnchorDomain,
+  loadFleet,
+  parseFleet,
+  type AnchorEntry,
+  type AnchorFleet,
+  type AnchorKind,
+} from "./fleet";
 
 /** SEP numbers in registry bit order. Must match SEP_NUMBERS in contracts/registry. */
 export const SEP_NUMBERS = [1, 6, 10, 12, 24, 31, 38] as const;
