@@ -108,3 +108,4 @@ export {
   Sep38QuoteProvider,
   ExternalQuoteProvider,
 } from "@corridor/adapter-kit";
+export { checkCompatibility } from "./compat";

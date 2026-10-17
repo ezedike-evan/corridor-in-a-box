@@ -20,7 +20,9 @@ import type { RouteResolver } from "@corridor/router";
 import {
   AdapterQuoteProvider,
   ExternalQuoteProvider,
+  toLegacy,
   type ExternalQuoteFn,
+  type OpenTransaction,
   type QuoteProvider,
 } from "@corridor/adapter-kit";
 import { canTransition, isTerminal, type CorridorState } from "./state";
@@ -53,6 +55,7 @@ import {
 } from "./verbs";
 import type { AnchorAdapter, TransactionStatus } from "@corridor/adapter-kit";
 import { defaultStrategies } from "./ports";
+import { checkCompatibility } from "./compat";
 import {
   noopMetrics,
   silentLogger,
@@ -418,6 +421,17 @@ export async function execute(
   });
   const { advance, die, finishFailure } = context;
 
+  const strategies = deps.strategies ?? defaultStrategies(deps.submitter);
+  const caps = adapter.capabilities();
+  const compat = checkCompatibility(corridor, caps, strategies);
+  if (!compat.ok) {
+    return die({
+      code: compat.error.code,
+      message: compat.error.message,
+      retryable: false,
+    });
+  }
+
   if (
     corridor.settlement.network === "public" &&
     route.trust === "manifest" &&
@@ -483,8 +497,10 @@ export async function execute(
   }
 
   // --- 2. comply --------------------------------------------------------
-  const c = await timed("comply", () => comply(adapter, intent, corridor));
-  if (!c.ok) return die(c.error);
+  if (caps.kyc !== "none") {
+    const c = await timed("comply", () => comply(adapter, intent, corridor));
+    if (!c.ok) return die(c.error);
+  }
   {
     const t = await advance("compliant");
     if (!t.ok) return die(t.error);
@@ -494,9 +510,10 @@ export async function execute(
   const opened = await timed("open", () => open(adapter, intent, q.value, corridor));
   if (!opened.ok) return die(opened.error);
   run.transactionId = opened.value.transactionId;
-  run.depositAddress = opened.value.depositAddress;
-  run.memo = opened.value.memo;
-  run.memoType = opened.value.memoType;
+  const legacy = toLegacy(opened.value);
+  run.depositAddress = legacy.depositAddress;
+  run.memo = legacy.memo;
+  run.memoType = legacy.memoType;
   {
     const t = await advance("opened");
     if (!t.ok) return die(t.error);
@@ -721,14 +738,17 @@ async function emitVerification(
 type Err = { ok: false; error: CorridorError };
 
 function settlementRequestFor(
-  opened: { depositAddress: string; memo?: string; memoType?: "text" | "hash" | "id" },
+  opened:
+    | OpenTransaction
+    | { depositAddress?: string; memo?: string; memoType?: "text" | "hash" | "id" },
   q: { sourceAmount: { amount: string } },
   corridor: Corridor,
 ): SettlementRequest {
+  const legacy = "instructions" in opened ? toLegacy(opened) : opened;
   return {
-    to: opened.depositAddress,
-    memo: opened.memo,
-    memoType: opened.memoType,
+    to: legacy.depositAddress ?? "",
+    memo: legacy.memo,
+    memoType: legacy.memoType,
     amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
     corridor,
   };
@@ -1189,8 +1209,10 @@ async function resumeRun(
           "pre-settle gate cannot be re-evaluated on resume; operator review needed",
         );
       }
-      const compliance = await comply(route.receiving, intent, corridor);
-      if (!compliance.ok) return context.die(compliance.error);
+      if (route.receiving.capabilities().kyc !== "none") {
+        const compliance = await comply(route.receiving, intent, corridor);
+        if (!compliance.ok) return context.die(compliance.error);
+      }
       const entered = await enterSettling();
       if (!entered.ok) return context.die(entered.error);
       const submitted = await deps.submitter.submit(request);
