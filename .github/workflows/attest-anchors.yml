@@ -58,12 +58,25 @@ jobs:
         run: |
           domains="$DOMAINS"
           if [ -z "$domains" ]; then
-            domains=$(node -p "require('./contracts/anchors.json').domains.join(' ')")
+            pnpm sweep:anchors --out sweep/
+          else
+            pnpm sweep:anchors --out sweep/ $domains
           fi
-          echo "probing: $domains"
-          for d in $domains; do
-            pnpm probe:anchor "$d"
-          done
+
+      - name: Publish sweep summary
+        if: always()
+        run: |
+          if [ -f sweep/sweep.md ]; then
+            cat sweep/sweep.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload sweep artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: anchor-sweep
+          path: sweep/
+          retention-days: 30
 
       - name: Submit attestations
         if: ${{ env.ATTESTER_SECRET != '' }}
