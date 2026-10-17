@@ -221,10 +221,19 @@ Every record carries `attested_ledger`, so staleness is visible on chain. An
 attestation is never wrong, only old, and a consumer must be able to see the
 difference without trusting the writer to have pruned it.
 
+Soroban storage expires, so a record nobody touches would eventually be archived
+and `get_anchor` would fail. Every write extends the entry it touched and the
+contract instance by 90 days (when under 30 are left), and `bump(domain)` lets
+anyone extend a record without re-attesting it; it leaves `attested_ledger`
+alone, so a bumped record is kept alive but not made to look fresh. An entry that
+has already been archived has to be restored first (a `RestoreFootprint`
+operation, `stellar contract restore`); see the header of
+`contracts/registry/src/lib.rs`.
+
 ```bash
 pnpm probe:anchor testanchor.stellar.org   # probe a live anchor, print the facts
 pnpm registry:read                         # read the registry via @corridor/registry
-cd contracts && cargo test                 # 21 contract tests
+cd contracts && cargo test                 # 38 contract tests
 ```
 
 ## Proof against a real SEP-31 anchor
