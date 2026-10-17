@@ -1,0 +1,22 @@
+# Gitleaks configuration for the Corridor repository.
+# Extends the default ruleset and adds a Stellar secret-seed rule.
+
+[extend]
+useDefault = true
+
+[[rules]]id = "stellar-secret-seed"
+description = "Stellar secret seed (S...) detected"
+regex = '\bS[A-Z2-7]{55}\b'
+entropy = 4.0
+tags = ["key", "stellar", "secret"]
+
+# Allowlist known public test fixtures and placeholders so the current tree passes.
+[[rules.allowlists]]description = "Known public test fixtures and placeholders"
+regexes = [
+  '#{55,}',
+  '[aA-zZ0-9]*PLACEHOLDER[aA-zA0-9]*',
+  '[aA-zZ0-9]*EXAMPLE[aA-zZ0-9]*',
+]
+paths = [
+  (^)|(/)\.env\.example$,
+]
