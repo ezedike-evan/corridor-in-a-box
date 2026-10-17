@@ -45,6 +45,7 @@
     "@corridor/registry": "workspace:*",
     "@corridor/router": "workspace:*",
     "@corridor/sep31": "workspace:*",
+    "@corridor/sep6": "workspace:*",
     "@corridor/service": "workspace:*",
     "@corridor/stellar": "workspace:*",
     "@corridor/types": "workspace:*"

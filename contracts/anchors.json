@@ -15,11 +15,24 @@
     "probe against it directly: SEP-10 auth and SEP-31 (receives NGNT, USDC) both",
     "pass; no SEP-38 quote server is published.",
     "",
+    "mint.zeam.money is Zeam (South Africa; see corridors/zeam.corridor.yaml).",
+    "Confirmed 2026-10-17 by running the probe against it directly: SEP-10 signed",
+    "a challenge and got a JWT, SEP-38 returned a firm quote, SEP-12 answered, and",
+    "SEP-31 /info receives USDC. It advertises no TRANSFER_SERVER, so SEP-6 is not",
+    "on offer even though the Anchor Directory entry lists it as a supported",
+    "standard — the toml, not the directory, decides which protocol we can drive.",
+    "",
     "stellar.org and lobstr.co were probed by hand during development and already",
     "hold records in the registry. They are listed here because a record nobody",
     "refreshes decays into a stale row the scheduled job will never touch — the",
     "registry's whole claim is that staleness is visible AND fixable, so every",
     "domain it holds belongs in this list."
   ],
-  "domains": ["testanchor.stellar.org", "cowrie.exchange", "stellar.org", "lobstr.co"]
+  "domains": [
+    "testanchor.stellar.org",
+    "cowrie.exchange",
+    "mint.zeam.money",
+    "stellar.org",
+    "lobstr.co"
+  ]
 }

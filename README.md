@@ -12,12 +12,14 @@ corridor is a new `*.corridor.yaml` file — not a fork.
 **Live demo:** [corridor-in-a-box.vercel.app](https://corridor-in-a-box.vercel.app)
 — the corridor dashboard and a payment walkthrough. **The walkthrough is a
 simulation**: it drives a re-implementation of the state machine and never
-touches the Stellar network. `ng-cowrie` is the one exception: its endpoints
-were probed against Cowrie's production API on 2026-08-11 — SEP-10 signed a
-challenge, SEP-12 answered, and SEP-31 `/info` returned a non-empty receive
-list — so it renders `VERIFIED`. That means endpoints were checked, not that
-money moved: Cowrie publishes no SEP-38 quote server, no payment has been
-attempted, and no business relationship is in place. Every other shipped
+touches the Stellar network. `ng-cowrie` is the one exception **in the demo's
+bundled lanes**: its endpoints were probed against Cowrie's production API on
+2026-08-11 — SEP-10 signed a challenge, SEP-12 answered, and SEP-31 `/info`
+returned a non-empty receive list — so it renders `VERIFIED`. That means
+endpoints were checked, not that money moved: Cowrie publishes no SEP-38 quote
+server, no payment has been attempted, and no business relationship is in place.
+`corridors/zeam.corridor.yaml` is a second probed lane in the repo — `VERIFIED`
+since 2026-10-17, see the sequencing table below — and every other shipped
 manifest renders `UNVERIFIED` or `NOT RUNNABLE` (see [Liveness](#liveness-has-four-states-and-green-has-to-be-earned)).
 
 This repo contains the **open, runnable corridor engine** and the `RouteResolver`
@@ -67,6 +69,9 @@ packages/
   attester/      attestation writer for the conformance registry
   sep31/         ONE generic adapter for any standards-compliant SEP-31
                  anchor (SEP-10 auth + SEP-12 KYC; crypto behind an injected signer)
+  sep6/          the same port for a SEP-6 withdrawal anchor: opens
+                 GET /withdraw-exchange and reads the deposit instructions back
+                 from GET /transaction, so settle and reconcile are unchanged
   stellar/       the only package on the money path that touches the chain;
                  @stellar/stellar-sdk-backed settlement submitter + SEP-10 signer
   router/        RouteResolver seam — open interface + two resolvers (Static + Registry)
@@ -110,6 +115,7 @@ _live receiving anchor_ on the destination side, so corridors ship in this order
 | ------ | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet)                     | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.**                                                                       |
 | **#1** | `ng-cowrie.corridor.yaml` (USD → NGN via Cowrie Exchange) — **VERIFIED endpoints** | First real lane. Endpoints confirmed 2026-08-11 via `@corridor/probe`. `quote_source: external` (no SEP-38). No payment attempted, no business relationship in place — see the manifest's `status_note`. |
+| **#2** | `zeam.corridor.yaml` (USD → ZAR via Zeam) — **VERIFIED endpoints**                 | Second real lane, and the first with a firm-quote path: probed 2026-10-17, SEP-10/12/31/38 all answer and SEP-31 receives USDC. No payment attempted, no business relationship in place.                 |
 | later  | `ng-cn.corridor.yaml` (Nigeria → China)                                            | The headline case study. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else.                                                    |
 
 > **Template**: `mx-example.corridor.yaml` (Mexico) shows the _shape_ of a real
@@ -145,10 +151,11 @@ type a URL into a YAML file. So `corridor plan` and the dashboard report:
 | `PROVEN`       | A canary payment also completed through the lane, and that proof is still fresh.         |
 
 `VERIFIED` requires `dest.endpoints.endpoints_verified_at` — a date a human sets
-only after actually looking. `ng-cowrie` is `VERIFIED`: its endpoints were
-probed on 2026-08-11, and SEP-10, SEP-12, and SEP-31 answered. This does not
-mean money moved — Cowrie publishes no SEP-38 quote server, no payment has
-been attempted, and no business relationship is in place. Every other shipped
+only after actually looking. Two shipped manifests have it: `ng-cowrie`, probed
+on 2026-08-11 (SEP-10, SEP-12 and SEP-31 answered), and `zeam`, probed on
+2026-10-17 (SEP-10, SEP-12, SEP-31 and a firm SEP-38 quote). For both, this does
+not mean money moved — no payment has been attempted and no business relationship
+is in place, and Cowrie publishes no SEP-38 quote server. Every other shipped
 manifest is currently `UNVERIFIED` or `NOT RUNNABLE`. Green has to be earned;
 here, `VERIFIED` means endpoints were checked, not that a payment was made.
 

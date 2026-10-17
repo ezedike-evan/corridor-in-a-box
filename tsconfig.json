@@ -18,6 +18,7 @@
       "@corridor/manifest": ["./packages/manifest/src/index.ts"],
       "@corridor/adapter-kit": ["./packages/adapter-kit/src/index.ts"],
       "@corridor/sep31": ["./packages/sep31/src/index.ts"],
+      "@corridor/sep6": ["./packages/sep6/src/index.ts"],
       "@corridor/router": ["./packages/router/src/index.ts"],
       "@corridor/engine": ["./packages/engine/src/index.ts"],
       "@corridor/stellar": ["./packages/stellar/src/index.ts"],
