@@ -7,14 +7,14 @@
 // component is included or injected here.
 
 import type { Corridor } from "@corridor/manifest";
-import type { AnchorAdapter } from "@corridor/adapter-kit";
+import type { AnchorAdapter, SourceAnchorAdapter } from "@corridor/adapter-kit";
 import type { PaymentIntent } from "@corridor/types";
 
 export interface RouteDecision {
   /** The receiving anchor chosen for this payment. */
   readonly receiving: AnchorAdapter;
-  /** Reserved for split routing across multiple anchors (weights sum to 1). */
-  readonly split?: ReadonlyArray<{ adapter: AnchorAdapter; weight: number }>;
+  /** The source anchor that on-ramps the bridge asset, present when the route specifies one. */
+  readonly sending?: SourceAnchorAdapter;
   /** How the route decision was reached: verified against on-chain evidence or assumed from manifest. */
   readonly trust: "attested" | "manifest";
 }
@@ -25,6 +25,8 @@ export interface RouteResolver {
 
 export interface StaticRouteResolverOptions {
   readonly trustManifestWithoutAttestation?: boolean;
+  /** Optional source adapter factory for the on-ramp leg. */
+  readonly sourceAdapterFor?: (corridor: Corridor) => SourceAnchorAdapter;
 }
 
 /**
@@ -33,6 +35,8 @@ export interface StaticRouteResolverOptions {
  * the interface is an extension seam, not evidence of a separate closed repo.
  */
 export class StaticRouteResolver implements RouteResolver {
+  private readonly sourceAdapterFor?: (corridor: Corridor) => SourceAnchorAdapter;
+
   constructor(
     private readonly adapterFor: (corridor: Corridor) => AnchorAdapter,
     options?: StaticRouteResolverOptions,
@@ -42,11 +46,15 @@ export class StaticRouteResolver implements RouteResolver {
         "StaticRouteResolver requires explicit { trustManifestWithoutAttestation: true }. Use RegistryRouteResolver for verified routing.",
       );
     }
+    this.sourceAdapterFor = options.sourceAdapterFor;
   }
 
   async resolve(_intent: PaymentIntent, corridor: Corridor): Promise<RouteDecision> {
+    const receiving = this.adapterFor(corridor);
+    const sending = this.sourceAdapterFor?.(corridor);
     return {
-      receiving: this.adapterFor(corridor),
+      receiving,
+      ...(sending ? { sending } : {}),
       trust: "manifest",
     };
   }
@@ -54,10 +62,7 @@ export class StaticRouteResolver implements RouteResolver {
 
 // The registry-backed resolver: the evidence-based resolver, in code.
 // StaticRouteResolver above trusts the manifest; this one requires evidence.
-export {
-  RegistryRouteResolver,
-  UnattestedAnchorError,
-  isUnattestedDomainAllowed,
-  type AttestationSource,
-  type RegistryResolverOptions,
-} from "./registry-resolver";
+export { RegistryRouteResolver } from "./registry-resolver";
+export { UnattestedAnchorError } from "./registry-resolver";
+export { isUnattestedDomainAllowed } from "./registry-resolver";
+export type { AttestationSource, RegistryResolverOptions } from "./registry-resolver";

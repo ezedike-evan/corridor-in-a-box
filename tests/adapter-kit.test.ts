@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { conformanceSuite, createMockAdapter } from "@corridor/adapter-kit";
+import {
+  conformanceSuite,
+  createMockAdapter,
+  createMockSourceAdapter,
+} from "@corridor/adapter-kit";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
 import type { PaymentIntent } from "@corridor/types";
 
@@ -8,7 +12,7 @@ function corridor(): Corridor {
     id: "test",
     source: { name: "S", asset: "USDC", endpoints: { home_domain: "s.example" } },
     dest: { name: "D", asset: "iso4217:ARS", endpoints: { home_domain: "d.example" } },
-    fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
+    fx: { path: ["ARS", "USDC", "ARS"], "who holds_risk": "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
     settlement: { network: "public", asset_issuer: "GISSUER" },
     recovery: {},
@@ -205,7 +209,7 @@ describe("createMockAdapter", () => {
     if (r.ok) {
       expect(r.value.transactionId).toBe("tx_1");
       expect(r.value.status).toBe("pending");
-      expect(r.value.message).toContain("100.00 USDC");
+      expect(r.value.message).toContain("100.00 USDc");
     }
   });
 
@@ -230,5 +234,85 @@ describe("createMockAdapter", () => {
       status: "refunded",
       refundId: "ref_123",
     });
+  });
+});
+
+describe("createMockSourceAdapter", () => {
+  it("defaults name to mock-source-anchor", () => {
+    expect(createMockSourceAdapter().name).toBe("mock-source-anchor");
+  });
+
+  it("honors an overridden name", () => {
+    expect(createMockSourceAdapter({ name: "acme" }).name).toBe("acme");
+  });
+
+  it("reports deposit capability", () => {
+    const caps = createMockSourceAdapter().capabilities();
+    expect(caps.deposit).toBe(true);
+  });
+
+  it("openDeposit returns a transaction id and funding instructions", async () => {
+    const adapter = createMockSourceAdapter();
+    const r = await adapter.openDeposit(intent, corridor(), {
+      account: "GOPERATOR",
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.transactionId).toBe("dep_1");
+    expect(r.value.instructions.account).toBe("GOPERATOR");
+    expect(r.value.instructions.asset).toBe("USDC");
+    expect(r.value.instructions.amount).toBe("100");
+  });
+
+  it("openDeposit increments the counter per call", async () => {
+    const adapter = createMockSourceAdapter();
+    const a = await adapter.openDeposit(intent, corridor(), { account: "G"});
+    const b = await adapter.openDeposit(intent, corridor(), { account: "G"});
+    expect(a.ok && a.value.transactionId).toBe("dep_1");
+    expect(b.ok && b.value.transactionId).toBe("dep_2");
+  });
+
+  it("getDeposit reports completed by default", async () => {
+    const r = await createMockSourceAdapter().getDeposit("dep_1");
+    expect(r.ok && r.value).toEqual({ status: "completed", settled: true });
+  });
+
+  it("getDeposit reports pending when settled:false", async () => {
+    const r = await createMockSourceAdapter({ settled: false }).getDeposit("dep_1");
+    expect(r.ok && r.value).toEqual({ status: "pending_receiver", settled: false });
+  });
+
+  it("getDeposit reports terminal failure", async () => {
+    const r = await createMockSourceAdapter({ terminalFailure: true }).getDeposit(
+      "dep_1",
+    );
+    expect(r.ok && r.value).toEqual({
+      status: "error",
+      settled: false,
+      terminalFailure: true,
+    });
+  });
+
+  it("openDeposit fails when configured to fail", async () => {
+    const adapter = createMockSourceAdapter({ failOpen: true });
+    const r = await adapter.openDeposit(intent, corridor(), { account: "G"});
+    expect(r.ok).toBe(false);
+  });
+
+  it("openDeposit delays open when configured", async () => {
+    const adapter = createMockSourceAdapter({ delayMs: 10 });
+    const start = Date.now();
+    const r = await adapter.openDeposit(intent, corridor(), { account: "G" });
+    expect(r.ok).toBe(true);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(10);
+  });
+
+  it("quoteDeposit returns a quote with a future expiry", async () => {
+    const adapter = createMockSourceAdapter();
+    if (!adapter.quoteDeposit) throw new Error("expected quoteDeposit");
+    const r = await adapter.quoteDeposit(intent, corridor());
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(new Date(r.value.expiresAt).getTime()).toBeGreaterThan(Date.now());
   });
 });
