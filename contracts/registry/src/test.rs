@@ -6,12 +6,15 @@ use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Byte
 /// Bit indices, mirroring SEP_NUMBERS / PROBE_NAMES. Spelled out here rather
 /// than imported so a silent reordering in lib.rs fails these tests loudly.
 const SEP1: u32 = 1 << 0;
+const SEP6: u32 = 1 << 1;
 const SEP10: u32 = 1 << 2;
 const SEP12: u32 = 1 << 3;
 const SEP31: u32 = 1 << 5;
 const SEP38: u32 = 1 << 6;
 const PROBE_TOML: u32 = 1 << 0;
 const PROBE_SEP31_INFO: u32 = 1 << 4;
+const PROBE_SEP6_INFO: u32 = 1 << 5;
+const PROBE_SEP6_AUTH: u32 = 1 << 6;
 
 struct Fixture {
     env: Env,
@@ -165,6 +168,13 @@ fn rejects_bits_outside_the_defined_range() {
         &f.attester,
     );
     assert_eq!(res, Err(Ok(Error::UnknownBit)));
+
+    // Bit 7 is index 7 (the 8th bit), which is currently undefined for PROBE_NAMES.
+    let bit_7 = 1u32 << 7;
+    let res = f
+        .client
+        .try_put_anchor(&d, &SEP31, &hash(&f.env, 1), &bit_7, &0, &f.attester);
+    assert_eq!(res, Err(Ok(Error::UnknownBit)));
 }
 
 #[test]
@@ -220,6 +230,85 @@ fn serves_sep31_requires_both_advertised_and_probed() {
         &f.attester,
     );
     assert!(!f.client.serves_sep31(&d));
+
+    // Generic serves helper agrees
+    assert!(!f.client.serves(&d, &10));
+    assert!(!f.client.serves(&d, &999));
+}
+
+#[test]
+fn serves_sep6_requires_both_advertised_and_probed() {
+    let f = setup();
+    let d = domain(&f.env);
+
+    // Advertises SEP-6 but the probe was never run: not a yes.
+    f.client
+        .put_anchor(&d, &SEP6, &hash(&f.env, 1), &0, &0, &f.attester);
+    assert!(!f.client.serves_sep6(&d));
+    assert!(!f.client.serves(&d, &6));
+
+    // Probe ran and failed: still not a yes.
+    f.client.put_anchor(
+        &d,
+        &SEP6,
+        &hash(&f.env, 1),
+        &PROBE_SEP6_INFO,
+        &0,
+        &f.attester,
+    );
+    assert!(!f.client.serves_sep6(&d));
+    assert!(!f.client.serves(&d, &6));
+
+    // Advertised and probed green (sep6_info).
+    f.client.put_anchor(
+        &d,
+        &SEP6,
+        &hash(&f.env, 1),
+        &(PROBE_SEP6_INFO | PROBE_SEP6_AUTH),
+        &PROBE_SEP6_INFO,
+        &f.attester,
+    );
+    assert!(f.client.serves_sep6(&d));
+    assert!(f.client.serves(&d, &6));
+
+    // Probed green but no longer advertised: not a yes either.
+    f.client.put_anchor(
+        &d,
+        &SEP1,
+        &hash(&f.env, 1),
+        &PROBE_SEP6_INFO,
+        &PROBE_SEP6_INFO,
+        &f.attester,
+    );
+    assert!(!f.client.serves_sep6(&d));
+    assert!(!f.client.serves(&d, &6));
+}
+
+#[test]
+fn old_layout_record_still_answers_serves_sep31_correctly() {
+    let f = setup();
+    let d = domain(&f.env);
+
+    // Simulate an old-layout record written when PROBE_NAMES only had 5 bits (0..=4).
+    // It advertises SEP-31 and passed PROBE_TOML and PROBE_SEP31_INFO, but bits 5 and 6 (sep6) are 0.
+    let old_probes_run = PROBE_TOML | PROBE_SEP31_INFO;
+    let old_probes_passed = PROBE_TOML | PROBE_SEP31_INFO;
+    f.client.put_anchor(
+        &d,
+        &(SEP1 | SEP31),
+        &hash(&f.env, 1),
+        &old_probes_run,
+        &old_probes_passed,
+        &f.attester,
+    );
+
+    // serves_sep31 and serves(31) should answer true
+    assert!(f.client.serves_sep31(&d));
+    assert!(f.client.serves(&d, &31));
+
+    // serves_sep6 must be false for old records until re-attested
+    assert!(!f.client.serves_sep6(&d));
+    assert!(!f.client.serves(&d, &6));
 }
 
 // --- admin ---------------------------------------------------------------

@@ -30,6 +30,8 @@ export const PROBE_NAMES = [
   "sep38_quote",
   "sep12_status",
   "sep31_info",
+  "sep6_info",
+  "sep6_auth",
 ] as const;
 
 export type SepNumber = (typeof SEP_NUMBERS)[number];
