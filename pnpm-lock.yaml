@@ -32,6 +32,9 @@ importers:
       '@corridor/sep31':
         specifier: workspace:*
         version: link:packages/sep31
+      '@corridor/sep6':
+        specifier: workspace:*
+        version: link:packages/sep6
       '@corridor/service':
         specifier: workspace:*
         version: link:packages/service
@@ -205,6 +208,18 @@ importers:
       '@corridor/engine':
         specifier: workspace:*
         version: link:../engine
+      '@corridor/manifest':
+        specifier: workspace:*
+        version: link:../manifest
+      '@corridor/types':
+        specifier: workspace:*
+        version: link:../types
+
+  packages/sep6:
+    dependencies:
+      '@corridor/adapter-kit':
+        specifier: workspace:*
+        version: link:../adapter-kit
       '@corridor/manifest':
         specifier: workspace:*
         version: link:../manifest
