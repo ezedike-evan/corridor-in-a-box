@@ -7,6 +7,70 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — Zeam (South Africa) probed and added as the second VERIFIED lane ([#225](https://github.com/ezedike-evan/corridor-in-a-box/issues/225))
+
+`corridors/zeam.corridor.yaml` — USD → ZAR over `mint.zeam.money`, probed
+2026-10-17 with `@corridor/probe`: SEP-10 signed a challenge and got a JWT,
+SEP-38 returned a firm quote, SEP-12 answered, and SEP-31 `/info` receives USDC
+(toml sha256 `92a309791b0eefff…`). Unlike Cowrie, Zeam publishes
+`ANCHOR_QUOTE_SERVER`, so this lane keeps `fx.quote_source: sep38`.
+`contracts/anchors.json` now probes the domain on the scheduled attester job.
+
+The payout currency is ZAR, not the KES the issue assumed: Zeam's toml anchors
+`ZARZ` (fiat ZAR) and `GBPZ`, and its Anchor Directory entry lists the
+Democratic Republic of the Congo, Malawi, South Africa, Zambia and Zimbabwe.
+
+### Added — `@corridor/sep6`: a SEP-6 withdrawal adapter on the same port ([#197](https://github.com/ezedike-evan/corridor-in-a-box/issues/197))
+
+`packages/sep6` implements `AnchorAdapter` for a `dest.protocol: sep6` corridor,
+so the engine's `quote → comply → open → settle → reconcile` run needs no
+changes to drive a SEP-6 anchor: `openTransaction` returns the same flat
+`OpenTransaction` that `buildSettlementRequest` reads, and the on-chain leg
+still goes through `StellarPaymentStrategy`.
+
+- `GET {transfer_server}/withdraw-exchange` with query params, per SEP-6
+  v4.3.0. The issue text named `POST /transactions/withdraw-exchange`, a path no
+  version of the spec defines; verified live against
+  `testanchor.stellar.org` (`TRANSFER_SERVER = https://testanchor.stellar.org/sep6`),
+  where GET returns 200 `{"id": …}` and POST returns "Request method 'POST' is
+  not supported".
+- Because that response carries no account, `openTransaction` follows up with
+  exactly one authenticated `GET /transaction?id=` and reads
+  `withdraw_anchor_account` / `withdraw_memo` / `withdraw_memo_type`. If the
+  anchor still names no account the adapter refuses instead of returning an
+  empty address — non-retryable on purpose, since SEP-6 has no idempotent
+  re-open and an automatic retry would initiate a second withdrawal.
+- The KYC-shaped answers are refusals, not instructions:
+  `non_interactive_customer_info_needed` → `KYC_REQUIRED` listing the fields,
+  `customer_info_status` denied → `KYC_REJECTED`, pending/unknown →
+  `KYC_REQUIRED`. Matched on the body's `type` before the status code.
+- `SEP-10` auth is fail-closed and cached like `@corridor/sep31`, and
+  `mapSep6Status` keeps the fail-open-to-polling discipline while adding
+  `pending_user_transfer_start`/`_complete`, `pending_user`, `pending_trust`,
+  `on_hold` and the `no_market`/`too_small`/`too_large` terminals.
+- Deliberate floors, each naming the issue that owns the design: `requestQuote`
+  is minimal and refuses without a `quote_server` (#196), `ensureCompliance`
+  refuses without a `kyc_server` rather than assuming a KYC-less lane (#193),
+  and `requestRefund` returns `REFUND_UNSUPPORTED` without a network call, as
+  SEP-6 defines no sender-initiated refund.
+
+### Added — chaos suite: no money moves unless the gate passed ([#300](https://github.com/ezedike-evan/corridor-in-a-box/issues/300))
+
+`tests/chaos.test.ts` injects one failure at a time into every step — route
+resolution, the four adapter verbs, all seven pre-settle gate checks,
+`gate.evaluate`, settle, reconcile — across `throw` / `retryable` /
+`non_retryable` / `timeout`, sweeping the three rollback policies where recovery
+differs. Per cell it asserts `submit()` was never reached when a step before
+settle failed, that money moved at most once and only after the last gate
+evaluation fully passed, and that the persisted state matches the runbook's
+terminal set. Four crash-and-resume cases cover the idempotency conflicts and
+prove a resume never re-settles. A fake clock drives every timeout, so the suite
+adds no real waiting.
+
+Two tests record a documented discrepancy rather than papering over it: a throw
+from an adapter verb or from `submit()` is not caught by `run.ts`, so `execute()`
+rejects and the stored row stays non-terminal — only gate throws are fail-closed.
+
 ### Added — `--json` flag to `pnpm probe:anchor` (#232)
 
 - Adds `--json` flag parsing to `examples/probe-anchor.ts` accepted in any argv position.

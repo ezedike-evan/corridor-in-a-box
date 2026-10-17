@@ -67,6 +67,9 @@ packages/
   attester/      attestation writer for the conformance registry
   sep31/         ONE generic adapter for any standards-compliant SEP-31
                  anchor (SEP-10 auth + SEP-12 KYC; crypto behind an injected signer)
+  sep6/          the same port for a SEP-6 withdrawal anchor: opens
+                 GET /withdraw-exchange and reads the deposit instructions back
+                 from GET /transaction, so settle and reconcile are unchanged
   stellar/       the only package on the money path that touches the chain;
                  @stellar/stellar-sdk-backed settlement submitter + SEP-10 signer
   router/        RouteResolver seam — open interface + two resolvers (Static + Registry)
@@ -110,6 +113,7 @@ _live receiving anchor_ on the destination side, so corridors ship in this order
 | ------ | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **#0** | `reference.corridor.yaml` (Anchor Platform reference, testnet)                     | Run it yourself, no agreements. Proves the engine moves through all five verbs against a conformant SEP-31 server. **Start here.**                                                                       |
 | **#1** | `ng-cowrie.corridor.yaml` (USD → NGN via Cowrie Exchange) — **VERIFIED endpoints** | First real lane. Endpoints confirmed 2026-08-11 via `@corridor/probe`. `quote_source: external` (no SEP-38). No payment attempted, no business relationship in place — see the manifest's `status_note`. |
+| **#2** | `zeam.corridor.yaml` (USD → ZAR via Zeam) — **VERIFIED endpoints**                 | Second real lane, and the first with a firm-quote path: probed 2026-10-17, SEP-10/12/31/38 all answer and SEP-31 receives USDC. No payment attempted, no business relationship in place.                 |
 | later  | `ng-cn.corridor.yaml` (Nigeria → China)                                            | The headline case study. Becomes runnable on the same engine the day a compliant RMB SEP-31 off-ramp exists — fill in `dest.endpoints`, nothing else.                                                    |
 
 > **Template**: `mx-example.corridor.yaml` (Mexico) shows the _shape_ of a real
