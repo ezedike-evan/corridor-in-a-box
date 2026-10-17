@@ -16,7 +16,12 @@
 //   CORRIDOR_RATELIMIT_CAPACITY=20     # optional; omit to disable rate limiting
 //   CORRIDOR_RATELIMIT_REFILL_PER_SEC=5
 //   CORRIDORS_DIR=corridors            # optional
+//   CORRIDOR_RESOLVER_MODULE=path|pkg  # optional; omit = StaticRouteResolver
+//   CORRIDOR_RESOLVER_OPTIONS='{...}'  # optional; JSON options for the module
 //   pnpm serve
+//
+// The active resolver is logged at boot under `resolver:` in the startup
+// summary — see docs/route-resolver.md for the module contract.
 //
 // SAFETY: a corridor manifest with settlement.network=public is NOT served
 // unless CORRIDOR_ALLOW_MAINNET=1 — same guard as `pnpm testnet`, applied per
@@ -29,7 +34,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadCorridor, type Corridor } from "@corridor/manifest";
-import { StaticRouteResolver } from "@corridor/router";
+import { loadResolver, StaticRouteResolver, type RouteResolver } from "@corridor/router";
 import { Sep31Adapter } from "@corridor/sep31";
 import {
   LocalKeypairSigner,
@@ -48,6 +53,7 @@ import {
   type IdempotencyStore,
 } from "@corridor/engine";
 import { createService, gracefulShutdown } from "@corridor/service";
+import type { AnchorAdapter } from "@corridor/adapter-kit";
 
 function env(name: string, fallback?: string): string {
   const v = process.env[name] ?? fallback;
@@ -100,6 +106,43 @@ async function buildStore(): Promise<{ store: IdempotencyStore; close: () => Pro
   return { store: new PostgresIdempotencyStore(pool), close: () => pool.end() };
 }
 
+/**
+ * Which resolver this process routes with, decided by config rather than code:
+ * CORRIDOR_RESOLVER_MODULE names a module (filesystem path or installed
+ * package) loaded through loadResolver(); unset falls back to the open default.
+ * A named module that is missing or incompatible stops the boot — falling back
+ * to a weaker resolver because the strong one failed to load is exactly the
+ * behaviour a deploy-time injection seam must not have.
+ */
+async function buildResolver(adapterFor: (c: Corridor) => AnchorAdapter): Promise<{
+  resolver: RouteResolver;
+  label: string;
+}> {
+  const module = process.env.CORRIDOR_RESOLVER_MODULE;
+  if (!module) {
+    console.log("• resolver: StaticRouteResolver (default)");
+    return {
+      resolver: new StaticRouteResolver(adapterFor, { trustManifestWithoutAttestation: true }),
+      label: "StaticRouteResolver (default)",
+    };
+  }
+
+  const rawOptions = process.env.CORRIDOR_RESOLVER_OPTIONS;
+  let options: unknown;
+  if (rawOptions) {
+    try {
+      options = JSON.parse(rawOptions);
+    } catch {
+      console.error("✗ CORRIDOR_RESOLVER_OPTIONS is not valid JSON");
+      process.exit(2);
+    }
+  }
+
+  const resolver = await loadResolver({ module, options }, { adapterFor });
+  console.log(`• resolver: ${module} (CORRIDOR_RESOLVER_MODULE)`);
+  return { resolver, label: module };
+}
+
 async function main(): Promise<void> {
   const corridors = loadCorridors();
   if (corridors.size === 0) {
@@ -113,11 +156,11 @@ async function main(): Promise<void> {
   const submitter = new StellarSettlementSubmitter({ signer, horizonUrl });
   const { store, close } = await buildStore();
   const metrics = new PrometheusMetrics();
+  const adapterFor = (corridor: Corridor) => new Sep31Adapter(corridor, { sep10 });
+  const { resolver, label: resolverLabel } = await buildResolver(adapterFor);
 
   const deps: EngineDeps = {
-    resolver: new StaticRouteResolver((corridor) => new Sep31Adapter(corridor, { sep10 }), {
-      trustManifestWithoutAttestation: true,
-    }),
+    resolver,
     submitter,
     idempotency: store,
     audit: new InMemoryAuditLog(),
@@ -153,6 +196,7 @@ async function main(): Promise<void> {
     console.log(`  corridors: ${[...corridors.keys()].join(", ")}`);
     console.log(`  signer:    ${signer.publicKey}`);
     console.log(`  horizon:   ${horizonUrl}`);
+    console.log(`  resolver:  ${resolverLabel}`);
     console.log(`  auth:      ${apiKeys.length > 0 ? "API key required" : "none (dev)"}`);
     console.log(`  metrics:   GET /metrics\n`);
   });

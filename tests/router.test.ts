@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { RegistryRouteResolver, StaticRouteResolver } from "@corridor/router";
+import {
+  RegistryRouteResolver,
+  ResolverLoadError,
+  StaticRouteResolver,
+  UnattestedAnchorError,
+  loadResolver,
+  type LoadResolverCtx,
+  type RouteResolver,
+} from "@corridor/router";
 import { parseCorridor, type Corridor } from "@corridor/manifest";
 import type { AnchorAdapter } from "@corridor/adapter-kit";
 import type { PaymentIntent } from "@corridor/types";
@@ -106,5 +114,138 @@ describe("StaticRouteResolver", () => {
     await resolver.resolve(intent, c);
     await resolver.resolve(intent, c);
     expect(calls).toBe(2);
+  });
+});
+
+// --- loadResolver(): deploy-time injection of a RouteResolver module -------
+
+const ctx: LoadResolverCtx = { adapterFor: () => adapterStub };
+const FIXTURE = "./tests/fixtures/resolvers/ok-resolver.ts";
+
+describe("loadResolver", () => {
+  it("loads a fixture resolver module and routes through it", async () => {
+    const resolver = await loadResolver({ module: FIXTURE }, ctx);
+    const decision = await resolver.resolve(intent, corridor("c1"));
+    expect(decision.receiving).toBe(adapterStub);
+    expect(decision.trust).toBe("manifest");
+  });
+
+  it("passes options through to the module's factory", async () => {
+    const resolver = await loadResolver(
+      { module: FIXTURE, options: { trust: "attested" } },
+      ctx,
+    );
+    const decision = await resolver.resolve(intent, corridor("c1"));
+    expect(decision.trust).toBe("attested");
+  });
+
+  it("rejects a missing module with a load error naming it", async () => {
+    const missing = { module: "./tests/fixtures/resolvers/does-not-exist.ts" };
+    await expect(loadResolver(missing, ctx)).rejects.toThrow(ResolverLoadError);
+    await expect(loadResolver(missing, ctx)).rejects.toThrow(/could not be loaded/);
+  });
+
+  it("rejects a module declaring the wrong apiVersion", async () => {
+    await expect(
+      loadResolver({ module: "./tests/fixtures/resolvers/wrong-api-version.ts" }, ctx),
+    ).rejects.toThrow(/declares apiVersion .* expected/);
+  });
+
+  it("rejects a module with no default-exported factory", async () => {
+    await expect(
+      loadResolver({ module: "./tests/fixtures/resolvers/no-factory.ts" }, ctx),
+    ).rejects.toThrow(/default-export a factory/);
+  });
+
+  it("rejects a module whose product has no resolve function", async () => {
+    await expect(
+      loadResolver({ module: "./tests/fixtures/resolvers/no-resolve.ts" }, ctx),
+    ).rejects.toThrow(/did not return a RouteResolver \(no resolve function\)/);
+  });
+
+  // Never load from a URL: resolver code handles real money, so its provenance
+  // is a file somebody put on the machine, not whatever an http client fetches.
+  it("refuses to load a resolver from a URL", async () => {
+    await expect(
+      loadResolver({ module: "https://evil.example/resolver.js" }, ctx),
+    ).rejects.toThrow(/URLs are not loadable/);
+  });
+});
+
+// --- the worked example: examples/resolvers/allowlist-resolver.ts ----------
+// The third-party shape end to end: loaded THROUGH loadResolver(), gating in
+// front of the resolver it composes with rather than replacing it.
+
+const EXAMPLE = "./examples/resolvers/allowlist-resolver.ts";
+/** The fixture corridor's dest home_domain. */
+const EXAMPLE_DOMAIN = "d.example";
+
+function stubResolver(): RouteResolver & { readonly calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    async resolve(_intent, c) {
+      calls.push(c.id);
+      return { receiving: adapterStub, trust: "manifest" };
+    },
+  };
+}
+
+describe("examples/resolvers/allowlist-resolver.ts", () => {
+  it("loads through loadResolver() in the documented shape", async () => {
+    const resolver = await loadResolver(
+      { module: EXAMPLE, options: { domains: [EXAMPLE_DOMAIN], wrap: stubResolver() } },
+      ctx,
+    );
+    expect(typeof resolver.resolve).toBe("function");
+  });
+
+  it("refuses a destination domain outside the allowlist", async () => {
+    const wrapped = stubResolver();
+    const resolver = await loadResolver(
+      { module: EXAMPLE, options: { domains: ["other.example"], wrap: wrapped } },
+      ctx,
+    );
+    await expect(resolver.resolve(intent, corridor("c1"))).rejects.toThrow(
+      /not on the operator allowlist/,
+    );
+    // Refused BEFORE delegation: the wrapped resolver never saw the corridor.
+    expect(wrapped.calls).toHaveLength(0);
+  });
+
+  it("delegates a domain on the allowlist to the wrapped resolver", async () => {
+    const wrapped = stubResolver();
+    const resolver = await loadResolver(
+      { module: EXAMPLE, options: { domains: [EXAMPLE_DOMAIN], wrap: wrapped } },
+      ctx,
+    );
+    const decision = await resolver.resolve(intent, corridor("c1"));
+    expect(wrapped.calls).toEqual(["c1"]);
+    expect(decision.receiving).toBe(adapterStub);
+  });
+
+  // The allowlist is an extra door, not a replacement: an allowlisted domain
+  // still has to clear RegistryRouteResolver's attestation gate.
+  it("still applies RegistryRouteResolver by default when a domain is allowlisted", async () => {
+    const registry = {
+      servesSep31: async () => false,
+      staleness: async () => 0,
+      tomlHash: async () => "0".repeat(64),
+    };
+    const resolver = await loadResolver(
+      { module: EXAMPLE, options: { domains: [EXAMPLE_DOMAIN], registry } },
+      ctx,
+    );
+    await expect(resolver.resolve(intent, corridor("c1"))).rejects.toThrow(
+      UnattestedAnchorError,
+    );
+  });
+
+  // An empty allowlist is indistinguishable from a typo; failing the boot says
+  // so, instead of routing nothing and looking like an outage.
+  it("fails to load when the allowlist is empty", async () => {
+    await expect(loadResolver({ module: EXAMPLE, options: {} }, ctx)).rejects.toThrow(
+      /empty allowlist/,
+    );
   });
 });
