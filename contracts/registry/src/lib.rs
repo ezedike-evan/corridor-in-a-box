@@ -51,12 +51,14 @@ pub const SEP_NUMBERS: [u32; 7] = [1, 6, 10, 12, 24, 31, 38];
 /// `PROBE_NAMES[i]`. Kept separate from `seps` because "the toml claims SEP-31"
 /// and "a SEP-31 call actually succeeded" are different facts, and conflating
 /// them is how a registry starts asserting things nobody verified.
-pub const PROBE_NAMES: [&str; 5] = [
+pub const PROBE_NAMES: [&str; 7] = [
     "toml_fetch",   // stellar.toml fetched and parsed
     "sep10_auth",   // full SEP-10 challenge/response produced a JWT
     "sep38_quote",  // a firm SEP-38 quote came back with a future expiry
     "sep12_status", // SEP-12 customer status was readable
     "sep31_info",   // SEP-31 GET /info listed at least one receivable asset
+    "sep6_info",    // SEP-6 GET /info listed at least one withdraw asset
+    "sep6_auth",    // SEP-6 authenticated read succeeded
 ];
 
 /// Upper bound on registered domains. An unbounded list is an unbounded read

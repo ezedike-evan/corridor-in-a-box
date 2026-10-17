@@ -30,6 +30,8 @@ export const PROBE_NAMES = [
   "sep38_quote",
   "sep12_status",
   "sep31_info",
+  "sep6_info",
+  "sep6_auth",
 ] as const;
 
 export type SepNumber = (typeof SEP_NUMBERS)[number];
@@ -213,11 +215,12 @@ export async function probeAnchor(
       const buy = info.assets?.find((a) => a.asset.startsWith("iso4217:"));
       if (!sell || !buy) throw new Error("no stellar→fiat pair advertised");
 
+      const context = endpoint.has(6) && !endpoint.has(31) ? "sep6" : "sep31";
       const res = await get(`${sep38}/quote`, {
         method: "POST",
         headers: { "content-type": "application/json", ...authHeader },
         body: JSON.stringify({
-          context: "sep31",
+          context,
           sell_asset: sell.asset,
           buy_asset: buy.asset,
           sell_amount: "10",
@@ -266,6 +269,50 @@ export async function probeAnchor(
       record("sep31_info", true, `receives ${assets.join(", ")}`);
     } catch (e) {
       record("sep31_info", false, why(e));
+    }
+  }
+
+  // --- SEP-6: info and auth checks ---------------------------------------
+  const sep6 = endpoint.get(6);
+  if (sep6) {
+    let withdrawAssets: string[] = [];
+    try {
+      const res = await get(`${sep6}/info`);
+      if (!res.ok) throw new Error(`info HTTP ${res.status}`);
+      const j = (await res.json()) as {
+        withdraw?: Record<string, { enabled?: boolean }>;
+        "withdraw-exchange"?: Record<string, { enabled?: boolean }>;
+      };
+      const withdraw = j.withdraw ?? {};
+      const withdrawExchange = j["withdraw-exchange"] ?? {};
+      const enabledWithdraw = Object.entries(withdraw)
+        .filter(([, v]) => v?.enabled !== false)
+        .map(([k]) => k);
+      const enabledWithdrawExchange = Object.entries(withdrawExchange)
+        .filter(([, v]) => v?.enabled !== false)
+        .map(([k]) => k);
+      withdrawAssets = Array.from(new Set([...enabledWithdraw, ...enabledWithdrawExchange]));
+      if (withdrawAssets.length === 0) {
+        throw new Error(
+          "withdraw list is EMPTY — advertises SEP-6 but accepts no withdrawals",
+        );
+      }
+      record("sep6_info", true, `withdraws ${withdrawAssets.join(", ")}`);
+    } catch (e) {
+      record("sep6_info", false, why(e));
+    }
+
+    if (token) {
+      try {
+        const assetParam = withdrawAssets[0]
+          ? `?asset_code=${encodeURIComponent(withdrawAssets[0])}`
+          : "";
+        const res = await get(`${sep6}/transactions${assetParam}`, { headers: authHeader });
+        if (res.status >= 500) throw new Error(`HTTP ${res.status}`);
+        record("sep6_auth", true, `HTTP ${res.status}`);
+      } catch (e) {
+        record("sep6_auth", false, why(e));
+      }
     }
   }
 
