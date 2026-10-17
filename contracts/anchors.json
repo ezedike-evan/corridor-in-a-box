@@ -19,7 +19,12 @@
     "hold records in the registry. They are listed here because a record nobody",
     "refreshes decays into a stale row the scheduled job will never touch — the",
     "registry's whole claim is that staleness is visible AND fixable, so every",
-    "domain it holds belongs in this list."
+    "domain it holds belongs in this list.",
+    "",
+    "coins.ph (Coins.ph, Philippines) was added from the Stellar Anchor Directory.",
+    "Probe result: SEP-24/SEP-6 only — no SEP-31 receive side answers, so no corridor",
+    "manifest is written. Blocked on Scaffold @corridor/sep6 with Sep6Adapter and",
+    "GET /info parsing."
   ],
-  "domains": ["testanchor.stellar.org", "cowrie.exchange", "stellar.org", "lobstr.co"]
+  "domains": ["testanchor.stellar.org", "cowrie.exchange", "stellar.org", "lobstr.co", "coins.ph"]
 }
