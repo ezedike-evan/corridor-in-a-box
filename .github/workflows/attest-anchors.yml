@@ -61,15 +61,19 @@ jobs:
             domains=$(node -p "require('./contracts/anchors.json').domains.join(' ')")
           fi
           echo "probing: $domains"
-          for d in $domains; do
-            pnpm probe:anchor "$d"
-          done
+          pnpm probe:sweep $domains --out sweep.json
+
+      - name: Upload probe sweep artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: probe-sweep-${{ github.run_id }}
+          path: sweep.json
+          retention-days: 14
+          if-no-files-found: error
 
       - name: Submit attestations
         if: ${{ env.ATTESTER_SECRET != '' }}
-        env:
-          DOMAINS: ${{ inputs.domains }}
-        run: pnpm attest $DOMAINS
+        run: pnpm attest --from sweep.json
 
       # Unset secret on a MANUAL run is a fair state — someone is exercising the
       # probe path on purpose. Unset on the SCHEDULE is not: the only reason

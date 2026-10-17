@@ -319,3 +319,5 @@ export function parseProbeArgs(args: readonly string[]): { domain?: string; json
   }
   return { domain, json };
 }
+
+export * from "./loader";
