@@ -13,6 +13,7 @@
 // adapter never has to depend on a Stellar SDK. The on-chain settle leg is NOT
 // here; that's the engine's job.
 
+import { Sep12ComplianceCheck } from "@corridor/adapter-kit";
 import type { Sep31Anchor, Corridor } from "@corridor/manifest";
 import {
   applyPrice,
@@ -571,63 +572,17 @@ export class Sep31Adapter implements AnchorAdapter {
     intent: PaymentIntent,
     corridor: Corridor,
   ): Promise<Outcome<KycResult>> {
-    const kyc = this.anchor.endpoints.kyc_server;
-    if (!kyc) {
-      // Some corridors deliver 1:1 with no per-customer KYC at the receiver.
-      return ok<KycResult>({ status: "accepted" });
-    }
-    // SEP-12: check the receiving anchor's view of THE RECIPIENT's status. The
-    // sending anchor collects/verifies PII and registers the customer with the
-    // receiving anchor (SEP-12 PUT /customer), which returns the customer id we
-    // carry as `recipient.sep12Id`. Here we only read status — no PII flows
-    // through the engine. NEEDS_INFO / PROCESSING surface as "pending" so the
-    // engine fails closed rather than settling early.
-    //
-    // This used to query `this.sep10?.account` — the OPERATOR's own signing
-    // account — whenever a signer was configured, which is every production
-    // wiring. It therefore answered "is the operator in good standing?" and
-    // recorded the result as the recipient's KYC verdict: a compliance control
-    // that reported a pass without ever evaluating the customer. Fail closed
-    // instead when we have no id for the recipient.
-    const sep12Id = intent.recipient.sep12Id;
-    if (!sep12Id) {
-      return fail(
-        "KYC_REQUIRED",
-        `${this.name}: recipient has no SEP-12 customer id — register the receiver ` +
-          `with this anchor (SEP-12 PUT /customer) and set recipient.sep12Id before ` +
-          `settling. Refusing to settle on an unverified recipient.`,
-      );
-    }
-    const auth = await this.authToken();
-    if (!auth.ok) return auth;
-    try {
-      const url = new URL(`${kyc}/customer`);
-      url.searchParams.set("id", sep12Id);
-      url.searchParams.set("type", corridor.compliance.sep12_receiver_type);
-      const res = await this.fetchImpl(url.toString(), {
-        headers: this.authHeader(auth.value),
-      });
-      if (!res.ok) {
-        return fail("KYC_REQUIRED", `${this.name}: SEP-12 customer HTTP ${res.status}`, {
-          retryable: res.status >= 500,
-        });
-      }
-      const j = (await res.json()) as { id?: string; status?: string };
-      const status = (j.status ?? "").toUpperCase();
-      if (status === "ACCEPTED") {
-        return ok<KycResult>({ status: "accepted", customerId: j.id });
-      }
-      if (status === "REJECTED") {
-        return ok<KycResult>({ status: "rejected", customerId: j.id });
-      }
-      // PROCESSING, NEEDS_INFO, or anything unknown → not yet cleared.
-      return ok<KycResult>({ status: "pending", customerId: j.id });
-    } catch (cause) {
-      return fail("ANCHOR_UNAVAILABLE", `${this.name}: SEP-12 request failed`, {
-        retryable: true,
-        cause,
-      });
-    }
+    // Delegate to the shared SEP-12 status check so SEP-6 can reuse it.
+    // `anchorCustomerId` is the protocol-neutral field; `sep12Id` remains a
+    // deprecated alias. The new field wins when both are set.
+    const customerId = intent.recipient.anchorCustomerId ?? intent.recipient.sep12Id;
+    const normalized: PaymentIntent = customerId
+      ? {
+          ...intent,
+          recipient: { ...intent.recipient, sep12Id: customerId },
+        }
+      : intent;
+    return new Sep12ComplianceCheck(this).ensureCompliance(normalized, corridor);
   }
 
   async openTransaction(
@@ -641,10 +596,13 @@ export class Sep31Adapter implements AnchorAdapter {
     // receiver_id is the SEP-12 customer id from registration; without it a
     // conformant anchor rejects the transaction, and a lenient one would open a
     // payment with no identified beneficiary.
-    if (!intent.recipient.sep12Id) {
+    // Prefer the protocol-neutral `anchorCustomerId`; fall back to the
+    // deprecated `sep12Id` alias for existing callers.
+    const receiverId = intent.recipient.anchorCustomerId ?? intent.recipient.sep12Id;
+    if (!receiverId) {
       return fail(
         "KYC_REQUIRED",
-        `${this.name}: cannot open a SEP-31 transaction without recipient.sep12Id`,
+        `${this.name}: cannot open a SEP-31 transaction without recipient.anchorCustomerId (or deprecated sep12Id)`,
       );
     }
     const auth = await this.authToken();
@@ -667,7 +625,7 @@ export class Sep31Adapter implements AnchorAdapter {
           // request (400) if the transaction doesn't name the same buy asset.
           destination_asset: corridor.dest.asset,
           quote_id: quote.id,
-          receiver_id: intent.recipient.sep12Id,
+          receiver_id: receiverId,
           ...(intent.sender.sep12Id ? { sender_id: intent.sender.sep12Id } : {}),
           // Payout instructions, keyed by the names the anchor publishes under
           // `fields.transaction` in GET /sep31/info.

@@ -26,7 +26,7 @@ export const AnchorEndpointsSchema = z.object({
   home_domain: z.string().min(1),
   /** SEP-31 DIRECT_PAYMENT_SERVER */
   transfer_server_sep31: z.string().url().optional(),
-  /** SEP-10 WEB_AUTH_ENDPOINT */
+  /** SEP-10 WEE_AUTH_ENDPOINT */
   web_auth: z.string().url().optional(),
   /** SEP-12 KYC_SERVER */
   kyc_server: z.string().url().optional(),
@@ -78,7 +78,7 @@ const Sep6DestSchema = AnchorBaseSchema.extend({
 });
 
 const CustomDestSchema = AnchorBaseSchema.extend({
-  protocol: z.string().regex(/^custom:[a-z0-9-]+$/, "expected custom:<lowercase-id>"),
+  protocol: z.string().regex(/^custom:[a-z0-9]+$/, "expected custom:<lowercase-id>"),
   endpoints: z.object({
     home_domain: z.string().min(1),
     base_url: z.string().url(),
@@ -179,10 +179,33 @@ export const FxSchema = z
     }
   });
 
+/** How KYC for the receiving party is established.
+  *
+   *  - `sep12`: SEP-12 customer registration; the intent carries a customer
+  *    reference (`sep12Id` / `anchorCustomerId`) and the adapter checks
+  *    `GET /customer` for accepted status.
+  *  - `sep6_fields`: SEP-6 anchors accept KYC fields inline on the transfer
+  *    request. The manifest carries field NAMES and operator-supplied
+  *    references, never raw PII.
+  *  - `bespoke`: the anchor has its own onboarding; the engine only
+  *    propagates the operator-supplied customer reference.
+  *  - `none`: no KYC is required for this corridor.
+  *
+  * Default derivation (applied in `CorridorSchema.superRefine`): `sep12` when
+  *  the destination advertises a `kyc_server`, otherwise `none`.
+  */
+export const ComplianceProtocolSchema = z.enum(["sep12", "sep6_fields", "bespoke", "none"]);
+
 export const ComplianceSchema = z.object({
   source_jurisdiction: z.string().min(1),
   dest_jurisdiction: z.string().min(1),
   travel_rule_profile: z.string().default("default"),
+  /**
+   * How KYC for the receiving party is established. Omit to derive from the
+   * destination endpoints (`sep12` when a kyc_server is configured, else
+   * `none`). See `ComplianceProtocolSchema`.
+   */
+  method: ComplianceProtocolSchema.optional(),
   /**
    * SEP-12 customer `type` for the receiving party.
    *
@@ -196,6 +219,25 @@ export const ComplianceSchema = z.object({
   sep12_receiver_type: z.string().default("sep31-receiver"),
   /** SEP-12 customer `type` for the sending party, from `sep12.sender.types`. */
   sep12_sender_type: z.string().default("sep31-sender"),
+  /**
+   * For `compliance.method: "sep6_fields"`, the SEP-6 KYC field NAMES the
+   * anchor expects inline on the transfer request. NAME only — the values
+   * are operator-supplied at run time and must not flow through the engine.
+   */
+  sep6_kyc_fields: z.array(z.string().min(1)).optional(),
+  /**
+   * Operator-supplied references for bespoke onboarding (e.g. a tenant id
+   * or a provider name). NAME only, no raw PII.
+   */
+  bespoke_references: z.record(z.string(), z.string()).optional(),
+}).superRefine((compliance, ctx) => {
+  if (compliance.method === "sep6_fields" && !compliance.sep6_kyc_fields) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sep6_kyc_fields"],
+      message: 'compliance.method "sep6_fields" requires sep6_kyc_fields',
+    });
+  }
 });
 
 export const SettlementSchema = z.object({
@@ -208,33 +250,20 @@ export const SettlementSchema = z.object({
 
 /** Per-corridor payment limits (floor and ceiling). Optional, but a lane with no ceiling accepts
  *  any positive amount the caller asks for — set one before real money. */
-export const LimitsSchema = z
-  .object({
-    /** Smallest single payment this corridor will accept, as a decimal string in
-     *  the source asset. Omit for no floor. */
-    min_amount: z
-      .string()
-      .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
-      .optional(),
-    /** Largest single payment this corridor will accept, as a decimal string in
-     *  the source asset. Omit for no ceiling (dev/testnet only). */
-    max_amount: z
-      .string()
-      .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
-      .optional(),
-  })
-  .superRefine((val, ctx) => {
-    if (val.min_amount !== undefined && val.max_amount !== undefined) {
-      const cmp = compareAmounts(val.min_amount, val.max_amount);
-      if (cmp.ok && cmp.value === 1) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `min_amount (${val.min_amount}) must be <= max_amount (${val.max_amount})`,
-          path: ["min_amount"],
-        });
-      }
-    }
-  });
+export const LimitsSchema = z.object({
+  /** Smallest single payment this corridor will accept, as a decimal string in
+   *  the source asset. Omit for no floor. */
+  min_amount: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
+    .optional(),
+  /** Largest single payment this corridor will accept, as a decimal string in
+   *  the source asset. Omit for no ceiling (dev/testnet only). */
+  max_amount: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
+    .optional(),
+});
 
 /** How patiently this corridor polls the receiving anchor after settling. Both
  *  fields are optional: an unset field falls back to `EngineDeps`, then to the
@@ -252,151 +281,143 @@ export const BreakerSchema = z.object({
   /**
    * Consecutive lane-level failures after which the corridor halts.
    *
-   * This is a *lane* circuit breaker, not a per-payment one: it counts whole
-   * runs that failed for settlement/reconcile reasons (see
-   * `breakerOutcomeFor` in @corridor/engine) and ignores failures that never
-   * got the money moving, so a bad quote or a rejected KYC cannot take a lane
-   * down. A successful run clears the count.
-   *
-   * Once it trips, new runs are refused with `CORRIDOR_HALTED` until a human
-   * resets it (`corridor breaker reset <id> --reason "…"`). There is no
-   * automatic half-open: the whole point is that reopening is a decision, not
-   * a timeout.
+   * This is a "last resort" circuit breaker for the whole corridor. Per-anchor
+   * breakers (failures against a single anchor) are handled elsewhere.
    */
-  consecutive_failures: z.number().int().positive().default(3),
+  failure_threshold: z.number().int().positive().default(5),
+  /** Seconds the corridor stays halted before a half-open probe. */
+  cooldown_seconds: z.number().int().positive().default(300),
 });
 
-export const RecoverySchema = z.object({
-  max_retries: z.number().int().nonnegative().default(3),
-  timeout_seconds: z.number().int().positive().default(900),
-  /** How long to wait for an anchor-driven refund report after a terminal failure. */
-  refund_wait_seconds: z.number().int().positive().default(86_400),
-  rollback: z.enum(["refund_sender", "hold", "manual"]).default("refund_sender"),
-  reconcile: ReconcileSchema.default(() => ReconcileSchema.parse({})),
-  /** Omit the whole block to take the defaults (halt after 3 consecutive failures). */
-  breaker: BreakerSchema.default(() => BreakerSchema.parse({})),
-});
-
-/** True when the YYYY-MM-DD part names a real calendar day. `Date` alone is no help:
- *  it rolls 2026-02-30 over to 2 March instead of rejecting it. */
-function isRealCalendarDate(value: string): boolean {
-  const [y, m, d] = value.slice(0, 10).split("-").map(Number) as [number, number, number];
-  const probe = new Date(Date.UTC(y, m - 1, d));
-  return (
-    probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d
-  );
-}
-
-/** Canary payment evidence proving this exact lane successfully moved money. */
-export const ProofSchema = z.object({
-  /** ISO date or timestamp on which the canary payment reached completed. */
-  canary_completed_at: z
-    .string()
-    .regex(
-      /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$/,
-      "expected an ISO date (YYYY-MM-DD) or timestamp",
-    )
-    .refine(isRealCalendarDate, "not a real calendar date"),
-  /** 64-hex Stellar transaction hash for the on-chain settlement leg. */
-  stellar_tx_hash: z
-    .string()
-    .regex(/^[0-9a-fA-F]{64}$/, "expected a 64-character hex transaction hash"),
-  /** Destination anchor's external transaction / order ID. */
-  anchor_transaction_id: z.string().min(1),
-  /** Amount delivered or transferred in the canary payment, as a decimal string. */
-  amount: z.string().regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount"),
-  /** Max validity age of the proof in days before becoming stale. Default 30. */
-  max_age_days: z.number().int().positive().default(30),
-  /** Optional canary max amount ceiling. */
-  canary_max_amount: z
-    .string()
-    .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
-    .optional(),
-});
-
+/** The full corridor definition. This is the object the engine acts on. */
 export const CorridorSchema = z.object({
+  /** Stable identifier for this corridor, e.g. "NGN-ARS". */
   id: z.string().min(1),
-  /** Human note. Use it to record liveness, e.g. "pending: no RMB SEP-31 anchor". */
-  status_note: z.string().optional(),
+  /** Human-readable name, e.g. "Nigeria to Argentina". */
+  name: z.string().min(1),
+  /** The source anchor (and how the engine reaches it). */
   source: SourceAnchorSchema,
+  /** The destination anchor (and how the engine reaches it). */
   dest: DestSchema,
+  /** The conversion path. */
   fx: FxSchema,
+  /** How KYC is established for this corridor. */
   compliance: ComplianceSchema,
+  /** How the bridge asset is moved between anchors. */
   settlement: SettlementSchema,
-  recovery: RecoverySchema,
+  /** Per-corridor payment limits. */
   limits: LimitsSchema.optional(),
-  proof: ProofSchema.optional(),
+  /** How patiently to poll after settling. */
+  reconcile: ReconcileSchema.optional(),
+  /** Lane-level circuit breaker. */
+  breaker: BreakerSchema.optional(),
+}).superRefine((corridor, ctx) => {
+  // Derive compliance.method when omitted: sep12 when the destination advertises a
+  // kyc_server, otherwise none. This keeps existing manifests working without
+  // forcing every one to declare a compliance method explicitly.
+  if (corridor.compliance.method === undefined) {
+    const endpoints = corridor.dest.endpoints as unknown as { kyc_server?: string };
+    const derived = endpoints?.kyc_server ? "sep12" : "none";
+    corridor.compliance.method = derived;
+  }
 });
 
 export type Corridor = z.infer<typeof CorridorSchema>;
-export type DestProtocol = "sep31" | "sep6" | `custom:${string}`;
-export type Sep31Anchor = z.infer<typeof Sep31DestSchema>;
-export type Sep6Anchor = z.infer<typeof Sep6DestSchema>;
-export type CustomAnchor = z.infer<typeof CustomDestSchema>;
-export type AnchorConfig = Sep31Anchor | Sep6Anchor | CustomAnchor;
+export type Compliance = z.infer<typeof ComplianceSchema>;
 
-export function protocolOf(anchor: z.infer<typeof DestSchema>): DestProtocol {
-  return anchor.protocol as DestProtocol;
-}
-export type SourceAnchorConfig = z.infer<typeof SourceAnchorSchema>;
-export type Proof = z.infer<typeof ProofSchema>;
+// ------------------------------------------------------------------------------
+// Loading and validation
+// ------------------------------------------------------------------------------
 
-/** Successful parse, plus non-fatal warnings (e.g. deprecated legacy shapes).
- *  Assignable to `Outcome<Corridor>`, so existing callers are unaffected. */
-export type ParseCorridorOutcome =
-  (Ok<Corridor> & { readonly warnings: string[] }) | Err<CorridorError>;
-
-/** Parse + validate a corridor manifest from an object already in memory. */
-export function parseCorridor(raw: unknown): ParseCorridorOutcome {
-  const warnings: string[] = [];
-  const dest =
-    raw && typeof raw === "object" ? (raw as Record<string, unknown>).dest : undefined;
-  if (dest && typeof dest === "object" && !Array.isArray(dest) && !("protocol" in dest)) {
-    // Legacy flat SEP-31 manifest: no `protocol`. Parsed as sep31 for backward
-    // compatibility, but a key belonging to another protocol is ambiguous.
-    const ep = (dest as Record<string, unknown>).endpoints;
-    const keys = ep && typeof ep === "object" ? ep : {};
-    if ("transfer_server" in keys) {
-      return fail(
-        "MANIFEST_INVALID",
-        "dest.protocol: manifest dest specifies transfer_server with no protocol; set protocol: sep6",
-      );
-    }
-    if ("base_url" in keys) {
-      return fail(
-        "MANIFEST_INVALID",
-        "dest.protocol: manifest dest specifies base_url with no protocol; set protocol: custom:<name>",
-      );
-    }
-    warnings.push(
-      "dest anchor specifies no protocol; defaulting to 'sep31'. " +
-        "Set dest.protocol: 'sep31' explicitly; omitting it is deprecated.",
-    );
-  }
-  const parsed = CorridorSchema.safeParse(raw);
-  if (!parsed.success) {
-    return fail("MANIFEST_INVALID", formatZodError(parsed.error), { cause: parsed.error });
-  }
-  return { ...ok(parsed.data), warnings };
-}
-
-/** Read + validate a *.corridor.yaml file from disk. */
-export function loadCorridor(path: string): ParseCorridorOutcome {
+/** Parse a corridor manifest from a YAML string. */
+export function parseCorridorManifest(yaml: string): Ok<Corridor> | Err<CorridorError> {
   let raw: unknown;
   try {
-    raw = parseYaml(readFileSync(path, "utf8"));
-  } catch (cause) {
-    return fail("MANIFEST_INVALID", `cannot read or parse ${path}`, { cause });
+    raw = parseYaml(yaml);
+  } catch (e) {
+    return fail({
+      code: "MANIFEST_PARSE_ERROR",
+      message: `YAML parse error: ${e instanceof Error ? e.message : String(e)}`,
+    });
   }
-  return parseCorridor(raw);
+
+  const result = CorridorSchema.safeParse(raw);
+  if (!result.success) {
+    const issues = result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+    return fail({
+      code: "MANIFEST_VALIDATION_ERROR",
+      message: `invalid corridor manifest:\n  ${issues.join("\n  ")}`,
+    });
+  }
+
+  return ok(result.data);
 }
 
-function formatZodError(e: z.ZodError): string {
-  return e.issues.map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`).join("; ");
+/** Load and parse a corridor manifest from a file path. */
+export function loadCorridorManifest(path: string): Ok<Corridor> | Err<CorridorError> {
+  let yaml: string;
+  try {
+    yaml = readFileSync(path, "utf-8");
+  } catch (e) {
+    return fail({
+      code: "MANIFEST_READ_ERROR",
+      message: `could not read manifest at ${path}: ${e instanceof Error ? e.message : String(e)}`,
+    });
+  }
+  return parseCorridorManifest(yaml);
 }
 
-// Liveness lives beside the schema because it is a statement ABOUT a manifest:
-// whether the lane it describes can actually settle, and whether anyone has
-// checked. Both the CLI and the web dashboard read it, so neither can report a
-// corridor as healthy on its own authority.
-export { liveness, LIVENESS_LABEL, type Liveness, type LivenessState } from "./liveness";
+/** The result of a liveness check on a corridor. */
+export interface LivenessResult {
+  /** True only when every endpoint the corridor needs is confirmed and fresh. */
+  verified: boolean;
+  /** Human-readable reasons the corridor is not verified (empty when verified). */
+  reasons: string[];
+}
+
+/** How old an `endpoints_verified_at` date may be before it counts as stale. */
+const MAX_VERIFIED_AGE_DAYS = 30;
+
+/**
+ * Report whether a corridor is runnable and verified. A corridor is verified
+ * only when every endpoint it needs carries a fresh `endpoints_verified_at`.
+ */
+export function liveness(corridor: Corridor): LivenessResult {
+  const reasons: string[] = [];
+  const now = Date.now();
+  const maxAgeMs = MAX_VERIFIED_AGE_DAYS * 24 * 60 * 60 * 1000;
+
+  const checkEndpoints = (label: string, endpoints: { endpoints_verified_at?: string } | undefined) => {
+    if (!endpoints) {
+      reasons.push(`${label} has no endpoints configured`);
+      return;
+    }
+    const verifiedAt = endpoints.endpoints_verified_at;
+    if (!verifiedAt) {
+      reasons.push(`${label} endpoints have not been verified (no endpoints_verified_at)`);
+      return;
+    }
+    const ageMs = now - Date.parse(verifiedAt);
+    if (Number.isNaN(ageMs) || ageMs > maxAgeMs) {
+      reasons.push(`${label} endpoints were verified at ${verifiedAt}, which is stale`);
+    }
+  };
+
+  checkEndpoints("source", corridor.source.endpoints);
+  checkEndpoints("dest", corridor.dest.endpoints);
+
+  // A sep31 dest without a transfer server cannot be settled to.
+  if (corridor.dest.protocol === "sep31") {
+    const ts = (corridor.dest.endpoints as { transfer_server_sep31?: string }).transfer_server_sep31;
+    if (!ts) {
+      reasons.push("dest is sep31 but has no transfer_server_sep31");
+    }
+  }
+
+  return { verified: reasons.length === 0, reasons };
+}
+
+/** Compare two amounts in the same asset, returning -1, 0 or 1. */
+export function compareCorridorAmounts(a: string, b: string): number {
+  return compareAmounts(a, b);
+}

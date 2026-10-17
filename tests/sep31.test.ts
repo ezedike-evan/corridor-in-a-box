@@ -15,6 +15,7 @@ import {
 } from "@corridor/sep31";
 import { fail, ok, type PaymentIntent } from "@corridor/types";
 import { CompositeGate, type GateContext } from "@corridor/engine";
+import { Sep12ComplianceCheck } from "@corridor/adapter-kit";
 import type { TransactionStatus } from "@corridor/adapter-kit";
 
 const PASSPHRASE = "Test SDF Network ; September 2015";
@@ -91,11 +92,12 @@ const intent: PaymentIntent = {
   idempotencyKey: "k",
   corridorId: "test",
   sender: { id: "s" },
-  // sep12Id is the customer id the RECEIVING anchor issued at registration. It
-  // is what SEP-12 status is looked up by and what SEP-31 open sends as
-  // receiver_id; without it the adapter fails closed rather than checking the
-  // operator's own account (see tests/security.test.ts).
-  recipient: { id: "recipient-acct", sep12Id: "anchor-cust-1" },
+  // anchorCustomerId is the protocol-neutral customer id the RECEIVING anchor
+  // issued at registration (sep12Id is the deprecated SEP-12 alias). It is what
+  // SEP-12 status is looked up by and what SEP-31 open sends as receiver_id;
+  // without it the adapter fails closed rather than checking the operator's own
+  // account (see tests/security.test.ts).
+  recipient: { id: "recipient-acct", anchorCustomerId: "anchor-cust-1" },
   sourceAmount: { asset: "USDC", amount: "100" },
 };
 
@@ -718,6 +720,49 @@ describe("SEP-12 compliance", () => {
       const r = await adapter.ensureCompliance(intent, c);
       expect(r.ok && r.value.status).toBe(expected);
     }
+  });
+
+  it("honours anchorCustomerId when sep12Id is absent", async () => {
+    const c = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const { fn, calls } = fakeFetch({
+      "GET /sep12/customer": res({ id: "c1", status: "ACCEPTED" }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const intentAnchorId: PaymentIntent = {
+      ...intent,
+      recipient: { id: "recipient-acct", anchorCustomerId: "anchor-cust-2" },
+    };
+    const r = await adapter.ensureCompliance(intentAnchorId, c);
+    expect(r.ok && r.value.status).toBe("accepted");
+    const call = calls.find((x) => x.url.includes("/sep12/customer"));
+    expect(call?.url).toContain("id=anchor-cust-2");
+  });
+
+  it("prefers anchorCustomerId over sep12Id when both are set", async () => {
+    const c = corridor({
+      transfer_server_sep31: "https://d.example/sep31",
+      kyc_server: "https://d.example/sep12",
+    });
+    const { fn, calls } = fakeFetch({
+      "GET /sep12/customer": res({ id: "c1", status: "ACCEPTED" }),
+    });
+    const adapter = new Sep31Adapter(c, { fetchImpl: fn });
+    const intentBoth: PaymentIntent = {
+      ...intent,
+      recipient: {
+        id: "recipient-acct",
+        sep12Id: "anchor-cust-1",
+        anchorCustomerId: "anchor-cust-2",
+      },
+    };
+    const r = await adapter.ensureCompliance(intentBoth, c);
+    expect(r.ok && r.value.status).toBe("accepted");
+    const call = calls.find((x) => x.url.includes("/sep12/customer"));
+    expect(call?.url).toContain("id=anchor-cust-2");
+    expect(call?.url).not.toContain("id=anchor-cust-1");
   });
 });
 
