@@ -43,10 +43,11 @@ import {
   parseBreakerArgs,
   type BreakerCommand,
 } from "./breaker";
+import { formatLintResult, lintCorridor } from "./lint";
 
 /** The first line is the main usage text; the breaker help follows it. */
 const USAGE = [
-  "usage: corridor <validate|plan|canary> <file.corridor.yaml> [options] | runs list --state held | resolve <key> --outcome <outcome> --note <text>",
+  "usage: corridor <validate|plan|lint|canary> <file.corridor.yaml> [options] | runs list --state held | resolve <key> --outcome <outcome> --note <text>",
   '       corridor breaker <status [corridorId] | reset <corridorId> --reason "…">',
   "",
   "corridor breaker — inspect and reopen halted lanes (reads DATABASE_URL):",
@@ -66,7 +67,7 @@ async function main(argv: string[]): Promise<number> {
   }
   if (cmd === "resolve") return resolveCommand(argv.slice(1));
   if (cmd === "breaker") return breakerCommand(argv.slice(1));
-  if (!cmd || (cmd !== "validate" && cmd !== "plan" && cmd !== "canary")) {
+  if (!cmd || (cmd !== "validate" && cmd !== "plan" && cmd !== "lint" && cmd !== "canary")) {
     console.error(USAGE);
     return EXIT_USAGE;
   }
@@ -189,6 +190,24 @@ async function main(argv: string[]): Promise<number> {
   if (cmd === "validate") {
     console.log(`✓ ${file} is a valid corridor manifest (id="${c.id}")`);
     return EXIT_OK;
+  }
+
+  if (cmd === "lint") {
+    try {
+      const result = await lintCorridor(c);
+      const output = formatLintResult(result);
+      if (result.ok) {
+        console.log(output);
+        return EXIT_OK;
+      }
+      console.error(output);
+      return EXIT_FAILED;
+    } catch (e) {
+      console.error(
+        `✗ ${c.id} (${c.dest.endpoints.home_domain}): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return EXIT_FAILED;
+    }
   }
 
   printPlan(c);

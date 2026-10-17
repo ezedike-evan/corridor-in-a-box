@@ -2,19 +2,23 @@ import { describe, expect, it } from "vitest";
 import { isValidAnchorDomain, loadFleet, parseFleet } from "../packages/probe/src/fleet";
 
 describe("contracts/anchors.json fleet", () => {
-  it("parses contracts/anchors.json and migrates the four existing domains with honest kinds", () => {
+  it("parses contracts/anchors.json and migrates the existing domains with honest kinds", () => {
     const fleet = loadFleet();
     expect(fleet.domains).toEqual([
       "testanchor.stellar.org",
       "cowrie.exchange",
       "stellar.org",
       "lobstr.co",
+      "blindpay.com",
+      "mykobo.co",
     ]);
     expect(fleet.anchors.map((a) => ({ domain: a.domain, kind: a.kind }))).toEqual([
       { domain: "testanchor.stellar.org", kind: "test" },
       { domain: "cowrie.exchange", kind: "offramp" },
       { domain: "stellar.org", kind: "other" },
       { domain: "lobstr.co", kind: "other" },
+      { domain: "blindpay.com", kind: "other" },
+      { domain: "mykobo.co", kind: "other" },
     ]);
   });
 
