@@ -14,6 +14,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 - Update `Sep31Adapter` and `createMockAdapter` to return `instructions` with `kind: "stellar_payment"`.
 - Update `settle()` in `@corridor/engine` to switch on `instructions.kind` and fail closed (`SETTLEMENT_FAILED`, non-retryable) on unhandled instruction kinds before attempting payment submission.
 
+### Added — `--json` flag to `pnpm probe:anchor` (#232)
+
+- Adds `--json` flag parsing to `examples/probe-anchor.ts` accepted in any argv position.
+- Suppresses banner and human logs when `--json` is supplied, streaming only the serialized JSON probe result to stdout.
+- Introduces `formatProbeResultJson` and `parseProbeArgs` in `@corridor/probe`, formatting raw bitmasks alongside decoded SEP numbers and executed/passed probe lists.
+
+### Fixed — a resumed recovery run reports its real cause to the circuit breaker
+
 After a restart, a run resumed from `recovering` or `refund_pending` used to be
 judged by a synthesized `RECONCILE_MISMATCH` ("receiving transaction … was
 refunded"), so the lane's stored `lastError` never showed what actually went

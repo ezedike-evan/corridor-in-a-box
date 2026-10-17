@@ -162,7 +162,7 @@ up() {
   # Pull the platform's own config out of the image rather than vendoring a copy
   # that would drift. `--test-profile-runner` extracts it to a temp dir on boot.
   if [ ! -f "$CONFIG_DIR/config.env" ]; then
-    log "extracting config from $AP_IMAGE…"
+    log "extracting config from ${AP_IMAGE}…"
     mkdir -p "$CONFIG_DIR"
     podman rm -f ap-extract >/dev/null 2>&1 || true
     podman run -d --name ap-extract --network "$NET" "$AP_IMAGE" --test-profile-runner >/dev/null
