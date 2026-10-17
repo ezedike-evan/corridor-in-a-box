@@ -23,6 +23,7 @@
 import { liveness, loadCorridor, type Corridor } from "@corridor/manifest";
 import { isSettleableAmount } from "@corridor/types";
 import { PostgresIdempotencyStore, migrate, type CorridorHealthStore } from "@corridor/engine";
+import { newCommand } from "./new.js";
 import {
   RESOLVE_USAGE,
   listHeldRuns,
@@ -46,8 +47,9 @@ import {
 
 /** The first line is the main usage text; the breaker help follows it. */
 const USAGE = [
-  "usage: corridor <validate|plan|canary> <file.corridor.yaml> [options] | runs list --state held | resolve <key> --outcome <outcome> --note <text>",
+  "usage: corridor <validate|plan|canary|new> <file.corridor.yaml|domain> [options] | runs list --state held | resolve <key> --outcome <outcome> --note <text>",
   '       corridor breaker <status [corridorId] | reset <corridorId> --reason "…">',
+  "       corridor new <domain> [--source-asset <asset>] [--network <public|testnet>] [--out <file>] [--allow-not-runnable]",
   "",
   "corridor breaker — inspect and reopen halted lanes (reads DATABASE_URL):",
   BREAKER_USAGE,
@@ -66,6 +68,7 @@ async function main(argv: string[]): Promise<number> {
   }
   if (cmd === "resolve") return resolveCommand(argv.slice(1));
   if (cmd === "breaker") return breakerCommand(argv.slice(1));
+  if (cmd === "new") return newCommand(argv.slice(1));
   if (!cmd || (cmd !== "validate" && cmd !== "plan" && cmd !== "canary")) {
     console.error(USAGE);
     return EXIT_USAGE;
