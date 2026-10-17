@@ -1,3 +1,6 @@
+
+
+
 // @corridor/registry — read the on-chain anchor conformance registry.
 //
 // The registry answers one question honestly: for a given anchor domain, which
@@ -29,6 +32,20 @@ export const PROBE_NAMES = [
 ] as const;
 
 export type ProbeName = (typeof PROBE_NAMES)[number];
+
+/**
+ * Minimal read interface the CLI's `--registry` comparison needs. Mirrors the
+ * `AttestationSource` shape used by the router so the comparison can be tested
+ * against a stub without touching the network.
+ */
+export interface AttestationSource {
+  getAnchor(domain: string): Promise<AnchorAttestation>;
+  servesSep31(domain: string): Promise<boolean>;
+  staleness(domain: string): Promise<number>;
+}
+
+/** Ledgers per hour at 5s close time, used to turn staleness into hours. */
+export const LEDGERS_PER_HOUR = 720;
 
 export interface AnchorAttestation {
   readonly domain: string;
@@ -102,7 +119,7 @@ export class AnchorRegistry {
    */
   private async read<T>(
     method: string,
-    ...args: Parameters<Contract["call"]>[1][]
+    ...args: Parameters<Contract["call"]>[1]
   ): Promise<T> {
     const source = new Account(this.simulationAccount, "0");
     const tx = new TransactionBuilder(source, {
@@ -169,6 +186,49 @@ export class AnchorRegistry {
   }
 
   /**
+   * The registry's view of a domain, shaped for the CLI's `--registry` report.
+   *
+   * `attested` is false when the domain has never been attested; in that case
+   * every other field is null and no further reads are attempted. A network
+   * error is NOT swallowed here — callers decide whether to warn or fail.
+   */
+  async describe(domain: string): Promise<RegistryView> {
+    let anchor: AnchorAttestation;
+    try {
+      anchor = await this.getAnchor(domain);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/NotFound|not found|missing/i.test(msg)) {
+        return {
+          domain,
+          attested: false,
+          servesSep31: null,
+          stalenessLedgers: null,
+          stalenessHours: null,
+          seps: null,
+          attestedLedger: null,
+          attester: null,
+        };
+      }
+      throw err;
+    }
+    const [serves, age] = await Promise.all([
+      this.servesSep31(domain),
+      this.staleness(domain),
+    ]);
+    return {
+      domain,
+      attested: true,
+      servesSep31: serves,
+      stalenessLedgers: age,
+      stalenessHours: age / LEDGERS_PER_HOUR,
+      seps: anchor.seps,
+      attestedLedger: anchor.attestedLedger,
+      attester: anchor.attester,
+    };
+  }
+
+  /**
    * Domains that are attested as genuinely serving SEP-31 receive-side AND whose
    * attestation is fresher than `maxStalenessLedgers` (default ~1 week at 5s
    * ledgers). The query an operator looking for an off-ramp actually has.
@@ -180,6 +240,7 @@ export class AnchorRegistry {
   async liveSep31Anchors(maxStalenessLedgers = 120_960): Promise<string[]> {
     const all = await this.domains();
     const out: string[] = [];
+    // Sequential reads keep the RPC load predictable for large registries.
     for (const domain of all) {
       const [serves, age] = await Promise.all([
         this.servesSep31(domain),
@@ -197,4 +258,56 @@ export class AnchorRegistry {
 import { nativeToScVal, type xdr } from "@stellar/stellar-sdk";
 function nativeToScValString(s: string): xdr.ScVal {
   return nativeToScVal(s, { type: "string" });
+}
+
+/** The registry's view of one domain, as printed by `corridor plan --registry`. */
+export interface RegistryView {
+  readonly domain: string;
+  readonly attested: boolean;
+  readonly servesSep31: boolean | null;
+  readonly stalenessLedgers: number | null;
+  readonly stalenessHours: number | null;
+  readonly seps: readonly number[] | null;
+  readonly attestedLedger: number | null;
+  readonly attester: string | null;
+}
+
+/** How the manifest's VERIFIED claim lines up with the registry's observation. */
+export type Agreement =
+  | "agree"
+  | "manifest_verified_registry_not_serving"
+  | "never_attested"
+  | "stale"
+  | "registry_serving_manifest_unverified";
+
+export interface ComparisonInput {
+  /** Whether the manifest claims the dest anchor is VERIFIED. */
+  readonly manifestVerified: boolean;
+  /** The registry's view, or null if the read failed and was downgraded to a warning. */
+  readonly view: RegistryView | null;
+  /** Attestations older than this many ledgers are reported as stale. */
+  readonly maxStalenessLedgers: number;
+}
+
+/**
+ * Pure comparison between the manifest's liveness claim and the registry's
+ * observation. Informational only — this is not the pre-settle safety gate.
+ *
+ * Returns null when the registry could not be read, so the caller can print a
+ * warning without inventing an agreement verdict.
+ */
+export function compareAttestation(input: ComparisonInput): Agreement | null {
+  const { manifestVerified, view, maxStalenessLedgers } = input;
+  if (!view) return null;
+  if (!view.attested) return "never_attested";
+  if (view.stalenessLedgers !== null && view.stalenessLedgers > maxStalenessLedgers) {
+    return "stale";
+  }
+  if (manifestVerified && view.servesSep31 === false) {
+    return "manifest_verified_registry_not_serving";
+  }
+  if (!manifestVerified && view.servesSep31 === true) {
+    return "registry_serving_manifest_unverified";
+  }
+  return "agree";
 }

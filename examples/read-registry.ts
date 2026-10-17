@@ -18,14 +18,35 @@ interface Deployments {
   };
 }
 
-async function main(): Promise<void> {
-  const network = process.env.STELLAR_NETWORK ?? "testnet";
+export interface RegistryConfig {
+  networkPassphrase: string;
+  rpcUrl: string;
+  registry: string;
+}
+
+// Resolve the registry config for a network from contracts/deployments.json.
+// Returns null when no registry is deployed on that network.
+export function resolveRegistryConfig(network: string): RegistryConfig | null {
   const deployments = JSON.parse(
     readFileSync(new URL("../contracts/deployments.json", import.meta.url), "utf8"),
   ) as Deployments;
 
   const cfg = deployments[network];
   if (!cfg?.registry) {
+    return null;
+  }
+
+  return {
+    networkPassphrase: cfg.networkPassphrase,
+    rpcUrl: cfg.rpcUrl,
+    registry: cfg.registry,
+  };
+}
+
+async function main(): Promise<void> {
+  const network = process.env.STELLAR_NETWORK ?? "testnet";
+  const cfg = resolveRegistryConfig(network);
+  if (!cfg) {
     console.error(`✗ no registry deployed on ${network} (see contracts/deployments.json)`);
     process.exit(1);
   }
@@ -51,7 +72,7 @@ async function main(): Promise<void> {
     console.log(`  advertises     ${a.seps.map((n) => `SEP-${n}`).join(", ")}`);
     console.log(`  probes passed  ${a.probesPassed.join(", ") || "none"}`);
     console.log(`  probes FAILED  ${failed.join(", ") || "none"}`);
-    console.log(`  toml sha256    ${a.tomlHash.slice(0, 32)}…`);
+    console.log(`  toml sha256    ${a.tomlHash.slice(0, 32)}․`);
     console.log(
       `  attested at    ledger ${a.attestedLedger} (${await registry.staleness(domain)} ledgers ago)`,
     );
@@ -65,7 +86,9 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+if (import.meta.url === process.argv[1]) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

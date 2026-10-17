@@ -44,6 +44,8 @@ export interface AnchorAttestation {
   servesSep31: boolean;
 }
 
+export type { AnchorAttestation as Attestation };
+
 const NULL_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
 /** ~1 week of 5-second ledgers. Older than this and we say so on the page. */
@@ -51,7 +53,7 @@ export const STALE_AFTER_LEDGERS = 120_960;
 
 type Network = keyof typeof deployments;
 
-function config(network: string) {
+export function config(network: string) {
   const cfg = (deployments as Record<string, unknown>)[network] as
     | { networkPassphrase: string; rpcUrl: string; registry: string | null }
     | undefined;
@@ -61,7 +63,7 @@ function config(network: string) {
 export const REGISTRY_NETWORK: string = process.env.STELLAR_NETWORK ?? "testnet";
 export const REGISTRY_ID: string | undefined = config(REGISTRY_NETWORK)?.registry ?? undefined;
 
-function decode<T>(mask: number, names: readonly T[]): T[] {
+export function decode<T>(mask: number, names: readonly T[]): T[] {
   return names.filter((_, i) => (mask & (1 << i)) !== 0);
 }
 
@@ -75,7 +77,7 @@ interface RawRecord {
   attester: string;
 }
 
-async function read<T>(method: string, args: ReturnType<typeof nativeToScVal>[] = []): Promise<T> {
+export async function read<T>(method: string, args: ReturnType<typeof nativeToScVal>[] = []): Promise<T> {
   const cfg = config(REGISTRY_NETWORK);
   if (!cfg?.registry) throw new Error(`no registry deployed on ${REGISTRY_NETWORK}`);
 
@@ -95,7 +97,7 @@ async function read<T>(method: string, args: ReturnType<typeof nativeToScVal>[] 
   return scValToNative(sim.result.retval) as T;
 }
 
-const str = (s: string) => nativeToScVal(s, { type: "string" });
+export const str = (s: string) => nativeToScVal(s, { type: "string" });
 
 /**
  * Every attestation in the registry.
@@ -140,6 +142,102 @@ export async function fetchAttestations(): Promise<{
       anchors: [],
     };
   }
+}
+
+/**
+ * Minimal read surface the comparison needs. Mirrors `AttestationSource` in
+ * packages/router/src/registry-resolver.ts so the pure comparison can be
+ * exercised with a stub in tests.
+ */
+export interface AttestationSource {
+  getAnchor(domain: string): Promise<AnchorAttestation | null>;
+}
+
+/** The registry, as an `AttestationSource`. */
+export function registrySource(network: string = REGISTRY_NETWORK): AttestationSource {
+  return {
+    async getAnchor(domain: string): Promise<AnchorAttestation | null> {
+      const cfg = config(network);
+      if (!cfg?.registry) throw new Error(`no registry deployed on ${network}`);
+      const raw = await read<RawRecord>("get_anchor", [str(domain)]);
+      if (!raw || !raw.domain) return null;
+      const [servesSep31, staleness] = await Promise.all([
+        read<boolean>("serves_sep31", [str(domain)]),
+        read<number>("staleness", [str(domain)]),
+      ]);
+      return {
+        domain: raw.domain,
+        seps: decode(raw.seps, SEP_NUMBERS) as number[],
+        probesRun: decode(raw.probes_run, PROBE_NAMES),
+        probesPassed: decode(raw.probes_passed, PROBE_NAMES),
+        tomlHash: Buffer.from(raw.toml_hash).toString("hex"),
+        attestedLedger: raw.attested_ledger,
+        attester: raw.attester,
+        staleness,
+        servesSep31,
+      };
+    },
+  };
+}
+
+/** Result of comparing the manifest's VERIFIED claim against the registry. */
+export interface AttestationComparison {
+  domain: string;
+  /** Manifest says `endpoints_verified_at` is set. */
+  manifestVerified: boolean;
+  /** Registry has any attestation for the domain. */
+  attested: boolean;
+  servesSep31: boolean;
+  staleness: number | null;
+  /** `staleness` converted to approximate hours (5s ledgers). */
+  staleHours: number | null;
+  stale: boolean;
+  seps: number[];
+  probesPassed: ProbeName[];
+  /** True when the manifest's VERIFIED claim agrees with the registry. */
+  agrees: boolean;
+  /** Human-readable reason when `agrees` is false. */
+  disagreement: string | null;
+}
+
+/**
+ * Pure comparison of the manifest's liveness claim against the registry's
+ * independent observation. No I/O: pass a stub `AttestationSource` in tests.
+ */
+export async function compareAttestation(
+  source: AttestationSource,
+  domain: string,
+  manifestVerified: boolean,
+): Promise<AttestationComparison> {
+  const anchor = await source.getAnchor(domain);
+  const attested = anchor !== null;
+  const staleness = anchor?.staleness ?? null;
+  const staleHours = staleness === null ? null : Math.round((staleness * 5) / 3600);
+  const stale = staleness !== null && staleness > STALE_AFTER_LEDGERS;
+  const servesSep31 = anchor?.servesSep31 ?? false;
+
+  let disagreement: string | null = null;
+  if (manifestVerified && !attested) {
+    disagreement = "manifest claims VERIFIED but registry has never attested this anchor";
+  } else if (manifestVerified && !servesSep31) {
+    disagreement = "manifest claims VERIFIED but registry says anchor does not serve SEP-31";
+  } else if (manifestVerified && stale) {
+    disagreement = `manifest claims VERIFIED but registry attestation is stale (${staleness} ledgers)`;
+  }
+
+  return {
+    domain,
+    manifestVerified,
+    attested,
+    servesSep31,
+    staleness,
+    staleHours,
+    stale,
+    seps: anchor?.seps ?? [],
+    probesPassed: anchor?.probesPassed ?? [],
+    agrees: disagreement === null,
+    disagreement,
+  };
 }
 
 export type { Network };
