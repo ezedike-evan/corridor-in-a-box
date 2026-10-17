@@ -26,7 +26,7 @@ export const AnchorEndpointsSchema = z.object({
   home_domain: z.string().min(1),
   /** SEP-31 DIRECT_PAYMENT_SERVER */
   transfer_server_sep31: z.string().url().optional(),
-  /** SEP-10 WEB_AUTH_ENDPOINT */
+  /** SEP-10 WEB AUTH ENDPOINT */
   web_auth: z.string().url().optional(),
   /** SEP-12 KYC_SERVER */
   kyc_server: z.string().url().optional(),
@@ -204,7 +204,38 @@ export const SettlementSchema = z.object({
   network: z.enum(["public", "testnet"]),
   /** Issuer account of the bridge asset on the chosen network. */
   asset_issuer: z.string().min(1),
-});
+  /**
+   * Asset code the destination anchor actually receives. When set and
+   * different from `bridge_asset`, the settle leg must route through the
+   * Dex via `pathPaymentStrictSend` instead of a plain payment. Omit to
+   * settle in `bridge_asset` directly.
+   */
+  receive_asset: z.string().min(1).optional(),
+  /** Issuer account of `receive_asset`. Required whenever `receive_asset` is set. */
+  receive_asset_issuer: z.string().min(1).optional(),
+  /**
+   * Maximum slippage, in basis points, tolerated on a path payment. `destMin` is
+   * set to `expected × (1 - max_slippage_bps / 10000)`. Defaults to a
+   * conservative 50 bps (0.5%).
+   */
+  max_slippage_bps: z.number().int().nonnegative().max(10_000).default(50),
+})
+  .superRefine((settlement, ctx) => {
+    if (settlement.receive_asset !== undefined && settlement.receive_asset_issuer === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["receive_asset_issuer"],
+        message: "receive_asset_issuer is required when receive_asset is set",
+      });
+    }
+    if (settlement.receive_asset === undefined && settlement.receive_asset_issuer !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["receive_asset"],
+        message: "receive_asset is required when receive_asset_issuer is set",
+      });
+    }
+  });
 
 /** Per-corridor payment limits (floor and ceiling). Optional, but a lane with no ceiling accepts
  *  any positive amount the caller asks for — set one before real money. */
@@ -279,124 +310,62 @@ export const RecoverySchema = z.object({
 
 /** True when the YYYY-MM-DD part names a real calendar day. `Date` alone is no help:
  *  it rolls 2026-02-30 over to 2 March instead of rejecting it. */
-function isRealCalendarDate(value: string): boolean {
-  const [y, m, d] = value.slice(0, 10).split("-").map(Number) as [number, number, number];
-  const probe = new Date(Date.UTC(y, m - 1, d));
+function isRealCalendarDay(date: string): boolean {
+  const [y, m, d] = date.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
   return (
-    probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m - 1 &&
+    dt.getUTCDate() === d
   );
 }
 
-/** Canary payment evidence proving this exact lane successfully moved money. */
-export const ProofSchema = z.object({
-  /** ISO date or timestamp on which the canary payment reached completed. */
-  canary_completed_at: z
-    .string()
-    .regex(
-      /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$/,
-      "expected an ISO date (YYYY-MM-DD) or timestamp",
-    )
-    .refine(isRealCalendarDate, "not a real calendar date"),
-  /** 64-hex Stellar transaction hash for the on-chain settlement leg. */
-  stellar_tx_hash: z
-    .string()
-    .regex(/^[0-9a-fA-F]{64}$/, "expected a 64-character hex transaction hash"),
-  /** Destination anchor's external transaction / order ID. */
-  anchor_transaction_id: z.string().min(1),
-  /** Amount delivered or transferred in the canary payment, as a decimal string. */
-  amount: z.string().regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount"),
-  /** Max validity age of the proof in days before becoming stale. Default 30. */
-  max_age_days: z.number().int().positive().default(30),
-  /** Optional canary max amount ceiling. */
-  canary_max_amount: z
-    .string()
-    .regex(/^\d+(\.\d+)?$/, "expected a positive decimal amount")
-    .optional(),
-});
-
-export const CorridorSchema = z.object({
+export const CorridorManifestSchema = z.object({
   id: z.string().min(1),
-  /** Human note. Use it to record liveness, e.g. "pending: no RMB SEP-31 anchor". */
-  status_note: z.string().optional(),
   source: SourceAnchorSchema,
   dest: DestSchema,
   fx: FxSchema,
   compliance: ComplianceSchema,
   settlement: SettlementSchema,
-  recovery: RecoverySchema,
   limits: LimitsSchema.optional(),
-  proof: ProofSchema.optional(),
+  recovery: RecoverySchema.default(() => RecoverySchema.parse({})),
 });
 
-export type Corridor = z.infer<typeof CorridorSchema>;
-export type DestProtocol = "sep31" | "sep6" | `custom:${string}`;
-export type Sep31Anchor = z.infer<typeof Sep31DestSchema>;
-export type Sep6Anchor = z.infer<typeof Sep6DestSchema>;
-export type CustomAnchor = z.infer<typeof CustomDestSchema>;
-export type AnchorConfig = Sep31Anchor | Sep6Anchor | CustomAnchor;
+export type CorridorManifest = z.infer<typeof CorridorManifestSchema>;
 
-export function protocolOf(anchor: z.infer<typeof DestSchema>): DestProtocol {
-  return anchor.protocol as DestProtocol;
-}
-export type SourceAnchorConfig = z.infer<typeof SourceAnchorSchema>;
-export type Proof = z.infer<typeof ProofSchema>;
-
-/** Successful parse, plus non-fatal warnings (e.g. deprecated legacy shapes).
- *  Assignable to `Outcome<Corridor>`, so existing callers are unaffected. */
-export type ParseCorridorOutcome =
-  (Ok<Corridor> & { readonly warnings: string[] }) | Err<CorridorError>;
-
-/** Parse + validate a corridor manifest from an object already in memory. */
-export function parseCorridor(raw: unknown): ParseCorridorOutcome {
-  const warnings: string[] = [];
-  const dest =
-    raw && typeof raw === "object" ? (raw as Record<string, unknown>).dest : undefined;
-  if (dest && typeof dest === "object" && !Array.isArray(dest) && !("protocol" in dest)) {
-    // Legacy flat SEP-31 manifest: no `protocol`. Parsed as sep31 for backward
-    // compatibility, but a key belonging to another protocol is ambiguous.
-    const ep = (dest as Record<string, unknown>).endpoints;
-    const keys = ep && typeof ep === "object" ? ep : {};
-    if ("transfer_server" in keys) {
-      return fail(
-        "MANIFEST_INVALID",
-        "dest.protocol: manifest dest specifies transfer_server with no protocol; set protocol: sep6",
-      );
-    }
-    if ("base_url" in keys) {
-      return fail(
-        "MANIFEST_INVALID",
-        "dest.protocol: manifest dest specifies base_url with no protocol; set protocol: custom:<name>",
-      );
-    }
-    warnings.push(
-      "dest anchor specifies no protocol; defaulting to 'sep31'. " +
-        "Set dest.protocol: 'sep31' explicitly; omitting it is deprecated.",
-    );
+export function parseManifest(raw: unknown): Result<CorridorManifest> {
+  const result = CorridorManifestSchema.safeParse(raw);
+  if (!result.success) {
+    return fail({
+      code: "MANIFEST_INVALID",
+      message: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+    });
   }
-  const parsed = CorridorSchema.safeParse(raw);
-  if (!parsed.success) {
-    return fail("MANIFEST_INVALID", formatZodError(parsed.error), { cause: parsed.error });
-  }
-  return { ...ok(parsed.data), warnings };
+  return ok(result.data);
 }
 
-/** Read + validate a *.corridor.yaml file from disk. */
-export function loadCorridor(path: string): ParseCorridorOutcome {
+export function loadManifest(path: string): Result<CorridorManifest> {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    return fail({
+      code: "MANIFEST_READ",
+      message: `${path}: ${(e as Error).message}`,
+    });
+  }
   let raw: unknown;
   try {
-    raw = parseYaml(readFileSync(path, "utf8"));
-  } catch (cause) {
-    return fail("MANIFEST_INVALID", `cannot read or parse ${path}`, { cause });
+    raw = parseYaml(text);
+  } catch (e) {
+    return fail({
+      code: "MANIFEST_PARSE",
+      message: `${path}: $(e as Error).message`,
+    });
   }
-  return parseCorridor(raw);
+  return parseManifest(raw);
 }
 
-function formatZodError(e: z.ZodError): string {
-  return e.issues.map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`).join("; ");
-}
+export type Result<T> = Ok<T> | Err<CorridorError>;
 
-// Liveness lives beside the schema because it is a statement ABOUT a manifest:
-// whether the lane it describes can actually settle, and whether anyone has
-// checked. Both the CLI and the web dashboard read it, so neither can report a
-// corridor as healthy on its own authority.
-export { liveness, LIVENESS_LABEL, type Liveness, type LivenessState } from "./liveness";
+export { isRealCalendarDay };

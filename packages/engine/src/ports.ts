@@ -29,6 +29,15 @@ export interface SettlementRequest {
   readonly corridor: Corridor;
   /** Epoch ms after which a firm quote expires and settlement must not land on-chain. */
   readonly validUntil?: number;
+  /** Optional asset the receiving anchor actually wants to receive.
+   *  When set and different from `amount.asset`, the submitter must route through
+   *  the DEX using `pathPaymentStrictSend`. */
+  readonly receiveAsset?: Money;
+  /** Maximum acceptable slippage in basis points for the path payment. */
+  readonly maxSlippageBps?: number;
+  /** Minimum amount the anchor's firm quote requires at the destination.
+   *  The submitter must fail closed if `destMin` would be below this. */
+  readonly minDestAmount?: Money;
 }
 
 export interface RefundRequest {
@@ -96,10 +105,12 @@ export class InMemoryWaker implements ReconcileWaker {
         return self.aborted.has(transactionId);
       },
       addEventListener(type: "abort", cb: () => void) {
+        if (type !== "abort") return;
         if (!self.listeners.has(transactionId)) self.listeners.set(transactionId, new Set());
         self.listeners.get(transactionId)!.add(cb);
       },
       removeEventListener(type: "abort", cb: () => void) {
+        if (type !== "abort") return;
         self.listeners.get(transactionId)?.delete(cb);
       },
       reset() {
@@ -109,7 +120,7 @@ export class InMemoryWaker implements ReconcileWaker {
   }
 
   wake(transactionId: string) {
-    this.aborted.add(transactionId);
+    self.aborted.add(transactionId);
     const set = this.listeners.get(transactionId);
     if (set) {
       for (const cb of set) cb();
@@ -120,7 +131,7 @@ export class InMemoryWaker implements ReconcileWaker {
 /**
  * The kind of deposit instructions the receiving anchor issued.
  *
- * Today only `"stellar_payment"` is used — send the bridge asset to a Stellar
+ * Today only `"stellar_payment" ` is used — send the bridge asset to a Stellar
  * address with an optional memo. Additional kinds (`"claimable_balance"`,
  * `"adapter_settled"`) are reserved for future work (see issue #183).
  */
@@ -157,6 +168,10 @@ export interface SettlementStrategy {
   /** Must match `DepositInstructionsKind`. The engine picks the first strategy
    *  whose `kind` equals the deposit instructions kind on the opened tx. */
   readonly kind: DepositInstructionsKind;
+  /** Optional predicate that lets a strategy claim a settlement whose kind
+   *  matches but whose asset routing requires this strategy (e.g. a different
+   *  receive asset). When omitted, the strategy applies to any tx of its `kind`. */
+  matches?(ctx: SettlementStrategyContext): boolean;
   settle(ctx: SettlementStrategyContext): Promise<Outcome<SettlementRef>>;
 }
 
@@ -172,6 +187,18 @@ export class StellarPaymentStrategy implements SettlementStrategy {
   readonly kind: DepositInstructionsKind = "stellar_payment";
 
   constructor(private readonly submitter: SettlementSubmitter) {}
+
+  /**
+   * Only claim the settlement when the bridge asset is the asset the anchor
+   * receives. When the manifest declares a different `receive_asset`, the
+   * path-payment strategy handles it instead.
+   */
+  matches({ corridor }: SettlementStrategyContext): boolean {
+    const receiveAsset = corridor.settlement?.receive_asset;
+    const bridgeAsset = corridor.settlement?.bridge_asset;
+    if (!receiveAsset) return true;
+    return receiveAsset === bridgeAsset;
+  }
 
   async settle({
     opened,
@@ -196,21 +223,15 @@ export function defaultStrategies(
 
 /**
  * Default port. Returns a clear, actionable error pointing at the one integration
- * you owe. Replace with a StellarSubmitter built on @stellar/stellar-sdk:
- *
- *   const tx = new TransactionBuilder(source, { fee, networkPassphrase })
- *     .addOperation(Operation.payment({ destination: req.to, asset, amount: req.amount.amount }))
- *     .addMemo(req.memo ? Memo.text(req.memo) : Memo.none())
- *     .setTimeout(req.corridor.fx.quote_ttl_seconds)   // beat the firm-quote expiry
- *     .build();
- *   tx.sign(keypair);
- *   const res = await server.submitTransaction(tx);
+ * you owe. Replace with a StellarSubmitter built on @stellar/stellar-sdk: the
+ * submitter builds either a native payment or a pathPaymentStrictSend
+ * depending on whether the anchor's receive asset differs from the bridge asset.
  */
 export class UnimplementedSubmitter implements SettlementSubmitter {
   async submit(): Promise<Outcome<SettlementRef>> {
     return fail(
       "SETTLEMENT_FAILED",
-      "settlement not wired: implement SettlementSubmitter with @stellar/stellar-sdk (native payment to the anchor deposit address)",
+      "settlement not wired: implement SettlementSubmitter with @stellar/stellar-sdk (native payment or pathPaymentStrictSend to the anchor deposit address)",
     );
   }
 
@@ -249,7 +270,8 @@ export function createMockSubmitter(
           request.memo === req.memo &&
           request.memoType === req.memoType &&
           request.amount.asset === req.amount.asset &&
-          request.amount.amount === req.amount.amount,
+          request.amount.amount === req.amount.amount &&
+          request.receiveAsset?.asset === req.receiveAsset?.asset,
       );
       return ok(found?.reference);
     },

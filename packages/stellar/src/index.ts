@@ -1,12 +1,13 @@
 // @corridor/stellar — the only package on the money path that touches the
 // chain; probe/registry/attester read and write the conformance registry, never
 // move funds. It wraps @stellar/stellar-sdk to (a) sign SEP-10 challenges and
-// (b) submit the native settle-leg payment. The rest of the money path stays
-// SDK-free; swap createMockSubmitter() for StellarSettlementSubmitter to move
-// real money.
+// (b) submit the settle-leg payment — either a direct payment of the bridge
+// asset, or a path_payment_strict_send when the anchor receives a different
+// asset than we hold. The rest of the money path stays SDK-free; swap
+// createMockSubmitter() for StellarSettlementSubmitter to move real money.
 //
-// SEP-31 settlement is a single NATIVE payment of the bridge asset to the
-// receiving anchor's deposit address — no smart contract involved.
+// SEP-31 settlement is a single payment (or path payment) to the receiving
+// anchor's deposit address — no smart contract involved.
 
 import {
   Asset,
@@ -21,6 +22,7 @@ import {
   TransactionBuilder,
   TransactionFailedError,
   xdr,
+  type Server,
 } from "@stellar/stellar-sdk";
 import {
   compareAmounts,
@@ -51,6 +53,26 @@ function passphraseFor(network: "public" | "testnet"): string {
 function bridgeAsset(code: string, issuer: string): Asset {
   return code.toUpperCase() === "XLM" ? Asset.native() : new Asset(code, issuer);
 }
+
+/** The asset the anchor receives. Defaults to the bridge asset when the
+ *  manifest does not declare a distinct `receive_asset`. */
+function receiveAsset(settlement: {
+  bridge_asset: string;
+  asset_issuer?: string;
+  receive_asset?: string;
+  receive_asset_issuer?: string;
+}): Asset {
+  if (!settlement.receive_asset) {
+    return bridgeAsset(settlement.bridge_asset, settlement.asset_issuer ?? "");
+  }
+  return bridgeAsset(
+    settlement.receive_asset,
+    settlement.receive_asset_issuer ?? settlement.asset_issuer ?? "",
+  );
+}
+
+/** Default slippage tolerance (basis points) for a path payment. */
+const DEFAULT_MAX_SLIPPAGE_BPS = 50;
 
 /**
  * Encode the anchor's deposit memo in the form the anchor asked for.
@@ -137,9 +159,19 @@ export class StellarSep10Signer implements Sep10Signer {
  *  tests can pass a fake without pulling in a real Horizon connection. */
 type HorizonServerLike = Pick<
   Horizon.Server,
-  "loadAccount" | "submitTransaction" | "transactions"
+  "loadAccount" | "submitTransaction" | "transactions" | "strictSendPaths"
 > &
   Partial<Pick<Horizon.Server, "payments">>;
+
+/** A single strict-send path candidate as returned by Horizon. */
+interface StrictSendPathRecord {
+  readonly destination_amount: string;
+  readonly path: ReadonlyArray<{
+    readonly asset_type: string;
+    readonly asset_code?: string;
+    readonly asset_issuer?: string;
+  }>;
+}
 
 export interface StellarSubmitterOptions {
   /** Production: a KMS/HSM-backed signer that never exposes the seed. */
@@ -181,6 +213,8 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
   private readonly confirmTimeoutMs: number;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
+  /** Slippage tolerance (bps) applied to the expected destination amount. */
+  private readonly maxSlippageBps: number;
   /** Serializes loadAccount→build→sign→submit per signer, so two concurrent
    *  settlements never race on the same sequence number. Released as soon as
    *  submitTransaction() settles — NOT held through the (possibly 30s)
@@ -203,6 +237,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
     this.confirmTimeoutMs = opts.confirmTimeoutMs ?? 30_000;
     this.now = opts.now ?? (() => Date.now());
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.maxSlippageBps = DEFAULT_MAX_SLIPPAGE_BPS;
     const fee = opts.fee ?? StellarSettlementSubmitter.fee;
     if (!toScaled(fee, STROOP_SCALE).ok) {
       throw new Error(
@@ -240,6 +275,8 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
       const { network } = req.corridor.settlement;
       const passphrase = passphraseFor(network);
       const asset = bridgeAsset(req.amount.asset, req.corridor.settlement.asset_issuer);
+      const destAsset = receiveAsset(req.corridor.settlement);
+      const needsPath = !asset.equals(destAsset);
 
       await this.withLock(async () => {
         const source = await this.server.loadAccount(this.signer.publicKey);
@@ -253,13 +290,38 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
             ? Math.min(Math.floor(req.validUntil / 1000), ttlMaxTime)
             : ttlMaxTime;
 
+        let operation: xdr.Operation;
+        if (needsPath) {
+          const slippageBps =
+            req.corridor.settlement.max_slippage_bps ?? this.maxSlippageBps;
+          const path = await this.findStrictSendPath(
+            asset,
+            req.amount.amount,
+            destAsset,
+          );
+          if (!path.ok) throw new PathUnavailableError(path.error.message);
+          const destMin = applySlippage(path.value.destination_amount, slippageBps);
+          operation = Operation.pathPaymentStrictSend({
+            sendAsset: asset,
+            sendAmount: req.amount.amount,
+            destination: req.to,
+            destAsset,
+            destMin,
+            path: path.value.path,
+          });
+        } else {
+          operation = Operation.payment({
+            destination: req.to,
+            asset,
+            amount: req.amount.amount,
+          });
+        }
+
         const builder = new TransactionBuilder(source, {
           fee: feeStroops,
           networkPassphrase: passphrase,
         })
-          .addOperation(
-            Operation.payment({ destination: req.to, asset, amount: req.amount.amount }),
-          )
+          .addOperation(operation)
           // Beat the firm-quote expiry: the tx must hit the ledger before the quote dies.
           .setTimebounds(0, maxTime);
 
@@ -283,6 +345,14 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
         feeCharged: confirmed.value.feeCharged,
       });
     } catch (cause) {
+      if (cause instanceof PathUnavailableError) {
+        // No path (or destMin below the anchor's firm quote) — fail closed
+        // without ever submitting. Retrying with the same inputs will not help.
+        return fail("SETTLEMENT_FAILED", cause.message, {
+          retryable: false,
+          cause,
+        });
+      }
       if (!submitAttempted || cause instanceof TransactionFailedError) {
         // Either nothing ever reached Horizon (build/sign/lock failure — always
         // safe to retry), or Horizon evaluated the envelope and definitively
@@ -313,6 +383,47 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
         { retryable: landed.error.retryable, cause },
       );
     }
+  }
+
+  /**
+   * Query Horizon for strict-send paths from `sendAsset`/`sendAmount` to
+   * `destAsset`, and return the best (highest destination_amount) candidate.
+   * Fails closed when Horizon returns no paths.
+   */
+  private async findStrictSendPath(
+    sendAsset: Asset,
+    sendAmount: string,
+    destAsset: Asset,
+  ): Promise<Outcome<{ destination_amount: string; path: Asset[] }>> {
+    let records: readonly StrictSendPathRecord[];
+    try {
+      const res = (await this.server.strictSendPaths(sendAsset, sendAmount, [
+        destAsset,
+      ]).call()) as { records?: readonly StrictSendPathRecord[] };
+      records = res.records ?? [];
+    } catch (err: unknown) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        `strict-send path query failed: ${describe(err)}`,
+        { cause: err, retryable: true },
+      );
+    }
+    if (records.length === 0) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        `no strict-send path from ${assetLabel(sendAsset)} to ${assetLabel(destAsset)}`,
+        { retryable: false },
+      );
+    }
+    let best = records[0] as StrictSendPathRecord;
+    for (const r of records) {
+      const cmp = compareAmounts(r.destination_amount, best.destination_amount);
+      if (cmp.ok && cmp.value > 0) best = r;
+    }
+    return ok({
+      destination_amount: best.destination_amount,
+      path: best.path.map(assetFromHorizon),
+    });
   }
 
   async findExisting(req: SettlementRequest): Promise<Outcome<SettlementRef | undefined>> {
@@ -428,6 +539,44 @@ function normalizeHashMemo(m: string): string {
   } catch {
     return m.toLowerCase();
   }
+}
+
+/** Thrown when a path payment cannot be built safely (no path / below quote). */
+class PathUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PathUnavailableError";
+  }
+}
+
+function assetFromHorizon(a: {
+  asset_type: string;
+  asset_code?: string;
+  asset_issuer?: string;
+}): Asset {
+  if (a.asset_type === "native") return Asset.native();
+  return new Asset(a.asset_code ?? "", a.asset_issuer ?? "");
+}
+
+function assetLabel(a: Asset): string {
+  return a.isNative() ? "XLM" : `${a.getCode()}:${a.getIssuer()}`;
+}
+
+/**
+ * Apply a slippage tolerance (basis points) to an expected destination amount,
+ * rounding down so we never over-promise what the anchor must receive.
+ */
+function applySlippage(expected: string, bps: number): string {
+  const scaled = toScaled(expected, STROOP_SCALE);
+  if (!scaled.ok) {
+    throw new PathUnavailableError(`invalid expected destination amount "${expected}"`);
+  }
+  if (!Number.isInteger(bps) || bps < 0 || bps > 10_000) {
+    throw new PathUnavailableError(`invalid max_slippage_bps ${bps}`);
+  }
+  const factor = BigInt(10_000 - bps);
+  const destMin = (scaled.value * factor) / 10_000n;
+  return fromScaled(destMin, STROOP_SCALE);
 }
 
 /**
@@ -908,19 +1057,23 @@ export function verifySettlementFacts(
     return mismatch("operation count", "1", String(facts.operations.length));
   }
   const op = facts.operations[0] as SettlementOperationFacts;
-  if (op.type !== "payment") return mismatch("operation type", "payment", op.type);
+  if (op.type !== "payment" && op.type !== "path_payment_strict_send") {
+    return mismatch("operation type", "payment|path_payment_strict_send", op.type);
+  }
   if (op.to !== req.to) return mismatch("destination", req.to, op.to);
 
   const cmp = compareAmounts(req.amount.amount, op.amount ?? "");
   if (!cmp.ok || cmp.value !== 0) return mismatch("amount", req.amount.amount, op.amount);
 
-  const code = req.corridor.settlement.bridge_asset;
+  const code = req.corridor.settlement.receive_asset ?? req.corridor.settlement.bridge_asset;
   if (code.toUpperCase() === "XLM") {
     if (op.asset_type !== "native") {
       return mismatch("asset", "XLM (native)", `${op.asset_code ?? op.asset_type}`);
     }
   } else {
-    const issuer = req.corridor.settlement.asset_issuer;
+    const issuer =
+      req.corridor.settlement.receive_asset_issuer ??
+      req.corridor.settlement.asset_issuer;
     if (op.asset_type === "native" || op.asset_code !== code || op.asset_issuer !== issuer) {
       return mismatch(
         "asset",
