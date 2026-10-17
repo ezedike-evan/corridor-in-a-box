@@ -34,6 +34,9 @@ Node 22+ and pnpm 9+ are required (see `.nvmrc` and `packageManager` in
 
 ## Before you open a PR
 
+The quickest way to run a full corridor locally is the mock anchor:
+
+
 Run the full gate locally — CI runs the same three commands:
 
 ```bash
