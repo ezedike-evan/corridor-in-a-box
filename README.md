@@ -80,8 +80,8 @@ corridors/       the manifests — ALL corridor-specifics live here,
                  nowhere else
 contracts/       Soroban registry + attester contracts
 scripts/         reference-anchor.sh + assert-testnet-corridor.ts
-docs/            key management, "why not Anchor Platform", SEP coverage,
-                 operations, …
+docs/            key management, bespoke adapters, "why not Anchor Platform",
+                 SEP coverage, operations, …
 examples/        runnable end-to-end demo
 ```
 
@@ -92,8 +92,9 @@ Three boundaries do the work:
    YAML file, not a code change.
 2. **engine ↔ adapters** — the engine knows only the `AnchorAdapter` interface.
    Standards-compliant anchors share one adapter; bespoke exchange/OTC desks
-   implement the same interface. Proprietary implementations could be maintained
-   separately; none is included in this repo.
+   implement the same interface (see [docs/adapters.md](./docs/adapters.md)).
+   Proprietary implementations could be maintained separately; none is included
+   in this repo.
 3. **router seam** — the open repo ships the `RouteResolver` interface plus two
    resolvers: `StaticRouteResolver` (trust the manifest) and
    `RegistryRouteResolver` (require a fresh on-chain attestation). A
