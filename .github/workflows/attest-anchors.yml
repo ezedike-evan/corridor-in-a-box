@@ -92,3 +92,7 @@ jobs:
           echo "::warning::ATTESTER_SECRET is not set — probes ran but nothing was" \
                "written on chain. Set the secret to an enrolled attester key to" \
                "keep the registry fresh."
+
+      - name: Verify registry freshness
+        if: ${{ github.event_name == 'schedule' }}
+        run: pnpm registry:staleness
