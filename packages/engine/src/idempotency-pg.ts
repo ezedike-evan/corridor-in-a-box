@@ -146,6 +146,15 @@ export class PostgresIdempotencyStore implements IdempotencyStore {
   constructor(private readonly db: Queryable) {}
 
   /**
+   * Cheap liveness probe: sends `SELECT 1` and resolves when the DB is
+   * reachable. Throws if the query fails or times out, so callers (e.g.
+   * `storeCheck`) can treat any throw as "store unavailable".
+   */
+  async ping(): Promise<void> {
+    await this.db.query("SELECT 1");
+  }
+
+  /**
    * Atomically claim a key for a new run. `ON CONFLICT DO NOTHING` makes the
    * insert a no-op when the key already exists; `RETURNING` then tells us whether
    * a row was actually written. A `false` return means another worker already
