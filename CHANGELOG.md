@@ -7,6 +7,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Fixed — dashboard accessibility pass (#295)
+
+- `/payments`: every label is associated with its control (`useId`), the refused-amount error is tied to the field with `aria-invalid` and `aria-describedby` and focus moves to it, and each step of the state machine carries its status as text, not only colour or opacity.
+- The outcome of a run is announced through a `role="status"` live region (one note while it runs, the result once known).
+- Decorative icons are hidden from assistive technology or paired with text; headings, `nav` landmarks, `aria-current` and the theme toggle's pressed state are added; link text that repeats ("Run a payment") says which corridor.
+- A visible focus indicator, scroll padding under the sticky header, and text colours that keep 4.5:1 contrast in both themes.
+- The wording lives in `web/lib/run-status.ts` and is covered by `tests/web-run-status.test.ts`.
+
 ### Added — `--json` flag to `pnpm probe:anchor` (#232)
 
 - Adds `--json` flag parsing to `examples/probe-anchor.ts` accepted in any argv position.

@@ -239,7 +239,7 @@ across two anchors_ and move the on-chain bridge asset between them. They are
 complementary — in a real lane the receiving anchor runs the Anchor Platform and
 this engine talks to it.
 
-| | Anchor Platform | corridor-in-a-box |
+| Aspect | Anchor Platform | corridor-in-a-box |
 |---|---|---|
 | Who runs it | An anchor | A remittance operator / PSP |
 | Role | Serve SEP endpoints | Orchestrate a payment end-to-end |
