@@ -159,6 +159,55 @@ describe("manifest", () => {
     });
   });
 
+  describe("settlement", () => {
+    it("defaults max_slippage_bps and leaves receive_asset unset", () => {
+      const r = parseCorridor(valid);
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.value.settlement.max_slippage_bps).toBe(50);
+        expect(r.value.settlement.receive_asset).toBeUndefined();
+        expect(r.value.settlement.receive_asset_issuer).toBeUndefined();
+      }
+    });
+
+    it("accepts receive_asset and receive_asset_issuer", () => {
+      const r = parseCorridor({
+        ...valid,
+        settlement: {
+          network: "public",
+          asset_issuer: "GISSUER",
+          receive_asset: "ARS",
+          receive_asset_issuer: "GARSISSUER",
+          max_slippage_bps: 25,
+        },
+      });
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.value.settlement.receive_asset).toBe("ARS");
+        expect(r.value.settlement.receive_asset_issuer).toBe("GARSISSUER");
+        expect(r.value.settlement.max_slippage_bps).toBe(25);
+      }
+    });
+
+    it("rejects receive_asset without receive_asset_issuer", () => {
+      const r = parseCorridor({
+        ...valid,
+        settlement: { network: "public", asset_issuer: "GISSUER", receive_asset: "ARS" },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe("MANIFEST_INVALID");
+    });
+
+    it("rejects an out-of-range max_slippage_bps", () => {
+      const r = parseCorridor({
+        ...valid,
+        settlement: { network: "public", asset_issuer: "GISSUER", max_slippage_bps: 10_001 },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe("MANIFEST_INVALID");
+    });
+  });
+
   describe("proof schema", () => {
     it("parses valid proof and applies default max_age_days = 30", () => {
       const r = parseCorridor({ ...valid, proof: validProof });

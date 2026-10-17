@@ -13,6 +13,7 @@ import {
   canTransition,
   createMockSubmitter,
   StellarPaymentStrategy,
+  StellarPathPaymentStrategy,
   execute,
   reconcileUntil,
   type CorridorState,
@@ -21,6 +22,7 @@ import {
   type SettlementSubmitter,
   type SettlementStrategy,
   type StoredRun,
+  type PathPaymentFinder,
 } from "@corridor/engine";
 import type { TransactionStatus } from "@corridor/adapter-kit";
 import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
@@ -246,6 +248,95 @@ describe("engine.execute", () => {
       expect(r.value.stellarTxHash).toBe("existing-tx-hash-123");
     }
     expect(submitCalls).toBe(0);
+  });
+});
+
+describe("engine settlement strategy selection", () => {
+  function corridorWithReceiveAsset(): Corridor {
+    const r = parseCorridor({
+      id: "test",
+      source: { name: "S", asset: "USDC", endpoints: { home_domain: "s.example" } },
+      dest: {
+        name: "D",
+        asset: "iso4217:ARS",
+        endpoints: {
+          home_domain: "d.example",
+          transfer_server_sep31: "https://d.example/sep31",
+          endpoints_verified_at: "1970-01-01",
+        },
+      },
+      fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
+      compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
+      settlement: {
+        network: "public",
+        asset_issuer: "GISSUER",
+        receive_asset: "ARS",
+        receive_asset_issuer: "GARSISSUER",
+        max_slippage_bps: 50,
+      },
+      recovery: { max_retries: 2 },
+      proof: {
+        canary_completed_at: "1970-01-01T00:00:00Z",
+        stellar_tx_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        anchor_transaction_id: "canary-test",
+        amount: "1",
+        max_age_days: 50000,
+      },
+    });
+    if (!r.ok) throw new Error("fixture invalid");
+    return r.value;
+  }
+
+  it("selects the path-payment strategy when receive_asset differs from bridge_asset", async () => {
+    const finder: PathPaymentFinder = {
+      async findStrictSendPath() {
+        return ok({
+          destinationAmount: "100.00",
+          path: [
+            {
+              asset_code: "MID",
+              asset_issuer: "GMIDISSUER",
+            },
+          ],
+        });
+      },
+    };
+    const submitter = createMockSubmitter();
+    const pathStrategy = new StellarPathPaymentStrategy(submitter, finder);
+    const paymentStrategy = new StellarPaymentStrategy(submitter);
+    const pathSpy = vi.spyOn(pathStrategy, "settle");
+    const paymentSpy = vi.spyOn(paymentStrategy, "settle");
+
+    const r = await execute(intent("path-select"), corridorWithReceiveAsset(), {
+      ...deps(),
+      strategies: [paymentStrategy, pathStrategy],
+    });
+
+    expect(r.ok).toBe(true);
+    expect(pathSpy).toHaveBeenCalledOnce();
+    expect(paymentSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps the plain payment strategy when receive_asset matches bridge_asset", async () => {
+    const finder: PathPaymentFinder = {
+      async findStrictSendPath() {
+        throw new Error("finder should not be consulted");
+      },
+    };
+    const submitter = createMockSubmitter();
+    const pathStrategy = new StellarPathPaymentStrategy(submitter, finder);
+    const paymentStrategy = new StellarPaymentStrategy(submitter);
+    const pathSpy = vi.spyOn(pathStrategy, "settle");
+    const paymentSpy = vi.spyOn(paymentStrategy, "settle");
+
+    const r = await execute(intent("path-select-same"), corridor(), {
+      ...deps(),
+      strategies: [paymentStrategy, pathStrategy],
+    });
+
+    expect(r.ok).toBe(true);
+    expect(paymentSpy).toHaveBeenCalledOnce();
+    expect(pathSpy).not.toHaveBeenCalled();
   });
 });
 

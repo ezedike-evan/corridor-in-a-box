@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -23,6 +24,7 @@ import {
   LocalKeypairSigner,
   StellarSep10Signer,
   StellarSettlementSubmitter,
+  StellarPathPaymentStrategy,
   type AccountFacts,
   type HorizonAccountResponseLike,
   type ExternalSigner,
@@ -1622,5 +1624,166 @@ describe("settlement on-chain verification", () => {
       req({ to: Keypair.random().publicKey() }),
     );
     expect(bad.ok).toBe(false);
+  });
+});
+
+// --- StellarPathPaymentStrategy: settle via path_payment_strict_send ------
+// When the bridge asset the operator holds differs from the asset the anchor
+// receives, submit() must route through the DEX with pathPaymentStrictSend,
+// picking the best strict-send path and setting destMin from the firm quote
+// minus max_slippage_bps. No path => fail closed, never submit.
+
+describe("StellarPathPaymentStrategy", () => {
+  const SEND_ISSUER = Keypair.random().publicKey();
+  const RECV_ISSUER = Keypair.random().publicKey();
+
+  function pathCorridor(): Corridor {
+    const r = parseCorridor({
+      id: "test-path",
+      source: { name: "S", asset: "USDC", endpoints: { home_domain: "s.example" } },
+      dest: {
+        name: "D",
+        asset: "iso4217:ARS",
+        endpoints: {
+          home_domain: "d.example",
+          transfer_server_sep31: "https://d.example/sep31",
+        },
+      },
+      fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
+      compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
+      settlement: {
+        network: "testnet",
+        bridge_asset: "USDC",
+        asset_issuer: SEND_ISSUER,
+        receive_asset: "ARSX",
+        receive_asset_issuer: RECV_ISSUER,
+        max_slippage_bps: 50,
+      },
+      recovery: { max_retries: 2 },
+    });
+    if (!r.ok) throw new Error(`fixture invalid: ${JSON.stringify(r.error)}`);
+    return r.value;
+  }
+
+  function pathRequest(over: Partial<SettlementRequest> = {}): SettlementRequest {
+    return {
+      to: Keypair.random().publicKey(),
+      amount: { asset: "USDC", amount: "10" },
+      corridor: pathCorridor(),
+      memo: "memo-xyz",
+      memoType: "text",
+      ...over,
+    };
+  }
+
+  /** Fake Horizon exposing strictSendPaths + the submit() surface. */
+  function fakePathServer(opts: {
+    paths?: Array<{ destination_amount: string; path: Array<{ asset_type: string; asset_code?: string; asset_issuer?: string }> }>;
+    submitTransaction?: (tx?: Transaction | FeeBumpTransaction) => Promise<unknown>;
+  }) {
+    let capturedTx: Transaction | FeeBumpTransaction | undefined;
+    const strictSendPaths = vi.fn(() => ({
+      call: async () => ({ records: opts.paths ?? [] }),
+    }));
+    const loadAccount = vi.fn(async (publicKey: string) => new Account(publicKey, "100"));
+    const submitTransaction = vi.fn(
+      opts.submitTransaction ??
+        (async (tx?: Transaction | FeeBumpTransaction) => {
+          capturedTx = tx;
+          return { successful: true };
+        }),
+    );
+    const server = {
+      loadAccount,
+      submitTransaction,
+      strictSendPaths,
+      transactions: () => ({
+        transaction: () => ({ call: async () => ({ successful: true, ledger_attr: 9 }) }),
+      }),
+    } as unknown as Horizon.Server;
+    return { server, strictSendPaths, submitTransaction, captured: () => capturedTx };
+  }
+
+  it("builds pathPaymentStrictSend with correct destMin and path", async () => {
+    const { server, captured } = fakePathServer({
+      paths: [
+        {
+          destination_amount: "100.0000000",
+          path: [
+            { asset_type: "credit_alphanum4", asset_code: "MID", asset_issuer: SEND_ISSUER },
+          ],
+        },
+      ],
+    });
+    const strat = new StellarPathPaymentStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+    });
+
+    const res = await strat.submit(pathRequest());
+    expect(res.ok).toBe(true);
+    const tx = captured();
+    expect(tx).toBeDefined();
+    const op = (tx as Transaction).operations[0]!;
+    expect(op.type).toBe("pathPaymentStrictSend");
+    if (op.type === "pathPaymentStrictSend") {
+      // 100 * (1 - 50/10000) = 99.5
+      expect(op.destMin).toBe("99.5000000");
+      expect(op.destAsset.code).toBe("ARSX");
+      expect(op.destAsset.issuer).toBe(RECV_ISSUER);
+      expect(op.sendAsset.code).toBe("USDC");
+      expect(op.sendAmount).toBe("10.0000000");
+      expect(op.path).toHaveLength(1);
+      expect(op.path[0]!.code).toBe("MID");
+    }
+    expect((tx as Transaction).memo.type).toBe("text");
+    expect((tx as Transaction).memo.value?.toString()).toBe("memo-xyz");
+  });
+
+  it("fails closed without submitting when no path exists", async () => {
+    const { server, submitTransaction } = fakePathServer({ paths: [] });
+    const strat = new StellarPathPaymentStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+    });
+
+    const res = await strat.submit(pathRequest());
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe("SETTLEMENT_FAILED");
+      expect(res.error.retryable).toBe(false);
+      expect(res.error.message).toContain("no strict-send path");
+    }
+    expect(submitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when destMin is below the anchor's firm quote requirement", async () => {
+    const { server, submitTransaction } = fakePathServer({
+      paths: [
+        {
+          destination_amount: "100.0000000",
+          path: [],
+        },
+      ],
+    });
+    const strat = new StellarPathPaymentStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+    });
+
+    // Anchor requires 99.9 received; destMin at 50bps is 99.5 < 99.9.
+    const res = await strat.submit(
+      pathRequest({ minDestAmount: { asset: "ARSX", amount: "99.9" } }),
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe("SETTLEMENT_FAILED");
+      expect(res.error.retryable).toBe(false);
+      expect(res.error.message).toContain("below");
+    }
+    expect(submitTransaction).not.toHaveBeenCalled();
   });
 });

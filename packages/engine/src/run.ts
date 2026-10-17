@@ -1,3 +1,4 @@
+
 // The orchestrator. execute() runs one payment across one corridor:
 //   quote → comply → open → settle → reconcile → complete
 // driving the state machine, persisting after each step (so it's resumable), and
@@ -89,6 +90,13 @@ export interface EngineDeps {
    * returned by the receiving anchor.
    */
   strategies?: readonly SettlementStrategy[];
+  /**
+   * Optional factory used to build a `StellarPathPaymentStrategy` when the
+   * corridor's `settlement.receive_asset` differs from `bridge_asset`. The
+   * engine selects it automatically in that case; the factory lets callers
+   * inject a fake Horizon for tests.
+   */
+  pathPaymentStrategy?: (submitter: SettlementSubmitter) => SettlementStrategy;
   idempotency?: IdempotencyStore;
   waker?: import("./ports").ReconcileWaker;
   now?: () => number;
@@ -590,7 +598,19 @@ export async function execute(
       if (!t.ok) return die(t.error);
     }
 
-    const strategies = deps.strategies ?? defaultStrategies(deps.submitter);
+    // When the corridor declares a `receive_asset` different from the bridge
+    // asset, the settle must route through the DEX via pathPaymentStrictSend.
+    // Prefer an explicitly supplied strategy list; otherwise build the path
+    // strategy (or fall back to the plain payment strategy when no factory is
+    // wired, which keeps existing callers working).
+    const receiveAsset = corridor.settlement.receive_asset;
+    const needsPath =
+      receiveAsset !== undefined && receiveAsset !== corridor.settlement.bridge_asset;
+    const strategies =
+      deps.strategies ??
+      (needsPath && deps.pathPaymentStrategy
+        ? [deps.pathPaymentStrategy(deps.submitter)]
+        : defaultStrategies(deps.submitter));
     let s: Outcome<SettlementRef>;
     if (deps.submitter.findExisting) {
       const req = buildSettlementRequest(opened.value, q.value, corridor);
@@ -627,6 +647,7 @@ export async function execute(
       memo: settleReq.memo,
       memoType: settleReq.memoType,
       amount: settleReq.amount,
+      ...(settleReq.receiveAsset && { receiveAsset: settleReq.receiveAsset }),
     };
     {
       const t = await advance("settled", {
@@ -707,6 +728,14 @@ function settlementRequestFor(
     memo: opened.memo,
     memoType: opened.memoType,
     amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
+    ...(corridor.settlement.receive_asset && {
+      receiveAsset: {
+        asset: corridor.settlement.receive_asset,
+        ...(corridor.settlement.receive_asset_issuer && {
+          issuer: corridor.settlement.receive_asset_issuer,
+        }),
+      },
+    }),
     corridor,
   };
 }
