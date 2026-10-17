@@ -15,6 +15,8 @@ import {
   scValToNative,
   TransactionBuilder,
   Account,
+  nativeToScVal,
+  xdr,
 } from "@stellar/stellar-sdk";
 
 /** SEP numbers in the registry's bit order. Mirrors SEP_NUMBERS in the contract. */
@@ -44,6 +46,21 @@ export interface AnchorAttestation {
   readonly attestedLedger: number;
   /** Address that produced the attestation. */
   readonly attester: string;
+}
+
+export interface HistoryOptions {
+  /** First ledger to query from. If omitted, queries from the oldest available ledger reported by RPC. */
+  readonly startLedger?: number;
+  /** Maximum number of events to retrieve. */
+  readonly limit?: number;
+}
+
+export interface AnchorHistory {
+  readonly domain: string;
+  readonly attestations: readonly AnchorAttestation[];
+  readonly earliestLedgerCovered: number;
+  readonly latestLedger: number;
+  readonly oldestLedger: number;
 }
 
 export interface RegistryOptions {
@@ -189,12 +206,136 @@ export class AnchorRegistry {
     }
     return out;
   }
+
+  /**
+   * Attestation history for a domain read from Attested events via Soroban RPC.
+   * Attestations are returned ordered by ledger ascending.
+   * Reports the covered ledger range (`earliestLedgerCovered` to `latestLedger`).
+   */
+  async history(domain: string, opts: HistoryOptions = {}): Promise<AnchorHistory> {
+    let startLedger = opts.startLedger;
+    if (startLedger === undefined) {
+      const latest = await this.server.getLatestLedger();
+      // Soroban RPC event retention is typically ~24h (17,280 ledgers at 5s/ledger).
+      startLedger = Math.max(1, latest.sequence - 17_280);
+    }
+
+    const filters: rpc.Api.EventFilter[] = [
+      {
+        type: "contract",
+        contractIds: [this.contract.contractId()],
+        topics: [
+          ["*", nativeToScVal("Attested", { type: "symbol" }).toXDR("base64")],
+          [nativeToScValString(domain).toXDR("base64")],
+        ],
+      },
+    ];
+
+    const response = await this.server.getEvents({
+      startLedger,
+      filters,
+      limit: opts.limit,
+    });
+
+    const earliestLedgerCovered = Math.max(startLedger, response.oldestLedger);
+    const attestations: AnchorAttestation[] = [];
+
+    for (const event of response.events) {
+      if (event.topic.length > 1) {
+        try {
+          const rawDomain = event.topic[1];
+          const eventDomain = String(
+            typeof rawDomain === "string"
+              ? scValToNative(xdr.ScVal.fromXDR(rawDomain, "base64"))
+              : scValToNative(rawDomain),
+          );
+          if (eventDomain !== domain) continue;
+        } catch {
+          // continue
+        }
+      }
+      attestations.push(decodeAttestationEvent(event));
+    }
+
+    attestations.sort((a, b) => a.attestedLedger - b.attestedLedger);
+
+    return {
+      domain,
+      attestations,
+      earliestLedgerCovered,
+      latestLedger: response.latestLedger,
+      oldestLedger: response.oldestLedger,
+    };
+  }
+}
+
+/**
+ * Decodes an on-chain Attested contract event into an AnchorAttestation record.
+ * Supports both v2 expanded events and v1 legacy payloads.
+ */
+export function decodeAttestationEvent(event: {
+  topic: readonly (xdr.ScVal | string)[];
+  value: xdr.ScVal | string;
+  ledger: number;
+}): AnchorAttestation {
+  let domain = "";
+  if (event.topic && event.topic.length > 1) {
+    const rawDomain = event.topic[1];
+    domain = String(
+      typeof rawDomain === "string"
+        ? scValToNative(xdr.ScVal.fromXDR(rawDomain, "base64"))
+        : scValToNative(rawDomain),
+    );
+  }
+
+  const raw =
+    typeof event.value === "string"
+      ? scValToNative(xdr.ScVal.fromXDR(event.value, "base64"))
+      : scValToNative(event.value);
+
+  if (raw && typeof raw === "object") {
+    const r = raw as Record<string, unknown>;
+    if (r.domain && typeof r.domain === "string") {
+      domain = r.domain;
+    }
+    const sepsNum = r.seps !== undefined ? Number(r.seps) : 0;
+    const probesRunNum = r.probes_run !== undefined ? Number(r.probes_run) : 0;
+    const probesPassedNum = r.probes_passed !== undefined ? Number(r.probes_passed) : 0;
+    const attestedLedgerNum =
+      r.attested_ledger !== undefined ? Number(r.attested_ledger) : event.ledger;
+    const tomlHashHex =
+      r.toml_hash && (r.toml_hash instanceof Uint8Array || Buffer.isBuffer(r.toml_hash))
+        ? Buffer.from(r.toml_hash).toString("hex")
+        : "";
+    const attesterAddr = r.attester ? String(r.attester) : "";
+
+    return {
+      domain,
+      seps: decodeBits(sepsNum, SEP_NUMBERS),
+      probesRun: decodeBits(probesRunNum, PROBE_NAMES),
+      probesPassed: decodeBits(probesPassedNum, PROBE_NAMES),
+      tomlHash: tomlHashHex,
+      attestedLedger: attestedLedgerNum,
+      attester: attesterAddr,
+    };
+  }
+
+  const attestedLedgerNum =
+    typeof raw === "number" || typeof raw === "bigint" ? Number(raw) : event.ledger;
+  return {
+    domain,
+    seps: [],
+    probesRun: [],
+    probesPassed: [],
+    tomlHash: "",
+    attestedLedger: attestedLedgerNum,
+    attester: "",
+  };
 }
 
 // The SDK's nativeToScVal infers `String` for JS strings only with an explicit
 // type hint; without it a domain would be encoded as a Symbol and the contract
 // would reject the call.
-import { nativeToScVal, type xdr } from "@stellar/stellar-sdk";
 function nativeToScValString(s: string): xdr.ScVal {
   return nativeToScVal(s, { type: "string" });
 }

@@ -34,6 +34,7 @@
     "fund:testnet": "tsx examples/fund-testnet-sender.ts",
     "probe:anchor": "tsx examples/probe-anchor.ts",
     "registry:read": "tsx examples/read-registry.ts",
+    "registry:history": "tsx examples/registry-history.ts",
     "attest": "tsx examples/attest.ts"
   },
   "dependencies": {
