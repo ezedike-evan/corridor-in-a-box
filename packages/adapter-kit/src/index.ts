@@ -16,6 +16,8 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 
+export { Sep10Client, jwtExpiryMs, type Sep10Signer } from "./sep10";
+
 /** A SEP-38 quote. `firm` quotes carry an id + expiry and bind the deliverer to a rate. */
 export interface Quote {
   readonly id: string;
