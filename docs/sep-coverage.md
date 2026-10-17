@@ -70,7 +70,9 @@ another transfer SEP is a new adapter, not an engine change:
   fits a _user-facing_ product, not an unattended corridor. If it were ever
   needed, the `open` step would return an `interactive_url` the caller must drive,
   and the engine would park in a `pending_user` state — a genuine engine change,
-  which is why it is out of scope today.
+  which is why it is out of scope today. See
+  [docs/protocols/sep24.md](./protocols/sep24.md) for a full breakdown of the
+  SEP-24 interactive lifecycle, state-machine implications, and options considered.
 
 ## External quotes (`fx.quote_source: external`)
 
