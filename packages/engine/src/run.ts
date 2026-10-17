@@ -17,7 +17,12 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 import type { RouteResolver } from "@corridor/router";
-import { ExternalQuoteProvider, type ExternalQuoteFn } from "@corridor/adapter-kit";
+import {
+  ExternalQuoteProvider,
+  toLegacy,
+  type ExternalQuoteFn,
+  type OpenTransaction,
+} from "@corridor/adapter-kit";
 import { canTransition, isTerminal, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
@@ -485,9 +490,10 @@ export async function execute(
   const opened = await timed("open", () => open(adapter, intent, q.value, corridor));
   if (!opened.ok) return die(opened.error);
   run.transactionId = opened.value.transactionId;
-  run.depositAddress = opened.value.depositAddress;
-  run.memo = opened.value.memo;
-  run.memoType = opened.value.memoType;
+  const legacy = toLegacy(opened.value);
+  run.depositAddress = legacy.depositAddress;
+  run.memo = legacy.memo;
+  run.memoType = legacy.memoType;
   {
     const t = await advance("opened");
     if (!t.ok) return die(t.error);
@@ -712,14 +718,17 @@ async function emitVerification(
 type Err = { ok: false; error: CorridorError };
 
 function settlementRequestFor(
-  opened: { depositAddress: string; memo?: string; memoType?: "text" | "hash" | "id" },
+  opened:
+    | OpenTransaction
+    | { depositAddress?: string; memo?: string; memoType?: "text" | "hash" | "id" },
   q: { sourceAmount: { amount: string } },
   corridor: Corridor,
 ): SettlementRequest {
+  const legacy = "instructions" in opened ? toLegacy(opened) : opened;
   return {
-    to: opened.depositAddress,
-    memo: opened.memo,
-    memoType: opened.memoType,
+    to: legacy.depositAddress ?? "",
+    memo: legacy.memo,
+    memoType: legacy.memoType,
     amount: { asset: corridor.settlement.bridge_asset, amount: q.sourceAmount.amount },
     corridor,
   };

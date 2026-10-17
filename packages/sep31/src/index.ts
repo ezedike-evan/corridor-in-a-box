@@ -28,6 +28,7 @@ import {
 import type {
   AdapterCapabilities,
   AnchorAdapter,
+  DepositInstructions,
   KycResult,
   OpenTransaction,
   Quote,
@@ -690,13 +691,23 @@ export class Sep31Adapter implements AnchorAdapter {
         stellar_memo?: string;
         stellar_memo_type?: string;
       };
+      const memoType = parseMemoType(j.stellar_memo_type);
+      const instructions: DepositInstructions = {
+        kind: "stellar_payment",
+        to: j.stellar_account_id,
+        memo: j.stellar_memo,
+        memoType,
+      };
       return ok<OpenTransaction>({
         transactionId: j.id,
+        instructions,
+        amountIn: {
+          asset: corridor.settlement.bridge_asset,
+          amount: quote.sourceAmount.amount,
+        },
         depositAddress: j.stellar_account_id,
         memo: j.stellar_memo,
-        // Carry the anchor's memo TYPE through. Assuming "text" corrupts a hash
-        // memo (32 bytes, over the 28-byte text cap) and the submit fails.
-        memoType: parseMemoType(j.stellar_memo_type),
+        memoType,
       });
     } catch (cause) {
       return fail("ANCHOR_UNAVAILABLE", `${this.name}: open-tx failed`, {
