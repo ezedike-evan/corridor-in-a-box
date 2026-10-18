@@ -36,22 +36,18 @@ import {
   Sep38QuoteProvider,
   type TransactionStatus,
 } from "@corridor/adapter-kit";
+import { Sep10Client, type Sep10Signer } from "@corridor/adapter-kit";
 import type { CheckResult, GateCheck, GateContext } from "@corridor/engine";
 
 type FetchLike = typeof fetch;
+
+export type { Sep10Signer } from "@corridor/adapter-kit";
 
 /**
  * Signs a SEP-10 challenge. The concrete implementation (Keypair + Transaction
  * from @stellar/stellar-sdk) is supplied by the caller, keeping this package
  * free of a chain SDK. See @corridor/stellar for a ready-made signer.
  */
-export interface Sep10Signer {
-  /** The Stellar account (G…) being authenticated. */
-  readonly account: string;
-  /** Sign the base64 challenge XDR and return the signed XDR. */
-  signChallenge(challengeXdr: string, networkPassphrase: string): Promise<string>;
-}
-
 export interface Sep31AdapterOptions {
   /** Inject a fetch implementation (defaults to global fetch). Handy for tests. */
   fetchImpl?: FetchLike;
@@ -241,26 +237,14 @@ export function parseRefunds(
 
 export { sep38SellAsset } from "@corridor/adapter-kit";
 
-/** Decode a JWT's `exp` claim (epoch ms) without verifying it. */
-function jwtExpiryMs(token: string): number | undefined {
-  const payload = token.split(".")[1];
-  if (!payload) return undefined;
-  try {
-    const json = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return typeof json.exp === "number" ? json.exp * 1000 : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export class Sep31Adapter implements AnchorAdapter {
   readonly name: string;
   private readonly anchor: Sep31Anchor;
   /** Bridge asset for this corridor — the denomination `amount_in` is reported in. */
   private readonly settlementAsset: string;
   private readonly fetchImpl: FetchLike;
-  private readonly sep10?: Sep10Signer;
-  private cachedToken?: { token: string; expMs: number };
+  private readonly sep10: Sep10Client;
+  private readonly sep10Signer?: Sep10Signer;
   private readonly sep38Provider: Sep38QuoteProvider;
 
   constructor(corridor: Corridor, opts: Sep31AdapterOptions = {}) {
@@ -273,7 +257,13 @@ export class Sep31Adapter implements AnchorAdapter {
     this.settlementAsset = corridor.settlement.bridge_asset;
     this.name = corridor.dest.name;
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.sep10 = opts.sep10;
+    this.sep10Signer = opts.sep10;
+    this.sep10 = new Sep10Client(
+      this.anchor.endpoints.web_auth,
+      this.anchor.endpoints.home_domain,
+      opts.sep10,
+      this.fetchImpl,
+    );
     this.sep38Provider = new Sep38QuoteProvider({
       context: "sep31",
       fetchImpl: this.fetchImpl,
@@ -293,54 +283,14 @@ export class Sep31Adapter implements AnchorAdapter {
   // handshake is a hard, retryable error. `ok(undefined)` means one thing only —
   // no auth was configured for this anchor, so anonymous access is intended.
   private async authToken(): Promise<Outcome<string | undefined>> {
-    const webAuth = this.anchor.endpoints.web_auth;
-    if (!webAuth || !this.sep10) return ok(undefined);
-
-    const now = Date.now();
-    if (this.cachedToken && this.cachedToken.expMs - 30_000 > now) {
-      return ok(this.cachedToken.token);
-    }
-
-    const authFailed = (why: string) =>
-      fail("ANCHOR_UNAVAILABLE", `${this.name}: SEP-10 auth failed (${why})`, {
-        retryable: true,
-      });
-
-    try {
-      const url = new URL(webAuth);
-      url.searchParams.set("account", this.sep10.account);
-      url.searchParams.set("home_domain", this.anchor.endpoints.home_domain);
-      const challengeRes = await this.fetchImpl(url.toString());
-      if (!challengeRes.ok) return authFailed(`challenge HTTP ${challengeRes.status}`);
-      const challenge = (await challengeRes.json()) as {
-        transaction?: string;
-        network_passphrase?: string;
-      };
-      if (!challenge.transaction || !challenge.network_passphrase) {
-        return authFailed("challenge response missing transaction/network_passphrase");
-      }
-
-      const signed = await this.sep10.signChallenge(
-        challenge.transaction,
-        challenge.network_passphrase,
-      );
-      const tokenRes = await this.fetchImpl(webAuth, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ transaction: signed }),
-      });
-      if (!tokenRes.ok) return authFailed(`token HTTP ${tokenRes.status}`);
-      const { token } = (await tokenRes.json()) as { token?: string };
-      if (!token) return authFailed("token response missing `token`");
-
-      this.cachedToken = { token, expMs: jwtExpiryMs(token) ?? now + 15 * 60_000 };
-      return ok(token);
-    } catch (cause) {
-      return fail("ANCHOR_UNAVAILABLE", `${this.name}: SEP-10 auth request failed`, {
-        retryable: true,
-        cause,
+    const auth = await this.sep10.token();
+    if (!auth.ok) {
+      return fail(auth.error.code, `${this.name}: ${auth.error.message}`, {
+        retryable: auth.error.retryable,
+        cause: auth.error.cause,
       });
     }
+    return auth;
   }
 
   /** `Authorization` header for an authenticated call, or {} when the corridor
@@ -413,8 +363,8 @@ export class Sep31Adapter implements AnchorAdapter {
           ...this.authHeader(auth.value),
         },
         body: JSON.stringify({
-          ...((opts.account ?? this.sep10?.account)
-            ? { account: opts.account ?? this.sep10?.account }
+          ...((opts.account ?? this.sep10Signer?.account)
+            ? { account: opts.account ?? this.sep10Signer?.account }
             : {}),
           ...(opts.type ? { type: opts.type } : {}),
           ...fields,

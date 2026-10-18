@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { parseCorridor, type Corridor } from "@corridor/manifest";
+import { parseCorridor, hashCorridor, type Corridor } from "@corridor/manifest";
 import { createMockAdapter, type OpenTransaction } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
 import { amountRangeCheck } from "@corridor/sep31";
@@ -683,6 +683,109 @@ describe("engine crash resume states", () => {
     expect(r.ok).toBe(false);
     expect((await store.get(key))?.state).toBe("refunded");
     expect((await store.get(key))?.refundId).toBeTruthy();
+  });
+
+  describe("manifest pinning on crash resume", () => {
+    it("resumes normally when the manifest hash is unchanged", async () => {
+      const store = new InMemoryIdempotencyStore();
+      const key = "resume-hash-unchanged";
+      const c = corridor();
+      const hash = hashCorridor(c);
+      await store.put({
+        ...resumableRun("settled", key),
+        manifestHash: hash,
+      });
+
+      const r = await execute(intent(key), c, { ...deps(), idempotency: store });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+    });
+
+    it("fails with MANIFEST_CHANGED before settle and does not submit payment", async () => {
+      const store = new InMemoryIdempotencyStore();
+      const key = "resume-hash-changed-before-settle";
+      const c = corridor();
+      let submitted = false;
+      const submitter = createMockSubmitter();
+      const origSubmit = submitter.submit.bind(submitter);
+      submitter.submit = async (req) => {
+        submitted = true;
+        return origSubmit(req);
+      };
+
+      // Run crashed in 'opened' state under an old manifest hash
+      await store.put({
+        ...resumableRun("opened", key),
+        stellarTxHash: undefined,
+        manifestHash: "old_manifest_hash_that_differed_from_current",
+      });
+
+      const r = await execute(intent(key), c, {
+        ...deps(),
+        submitter,
+        idempotency: store,
+      });
+
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error.code).toBe("MANIFEST_CHANGED");
+        expect(r.error.message).toContain("corridor manifest changed since run opened");
+      }
+      // Submitter must never have been called: money must not move!
+      expect(submitted).toBe(false);
+      expect((await store.get(key))?.state).toBe("failed");
+    });
+
+    it("continues reconcile only and logs a warning when manifest changed after settle", async () => {
+      const store = new InMemoryIdempotencyStore();
+      const key = "resume-hash-changed-after-settle";
+      const c = corridor();
+      let submitted = false;
+      const submitter = createMockSubmitter();
+      submitter.submit = async () => {
+        submitted = true;
+        throw new Error("should not be called");
+      };
+
+      const warnings: { msg: string; fields?: Record<string, unknown> }[] = [];
+      const logger = {
+        log: (level: string, msg: string, fields?: Record<string, unknown>) => {
+          if (level === "warn") warnings.push({ msg, fields });
+        },
+      };
+
+      // Run crashed in 'settled' state under an old manifest hash
+      await store.put({
+        ...resumableRun("settled", key),
+        manifestHash: "old_manifest_hash_that_differs",
+      });
+
+      const r = await execute(intent(key), c, {
+        ...deps(),
+        submitter,
+        idempotency: store,
+        logger,
+      });
+
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+      expect(submitted).toBe(false);
+      expect(warnings.some((w) => w.msg === "corridor.manifest.changed")).toBe(true);
+    });
+
+    it("allows legacy runs without a manifest hash to resume (backward compatibility)", async () => {
+      const store = new InMemoryIdempotencyStore();
+      const key = "resume-legacy-no-hash";
+      const c = corridor();
+      await store.put({
+        ...resumableRun("settled", key),
+        manifestHash: undefined,
+      });
+
+      const r = await execute(intent(key), c, { ...deps(), idempotency: store });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+    });
   });
 });
 

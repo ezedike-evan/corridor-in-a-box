@@ -11,17 +11,24 @@ export function CorridorCard({ corridor }: { corridor: Corridor }) {
     <Card className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <Link
-            href={`/corridors/${corridor.id}`}
-            className="font-mono text-sm font-semibold hover:text-blue-600 hover:underline"
-          >
-            {corridor.id}
-          </Link>
+          <h3 className="font-mono text-sm font-semibold">
+            <Link
+              href={`/corridors/${corridor.id}`}
+              className="hover:text-blue-600 hover:underline dark:hover:text-blue-400"
+            >
+              {corridor.id}
+            </Link>
+          </h3>
           <div className="mt-1 flex items-center gap-1.5 text-sm text-secondary-text">
             {corridor.fx.path.map((hop, i) => (
               <span key={i} className="flex items-center gap-1.5">
                 <span className="font-medium text-primary-text">{hop}</span>
-                {i < corridor.fx.path.length - 1 && <ArrowRight size={12} />}
+                {i < corridor.fx.path.length - 1 && (
+                  <>
+                    <ArrowRight size={12} />
+                    <span className="sr-only">to</span>
+                  </>
+                )}
               </span>
             ))}
           </div>
@@ -45,15 +52,21 @@ export function CorridorCard({ corridor }: { corridor: Corridor }) {
       <div className="flex flex-wrap items-center gap-4">
         <Link
           href={`/corridors/${corridor.id}`}
-          className="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:underline"
+          // Every card says "Corridor details"; the label says which corridor, and still
+          // starts with the visible words so voice control can say them.
+          aria-label={`Corridor details for ${corridor.id}`}
+          className="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400"
         >
-          Corridor details <ArrowRight size={14} />
+          Corridor details <ArrowRight size={14} aria-hidden="true" />
         </Link>
         <Link
           href={`/payments?corridor=${corridor.id}`}
-          className="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:underline"
+          // Every card says "Run a payment"; the label says which corridor, and still
+          // starts with the visible words so voice control can say them.
+          aria-label={`Run a payment on ${corridor.id}`}
+          className="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400"
         >
-          Run a payment <ArrowRight size={14} />
+          Run a payment <ArrowRight size={14} aria-hidden="true" />
         </Link>
       </div>
     </Card>

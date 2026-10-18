@@ -19,6 +19,8 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 
+export { Sep10Client, jwtExpiryMs, type Sep10Signer } from "./sep10";
+
 /** A SEP-38 quote. `firm` quotes carry an id + expiry and bind the deliverer to a rate. */
 export interface Quote {
   readonly id: string;
@@ -218,10 +220,8 @@ export interface RefundRef {
 }
 
 /**
- * SHIM for #187 (minimal, to be reconciled with that issue's PR).
  * What an adapter supports, discoverable up front instead of by failing.
- * `settlement` is `readonly string[]` here because `DepositInstructions` (the
- * type #187 names) does not exist in this tree yet.
+ * Exposes supported quote styles, KYC mechanism, settlement kinds, refunds and callbacks.
  */
 export interface AdapterCapabilities {
   readonly protocol: string;
@@ -666,3 +666,5 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
     },
   };
 }
+
+export * from "./conformance";
