@@ -7,7 +7,13 @@
 // can submit what was observed without reprobing.
 
 import { writeFileSync } from "node:fs";
-import { decodeProbes, decodeSeps, loadFleet, probeAnchor, type ProbeResult } from "@corridor/probe";
+import {
+  decodeProbes,
+  decodeSeps,
+  loadFleet,
+  probeAnchor,
+  type ProbeResult,
+} from "@corridor/probe";
 
 interface SweepArgs {
   outFile: string;
