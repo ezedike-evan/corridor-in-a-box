@@ -37,7 +37,14 @@
     "Each entry in `anchors` records curator-declared context (name, ISO 3166-1",
     "alpha-2 countries, kind, directory/manifest source, and date added). Countries",
     "and `kind` are curator-declared metadata, NOT attested facts; `domains` mirrors",
-    "`anchors[].domain` in order."
+    "`anchors[].domain` in order.",
+    "",
+    "stellar.moneygram.com, mercuryo.io, lightnet.io, owlting.com, arf.one and",
+    "stellar-sep-24.banxa.com were added for the ng-cn RMB off-ramp research (#230):",
+    "they are the Stellar Anchor Directory entries listing China, Hong Kong or",
+    "Singapore that publish a stellar.toml or claim a SEP. None advertises SEP-31",
+    "or a CNY/CNH/HKD asset; see corridors/ng-cn.corridor.yaml for the probe results",
+    "of 2026-10-18. Their countries are the directory's listing, not attested facts."
   ],
   "domains": [
     "testanchor.stellar.org",
@@ -45,7 +52,13 @@
     "stellar.org",
     "lobstr.co",
     "blindpay.com",
-    "mykobo.co"
+    "mykobo.co",
+    "stellar.moneygram.com",
+    "mercuryo.io",
+    "lightnet.io",
+    "owlting.com",
+    "arf.one",
+    "stellar-sep-24.banxa.com"
   ],
   "anchors": [
     {
@@ -95,6 +108,54 @@
       "kind": "other",
       "source": "https://anchors.stellar.org/?search=MyKobo",
       "added": "2026-10-16"
+    },
+    {
+      "domain": "stellar.moneygram.com",
+      "name": "MoneyGram Ramps",
+      "countries": ["HK", "SG"],
+      "kind": "other",
+      "source": "https://anchors.stellar.org/?search=MoneyGram",
+      "added": "2026-10-18"
+    },
+    {
+      "domain": "mercuryo.io",
+      "name": "Mercuryo",
+      "countries": ["CN", "SG"],
+      "kind": "other",
+      "source": "https://anchors.stellar.org/?search=Mercuryo",
+      "added": "2026-10-18"
+    },
+    {
+      "domain": "lightnet.io",
+      "name": "Lightnet",
+      "countries": ["CN", "SG"],
+      "kind": "other",
+      "source": "https://anchors.stellar.org/?search=Lightnet",
+      "added": "2026-10-18"
+    },
+    {
+      "domain": "owlting.com",
+      "name": "OwlPay",
+      "countries": ["CN", "HK", "SG"],
+      "kind": "other",
+      "source": "https://anchors.stellar.org/?search=OwlPay",
+      "added": "2026-10-18"
+    },
+    {
+      "domain": "arf.one",
+      "name": "Arf",
+      "countries": ["CN", "SG"],
+      "kind": "other",
+      "source": "https://anchors.stellar.org/?search=Arf",
+      "added": "2026-10-18"
+    },
+    {
+      "domain": "stellar-sep-24.banxa.com",
+      "name": "Banxa",
+      "countries": ["HK"],
+      "kind": "other",
+      "source": "https://anchors.stellar.org/?search=Banxa",
+      "added": "2026-10-18"
     }
   ]
 }
