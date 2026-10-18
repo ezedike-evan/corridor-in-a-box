@@ -35,6 +35,7 @@
     "probe:anchor": "tsx examples/probe-anchor.ts",
     "probe:sweep": "tsx examples/sweep-anchors.ts",
     "registry:read": "tsx examples/read-registry.ts",
+    "registry:history": "tsx examples/registry-history.ts",
     "attest": "tsx examples/attest.ts"
   },
   "dependencies": {
@@ -46,6 +47,7 @@
     "@corridor/registry": "workspace:*",
     "@corridor/router": "workspace:*",
     "@corridor/sep31": "workspace:*",
+    "@corridor/sep6": "workspace:*",
     "@corridor/service": "workspace:*",
     "@corridor/stellar": "workspace:*",
     "@corridor/types": "workspace:*"
@@ -54,10 +56,10 @@
     "@eslint/js": "^10.0.1",
     "@stellar/stellar-sdk": "^17.2.1",
     "@types/node": "^26.6.4",
-    "@types/pg": "^8.11.0",
+    "@types/pg": "^8.23.1",
     "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",
-    "pg": "^8.13.0",
+    "pg": "^8.23.1",
     "prettier": "^3.9.9",
     "tsx": "^4.23.13",
     "typescript": "^6.0.3",

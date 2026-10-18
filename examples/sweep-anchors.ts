@@ -6,12 +6,8 @@
 // and saves the exact ProbeResult array to disk so the attestation step
 // can submit what was observed without reprobing.
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { decodeProbes, decodeSeps, probeAnchor, type ProbeResult } from "@corridor/probe";
-
-function load<T>(relative: string): T {
-  return JSON.parse(readFileSync(new URL(relative, import.meta.url), "utf8")) as T;
-}
+import { writeFileSync } from "node:fs";
+import { decodeProbes, decodeSeps, loadFleet, probeAnchor, type ProbeResult } from "@corridor/probe";
 
 interface SweepArgs {
   outFile: string;
@@ -36,10 +32,7 @@ function parseSweepArgs(args: readonly string[]): SweepArgs {
 
 async function main(): Promise<void> {
   const { outFile, domains } = parseSweepArgs(process.argv.slice(2));
-  const targetDomains =
-    domains.length > 0
-      ? domains
-      : load<{ domains: string[] }>("../contracts/anchors.json").domains;
+  const targetDomains = domains.length > 0 ? domains : loadFleet().domains;
 
   console.log(`probing ${targetDomains.length} anchor(s): ${targetDomains.join(" ")}\n`);
 

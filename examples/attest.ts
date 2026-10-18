@@ -17,6 +17,7 @@ import {
   probeAnchor,
   decodeProbes,
   decodeSeps,
+  loadFleet,
   loadProbeResultsFromFile,
   parseAttestArgs,
   type ProbeResult,
@@ -63,10 +64,7 @@ async function main(): Promise<void> {
       process.exit(1);
     }
   } else {
-    const targetDomains =
-      domains.length > 0
-        ? domains
-        : load<{ domains: string[] }>("../contracts/anchors.json").domains;
+    const targetDomains = domains.length > 0 ? domains : loadFleet().domains;
     results = [];
     for (const domain of targetDomains) {
       results.push(await probeAnchor(domain));
