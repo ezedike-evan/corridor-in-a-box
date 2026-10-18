@@ -2,17 +2,23 @@ import Link from "next/link";
 import { ArrowRight, CircleCheck, CircleHelp, CircleSlash } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
-import { liveness, type Corridor } from "@/lib/corridors";
+import { liveness, type Corridor, type LivenessState } from "@/lib/corridors";
+
+export interface BadgeConfig {
+  variant: "default" | "success" | "warning" | "danger" | "info";
+  Icon: React.ComponentType<{ size?: number; className?: string }>;
+  label: string;
+}
 
 // Green is reserved for corridors whose endpoints someone has actually checked.
 // A lane with plausible-looking URLs that nobody has confirmed is amber, not
 // green — the badge reports what we know, not what the YAML claims.
-const BADGE = {
+export const BADGE = {
   proven: { variant: "success", Icon: CircleCheck, label: "proven" },
   verified: { variant: "success", Icon: CircleCheck, label: "verified" },
   unverified: { variant: "warning", Icon: CircleHelp, label: "unverified" },
   "not-runnable": { variant: "default", Icon: CircleSlash, label: "not runnable" },
-} as const;
+} as const satisfies Record<LivenessState, BadgeConfig>;
 
 export function CorridorCard({ corridor }: { corridor: Corridor }) {
   const live = liveness(corridor);

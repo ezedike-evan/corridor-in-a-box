@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ArrowRight, Boxes, ShieldCheck, Repeat, Activity, Info, Link2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { CorridorCard } from "@/components/CorridorCard";
+import { LivenessLegend } from "@/components/LivenessLegend";
 import { AnchorCard } from "@/components/AnchorCard";
 import { corridors, liveness } from "@/lib/corridors";
 import { fetchAttestations, REGISTRY_ID, REGISTRY_NETWORK } from "@/lib/registry";
@@ -130,6 +131,7 @@ export default async function Home() {
             <Info size={13} className="text-blue-600" /> Manifest snapshot — not a live liveness probe
           </span>
         </div>
+        <LivenessLegend />
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {corridors.map((c) => (
             <CorridorCard key={c.id} corridor={c} />
