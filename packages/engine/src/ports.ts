@@ -17,6 +17,8 @@ export interface SettlementRef {
   readonly ledger?: number;
   /** Network fee actually charged, in stroops, as Horizon's `fee_charged` reports it. */
   readonly feeCharged?: string;
+  /** Stellar claimable balance id (when created via createClaimableBalance). */
+  readonly claimableBalanceId?: string;
 }
 
 export interface SettlementRequest {
@@ -121,6 +123,8 @@ export class InMemoryWaker implements ReconcileWaker {
  * The kind of deposit instructions the receiving anchor issued.
  *
  * Sourced directly from DepositInstructions in @corridor/adapter-kit (#183).
+ * `"stellar_payment"` sends the bridge asset to a Stellar address with an optional memo;
+ * `"claimable_balance"` creates an on-chain claimable balance for the recipient.
  */
 export type DepositInstructionsKind = DepositInstructions["kind"];
 
