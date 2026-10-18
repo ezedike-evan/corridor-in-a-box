@@ -51,11 +51,11 @@ stateDiagram-v2
     quoted --> compliant
     compliant --> opened
     opened --> funding: source mode requires funds
-    opened --> verified: prefunded and balance preflight passes
+    opened --> verifying: prefunded and balance preflight passes
     funding --> funded: source deposit confirmed
     funding --> recovering: source funding failed or ambiguous
-    funded --> verified
-    verified --> settling
+    funded --> verifying
+    verifying --> settling
     settling --> settled
     settled --> reconciled
     reconciled --> completed
@@ -88,7 +88,7 @@ money has moved. Funding first would strand value in the treasury whenever the
 destination open fails.
 
 For `prefunded`, steps 4-5 are a balance preflight and the run goes
-`opened -> verified` directly (the `funding`/`funded` states are not persisted).
+`opened -> verifying` directly (the `funding`/`funded` states are not persisted).
 
 ### Two-leg quote
 
