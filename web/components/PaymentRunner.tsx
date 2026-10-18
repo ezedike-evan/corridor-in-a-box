@@ -6,8 +6,10 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { corridors, getCorridor, liveness, VERBS } from "@/lib/corridors";
-import type { CorridorState, RunOutcome } from "@/lib/engine-sim";
+import type { EngineDemoResult, PaymentScenario } from "@/lib/engine-demo";
 import { STEP_STATUS_TEXT, announceRun, stepStatus } from "@/lib/run-status";
+
+type CorridorState = EngineDemoResult["state"];
 
 const ALL_STATES: CorridorState[] = [
   "created",
@@ -16,9 +18,15 @@ const ALL_STATES: CorridorState[] = [
   "opened",
   "verifying",
   "settling",
+  "retrying",
   "settled",
+  "recovering",
+  "refund_pending",
   "reconciled",
   "completed",
+  "refunded",
+  "held",
+  "failed",
 ];
 
 export function PaymentRunner({ initialCorridor }: { initialCorridor?: string }) {
@@ -27,9 +35,10 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
   );
   const [amount, setAmount] = useState("100.00");
   const [idemKey, setIdemKey] = useState("demo-0001");
+  const [scenario, setScenario] = useState<PaymentScenario>("happy");
   const [running, setRunning] = useState(false);
   const [reached, setReached] = useState<CorridorState[]>([]);
-  const [result, setResult] = useState<RunOutcome | null>(null);
+  const [result, setResult] = useState<EngineDemoResult | null>(null);
   // The amount the last run was sent with, so the field is only marked invalid
   // while it still holds the value the engine refused.
   const [submittedAmount, setSubmittedAmount] = useState<string | null>(null);
@@ -39,6 +48,7 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
   const uid = useId();
   const ids = {
     corridor: `${uid}-corridor`,
+    scenario: `${uid}-scenario`,
     amount: `${uid}-amount`,
     amountUnit: `${uid}-amount-unit`,
     amountError: `${uid}-amount-error`,
@@ -67,12 +77,13 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
           sender: { id: "sender-1" },
           recipient: { id: "recipient-1" },
           sourceAmount: { asset: "USDC", amount },
+          scenario,
         }),
       });
 
-      let outcome: RunOutcome;
+      let outcome: EngineDemoResult;
       try {
-        outcome = (await res.json()) as RunOutcome;
+        outcome = (await res.json()) as EngineDemoResult;
       } catch {
         throw new Error(`server returned ${res.status} with a non-JSON body`);
       }
@@ -174,6 +185,27 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
         </div>
 
         <div>
+          <label htmlFor={ids.scenario} className="mb-1 block text-sm font-medium">
+            Scenario
+          </label>
+          <select
+            id={ids.scenario}
+            value={scenario}
+            onChange={(e) => {
+              const nextScenario = e.target.value as PaymentScenario;
+              setScenario(nextScenario);
+              setIdemKey(`demo-${nextScenario}-${crypto.randomUUID()}`);
+            }}
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+          >
+            <option value="happy">Happy path</option>
+            <option value="quote-expired">Quote expired</option>
+            <option value="settle-fails">Settlement retries then fails</option>
+            <option value="reconcile-stall">Reconciliation stalls and holds</option>
+          </select>
+        </div>
+
+        <div>
           <label htmlFor={ids.idemKey} className="mb-1 block text-sm font-medium">
             Idempotency key
           </label>
@@ -190,9 +222,7 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
           </p>
         </div>
 
-        {/* State the run's epistemic status up front. A green trail below
-            must not be read as evidence that the lane works — in-process runs
-            are simulations and do not touch live network endpoints. */}
+        {/* Mock adapters exercise the real engine without using live endpoints or funds. */}
         <div className="rounded-lg border border-border bg-bg-subtle px-3 py-2 text-xs text-secondary-text">
           <span className="font-medium">
             {live.state === "proven"
@@ -204,8 +234,8 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
                   : "Corridor NOT RUNNABLE."}
           </span>{" "}
           {live.state === "proven" || live.state === "verified"
-            ? "This run is still a simulation — it does not touch the network."
-            : "No anchor here has been confirmed to exist. This run is a simulation of what the engine would do, not evidence the lane works."}
+            ? "The real engine runs with mock anchor and settlement adapters; no funds move."
+            : "The real engine runs with mock adapters, not live anchor endpoints or funds."}
         </div>
 
         <div className="flex gap-2">

@@ -177,6 +177,26 @@ export interface ExecuteOptions {
    * on-chain attestation.
    */
   trustManifestWithoutAttestation?: boolean;
+  /**
+   * Run quote → comply → open → pre-settle gate against the real anchor, then
+   * stop before `settling`: `SettlementSubmitter.submit()` (and `findExisting`)
+   * are never called. Every gate result is recorded on the audit trail.
+   *
+   * When the gate passes, the run is persisted as `failed` with
+   * `DRY_RUN_COMPLETE` and that error is returned, its `cause` carrying the
+   * gate report (`{ dryRun: true, checks }`). A gate refusal ends exactly as it
+   * would on a real run. Either way the idempotency key is spent.
+   *
+   * The receiving anchor is left holding an opened SEP-31 transaction that is
+   * never funded; it expires on the anchor's side.
+   */
+  dryRun?: boolean;
+}
+
+/** The `cause` of a `DRY_RUN_COMPLETE` error: what the gate said before the run stopped. */
+export interface DryRunReport {
+  readonly dryRun: true;
+  readonly checks: readonly CheckResult[];
 }
 
 /**
@@ -624,6 +644,23 @@ export async function execute(
         const t = await advance("verifying", { checks: gateChecks });
         if (!t.ok) return die(t.error);
       }
+    }
+
+    // --- dry run: the gate passed; stop before any money can move ---------
+    // `die`, not a new terminal state: `failed` already means "nothing was
+    // sent", which is exactly true here, and the breaker treats the code as
+    // neutral (it is not in LANE_FAILURE_CODES).
+    if (opts.dryRun) {
+      const report: DryRunReport = { dryRun: true, checks: gateChecks };
+      return die(
+        {
+          code: "DRY_RUN_COMPLETE",
+          message: `dry run stopped before settling after ${gateChecks.length} pre-settle check(s) passed; anchor transaction ${opened.value.transactionId} was opened and will not be funded`,
+          retryable: false,
+          cause: report,
+        },
+        gateChecks,
+      );
     }
 
     {

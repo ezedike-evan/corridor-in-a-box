@@ -15,7 +15,6 @@
 
 import type { Sep31Anchor, Corridor } from "@corridor/manifest";
 import {
-  compareAmounts,
   fail,
   isValidAmount,
   ok,
@@ -30,17 +29,17 @@ import {
   type KycResult,
   type OpenTransaction,
   type Quote,
-  type RefundInfo,
-  type RefundPayment,
   type RefundRef,
   Sep38QuoteProvider,
   type TransactionStatus,
+  parseRefunds,
 } from "@corridor/adapter-kit";
 import { Sep10Client, type Sep10Signer } from "@corridor/adapter-kit";
 import type { CheckResult, GateCheck, GateContext } from "@corridor/engine";
 
 type FetchLike = typeof fetch;
 
+export type { RefundInfo, RefundPayment } from "@corridor/adapter-kit";
 export type { Sep10Signer } from "@corridor/adapter-kit";
 
 /**
@@ -132,107 +131,21 @@ export function mapSep31Status(raw: string): {
   return { status, settled: false, terminalFailure: false, awaitingInput: false };
 }
 
-/** The `refunds` object as SEP-31 puts it on the wire — every field untrusted. */
-interface RawRefunds {
-  amount_refunded?: unknown;
-  amount_fee?: unknown;
-  payments?: unknown;
-}
+export { parseRefunds };
 
-/**
- * A decimal amount string, or undefined if the anchor sent anything else.
- *
- * Deliberately refuses numbers. An anchor that sends `100.1` as JSON has
- * already put the value through a float64, and accepting it here would launder
- * that into a `Money` the rest of the system trusts. Better to report nothing
- * than to report a number that has already lost precision.
- */
 function amountString(v: unknown): string | undefined {
   return typeof v === "string" && isValidAmount(v.trim()) ? v.trim() : undefined;
 }
 
-/** A non-empty string, or undefined if the anchor sent anything else. */
 function nonEmptyString(v: unknown): string | undefined {
   return typeof v === "string" && v ? v : undefined;
 }
 
-/**
- * SEP-31's `stellar_memo_type`, case-insensitively, or undefined when absent or
- * not one of the three memo encodings Stellar supports. Never defaulted to
- * "text" here: a hash memo encoded as text is corrupted, so an unknown type is
- * reported as unknown.
- */
 function parseMemoType(v: unknown): "text" | "hash" | "id" | undefined {
   const memoType = typeof v === "string" ? v.toLowerCase() : undefined;
   return memoType === "hash" || memoType === "id" || memoType === "text"
     ? memoType
     : undefined;
-}
-
-/**
- * Parse SEP-31's `refunds` object off a transaction record.
- *
- * Everything is optional and untrusted: anchors omit `refunds` entirely on the
- * happy path, amounts arrive as strings, and a malformed field must never turn
- * a poll into an error — the status classification is what the engine acts on
- * and it is decided independently of this.
- *
- * Returns undefined rather than a zero-filled object when the refund cannot be
- * read: "refunded nothing" and "said nothing" are different facts, and the
- * engine must not be able to confuse them.
- *
- * @param settledAmount the amount that went out (`amount_in`), used to tell a
- * partial refund from a full one. Compared with `compareAmounts` — "100" and
- * "100.00" are the same amount of money and string equality says otherwise.
- */
-export function parseRefunds(
-  refunds: unknown,
-  asset: string,
-  settledAmount?: string,
-): RefundInfo | undefined {
-  if (!refunds || typeof refunds !== "object" || Array.isArray(refunds)) return undefined;
-  const raw = refunds as RawRefunds;
-
-  const amountRefunded = amountString(raw.amount_refunded);
-  if (amountRefunded === undefined) return undefined;
-
-  // A missing fee is a real answer — nothing was withheld. A malformed one is
-  // not, but it does not invalidate the refunded amount, so it reads as zero.
-  const amountFee = amountString(raw.amount_fee) ?? "0";
-
-  const payments: RefundPayment[] = [];
-  if (Array.isArray(raw.payments)) {
-    for (const entry of raw.payments) {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-      const p = entry as { id?: unknown; id_type?: unknown; amount?: unknown; fee?: unknown };
-      const amount = amountString(p.amount);
-      // An entry with no id or no readable amount says nothing; drop that entry
-      // rather than the whole refund, which the totals above still describe.
-      if (typeof p.id !== "string" || !p.id || amount === undefined) continue;
-      payments.push({
-        id: p.id,
-        ...(typeof p.id_type === "string" && p.id_type ? { idType: p.id_type } : {}),
-        amount: { asset, amount },
-        fee: { asset, amount: amountString(p.fee) ?? "0" },
-      });
-    }
-  }
-
-  const settled = settledAmount !== undefined ? amountString(settledAmount) : undefined;
-  let completeness: RefundInfo["completeness"] = "unknown";
-  if (settled !== undefined) {
-    const cmp = compareAmounts(amountRefunded, settled);
-    // An over-refund (cmp > 0) is anomalous but not partial: the whole payment
-    // came back and then some. Reporting it as "partial" would be a lie.
-    if (cmp.ok) completeness = cmp.value < 0 ? "partial" : "full";
-  }
-
-  return {
-    amountRefunded: { asset, amount: amountRefunded },
-    amountFee: { asset, amount: amountFee },
-    payments,
-    completeness,
-  };
 }
 
 export { sep38SellAsset } from "@corridor/adapter-kit";

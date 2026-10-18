@@ -226,7 +226,7 @@ export class UnimplementedSubmitter implements SettlementSubmitter {
 
 /** Test/example submitter: pretends the on-chain payment succeeded. */
 export function createMockSubmitter(
-  opts: { failSubmit?: boolean; existingRef?: SettlementRef } = {},
+  opts: { failSubmit?: boolean; failRefund?: boolean; existingRef?: SettlementRef } = {},
 ): SettlementSubmitter {
   let n = 0;
   const submitted: Array<{ request: SettlementRequest; reference: SettlementRef }> = [];
@@ -257,6 +257,11 @@ export function createMockSubmitter(
     },
     async refund(req) {
       void req;
+      if (opts.failRefund) {
+        return fail("REFUND_UNSUPPORTED", "mock refund configured to fail", {
+          retryable: false,
+        });
+      }
       return ok<SettlementRef>({ stellarTxHash: hash("mockrf"), ledger: 1_000_000 + n });
     },
   };

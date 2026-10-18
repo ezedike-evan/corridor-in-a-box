@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   liveness,
+  loadCorridor,
   parseCorridor,
   LIVENESS_LABEL,
   hashCorridor,
@@ -342,6 +343,49 @@ describe("manifest", () => {
         const live = liveness(parsed.value);
         expect(live.state).toBe("not-runnable");
         expect(live.runnable).toBe(false);
+      }
+    });
+
+    it("reports gaps and warning for external quote_source (ng-cowrie)", () => {
+      const loaded = loadCorridor("corridors/ng-cowrie.corridor.yaml");
+      expect(loaded.ok).toBe(true);
+      if (loaded.ok) {
+        const live = liveness(loaded.value);
+        expect(live.state).toBe("verified");
+        expect(live.runnable).toBe(true);
+        expect(live.gaps).toContain("quote");
+        expect(live.warnings.some((w) => w.includes("quote_source=external"))).toBe(true);
+      }
+    });
+
+    it("reports no quote gaps for valid sep38 corridor with quote_server", () => {
+      const parsed = parseCorridor(verifiedCorridor);
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) {
+        const live = liveness(parsed.value);
+        expect(live.state).toBe("verified");
+        expect(live.gaps).not.toContain("quote");
+        expect(live.warnings.some((w) => w.includes("quote_source=external"))).toBe(false);
+      }
+    });
+
+    it("warns when fx.quote_source=sep38 but dest exposes no quote_server", () => {
+      const noQuoteServer = {
+        ...verifiedCorridor,
+        dest: {
+          ...verifiedCorridor.dest,
+          endpoints: {
+            home_domain: "d.example",
+            transfer_server_sep31: "https://d.example/sep31",
+            endpoints_verified_at: "2026-09-20",
+          },
+        },
+      };
+      const parsed = parseCorridor(noQuoteServer);
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) {
+        const live = liveness(parsed.value);
+        expect(live.warnings.some((w) => w.includes("fx.quote_source=sep38"))).toBe(true);
       }
     });
   });

@@ -16,8 +16,12 @@ import type { Corridor } from "@corridor/manifest";
 import { execute, type EngineDeps } from "@corridor/engine";
 import {
   constantTimeEqual,
+  err,
   isSettleableAmount,
+  ok,
   type CorridorErrorCode,
+  type Outcome,
+  type PartyRef,
   type PaymentIntent,
 } from "@corridor/types";
 
@@ -160,6 +164,9 @@ const STATUS_BY_CODE: Record<CorridorErrorCode, number> = {
   // the caller can resolve.
   CORRIDOR_HALTED: 503,
   ENGINE_MISCONFIGURED: 500,
+  // The HTTP API never starts a dry run, so this only keeps the table total.
+  // 409, not 2xx: no payment was made, and the key is spent.
+  DRY_RUN_COMPLETE: 409,
 };
 
 /** Token-bucket rate limiter, keyed per client. In-memory; swap for Redis at scale. */
@@ -213,18 +220,192 @@ export class TokenBucket implements RateLimiter {
   }
 }
 
-function isPaymentBody(b: unknown): b is PaymentIntent {
-  if (typeof b !== "object" || b === null) return false;
-  const o = b as Record<string, unknown>;
-  const amount = o.sourceAmount as Record<string, unknown> | undefined;
-  return (
-    typeof o.idempotencyKey === "string" &&
-    typeof o.corridorId === "string" &&
-    typeof (o.sender as Record<string, unknown>)?.id === "string" &&
-    typeof (o.recipient as Record<string, unknown>)?.id === "string" &&
-    typeof amount?.asset === "string" &&
-    typeof amount?.amount === "string"
-  );
+/** A rejected payment body, pointing at the offending input so the caller can
+ *  fix exactly that field instead of re-reading the whole schema. */
+export interface PaymentBodyError {
+  /** Path of the offending input, e.g. "idempotencyKey", "sender.sep12Id",
+   *  "destinationFields.routing". `<body>` for a body that is not an object. */
+  readonly field: string;
+  /** Why it was rejected. Deliberately generic: no anchor internals, no echo
+   *  of the offending value beyond its name. */
+  readonly reason: string;
+}
+
+/** The only top-level fields POST /payments accepts. Unknown keys are refused
+ *  rather than ignored: a silently-dropped field is a caller debugging a typo
+ *  against an engine that never saw their input. */
+const PAYMENT_FIELDS = new Set([
+  "idempotencyKey",
+  "corridorId",
+  "sender",
+  "recipient",
+  "sourceAmount",
+  "destinationFields",
+]);
+
+/** idempotencyKey becomes a Postgres primary key and a log field. Bounded and
+ *  charset-checked here the same way the web route bounds it (web/app/api/payments/route.ts):
+ *  1-128 chars of [A-Za-z0-9._:-]. Same rule as the web proxy so the two
+ *  refuse the SAME bodies — a body one layer accepts and the other rejects is
+ *  a support ticket waiting to happen. */
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]+$/;
+
+const MAX_IDEMPOTENCY_KEY = 128;
+const MAX_CORRIDOR_ID = 128;
+const MAX_DESTINATION_FIELD_KEYS = 50;
+const MAX_DESTINATION_FIELD_VALUE = 256;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+const reject = (field: string, reason: string) => err({ field, reason });
+
+/** Sanity-check one party object (sender/recipient): the id must be a real,
+ *  non-empty string and the optional fields must at least be strings. */
+function parseParty(
+  v: unknown,
+  field: "sender" | "recipient",
+): Outcome<PartyRef, PaymentBodyError> {
+  if (!isPlainObject(v)) {
+    return reject(field, "expected an object with a string id");
+  }
+  for (const key of Object.keys(v)) {
+    if (key !== "id" && key !== "jurisdiction" && key !== "sep12Id") {
+      return reject(`${field}.${key}`, "unknown field");
+    }
+  }
+  if (typeof v.id !== "string") {
+    return reject(`${field}.id`, "expected a string");
+  }
+  if (v.id.length === 0) {
+    return reject(`${field}.id`, "must not be empty");
+  }
+  if ("jurisdiction" in v && v.jurisdiction !== undefined) {
+    if (typeof v.jurisdiction !== "string") {
+      return reject(`${field}.jurisdiction`, "expected a string");
+    }
+  }
+  if ("sep12Id" in v && v.sep12Id !== undefined) {
+    if (typeof v.sep12Id !== "string") {
+      return reject(`${field}.sep12Id`, "expected a string");
+    }
+  }
+  const party: PartyRef = {
+    id: v.id,
+    ...(typeof v.jurisdiction === "string" ? { jurisdiction: v.jurisdiction } : {}),
+    ...(typeof v.sep12Id === "string" ? { sep12Id: v.sep12Id } : {}),
+  };
+  return ok(party);
+}
+
+/**
+ * Parse POST /payments bodies strictly, replacing the old `isPaymentBody`
+ * six-field spot check, which only proved six properties were strings and
+ * then handed the rest to the engine. Every field is bounded, every shape is
+ * named, unknown top-level keys are refused, and a failure always carries
+ * `{field, reason}` so the caller fixes the one input at fault instead of
+ * guessing. Reasons stay free of anchor internals (same rule the engine's
+ * error mapping follows): field names and bounds, never upstream URLs or
+ * response bodies.
+ */
+export function parsePaymentBody(o: unknown): Outcome<PaymentIntent, PaymentBodyError> {
+  if (!isPlainObject(o)) {
+    return reject("<body>", "expected a JSON object");
+  }
+  for (const key of Object.keys(o)) {
+    if (!PAYMENT_FIELDS.has(key)) {
+      return reject(key, "unknown field");
+    }
+  }
+
+  const idempotencyKey = o.idempotencyKey;
+  if (typeof idempotencyKey !== "string") {
+    return reject("idempotencyKey", "expected a string");
+  }
+  if (!IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
+    return reject("idempotencyKey", "must be 1-128 characters of [A-Za-z0-9._:-]");
+  }
+  if (idempotencyKey.length > MAX_IDEMPOTENCY_KEY) {
+    return reject("idempotencyKey", `must be at most ${MAX_IDEMPOTENCY_KEY} characters`);
+  }
+
+  const corridorId = o.corridorId;
+  if (typeof corridorId !== "string") {
+    return reject("corridorId", "expected a string");
+  }
+  if (corridorId.length === 0 || corridorId.length > MAX_CORRIDOR_ID) {
+    return reject("corridorId", `must be 1-${MAX_CORRIDOR_ID} characters`);
+  }
+
+  const senderParty = parseParty(o.sender, "sender");
+  if (!senderParty.ok) return senderParty;
+  const recipientParty = parseParty(o.recipient, "recipient");
+  if (!recipientParty.ok) return recipientParty;
+  const sender = senderParty.value;
+  const recipient = recipientParty.value;
+
+  const rawSourceAmount = o.sourceAmount;
+  if (!isPlainObject(rawSourceAmount)) {
+    return reject("sourceAmount", "expected an object with asset and amount strings");
+  }
+  if (typeof rawSourceAmount.asset !== "string") {
+    return reject("sourceAmount.asset", "expected a string");
+  }
+  if (rawSourceAmount.asset.length === 0) {
+    return reject("sourceAmount.asset", "must not be empty");
+  }
+  if (typeof rawSourceAmount.amount !== "string") {
+    return reject("sourceAmount.amount", "expected a string");
+  }
+  const sourceAmount = { asset: rawSourceAmount.asset, amount: rawSourceAmount.amount };
+
+  let destinationFields: Record<string, string> | undefined;
+  if ("destinationFields" in o && o.destinationFields !== undefined) {
+    const df = o.destinationFields;
+    if (!isPlainObject(df)) {
+      return reject(
+        "destinationFields",
+        "expected a flat object of string values (Record<string,string>)",
+      );
+    }
+    const keys = Object.keys(df);
+    if (keys.length > MAX_DESTINATION_FIELD_KEYS) {
+      return reject(
+        "destinationFields",
+        `must have at most ${MAX_DESTINATION_FIELD_KEYS} keys`,
+      );
+    }
+    destinationFields = {};
+    for (const key of keys) {
+      const value = df[key];
+      if (typeof value !== "string") {
+        return reject(`destinationFields.${key}`, "expected a string value");
+      }
+      if (value.length > MAX_DESTINATION_FIELD_VALUE) {
+        return reject(
+          `destinationFields.${key}`,
+          `must be at most ${MAX_DESTINATION_FIELD_VALUE} characters`,
+        );
+      }
+      destinationFields[key] = value;
+    }
+  }
+
+  return ok({
+    idempotencyKey,
+    corridorId,
+    sender,
+    recipient,
+    sourceAmount,
+    ...(destinationFields ? { destinationFields } : {}),
+  });
+}
+
+/** Asset the body must name: what the sender puts in, i.e. the corridor's
+ *  source asset / bridge asset. Checked AFTER the corridor is looked up, so it
+ *  compares against the manifest rather than anything the caller supplied. */
+function assetMatchesCorridor(asset: string, corridor: Corridor): boolean {
+  return asset === corridor.source.asset || asset === corridor.settlement.bridge_asset;
 }
 
 export interface Service {
@@ -362,17 +543,31 @@ export function createService(options: ServiceOptions): Service {
       if (draining) {
         return { status: 503, body: { error: "draining" } };
       }
-      if (!isPaymentBody(req.body)) {
-        return { status: 400, body: { error: "invalid payment body" } };
+      const parsed = parsePaymentBody(req.body);
+      if (!parsed.ok) {
+        // Always with `{field, reason}`: a bare "invalid payment body" left
+        // callers guessing which of their inputs the engine objected to.
+        return {
+          status: 400,
+          body: {
+            error: "invalid payment body",
+            field: parsed.error.field,
+            reason: parsed.error.reason,
+          },
+        };
       }
-      const intent = req.body;
+      const intent = parsed.value;
       // isSettleableAmount, not isValidAmount: the latter is a signed syntax
       // check (subAmounts needs negatives) and let "-100.00" through to the
       // engine, which settled it.
       if (!isSettleableAmount(intent.sourceAmount.amount)) {
         return {
           status: 422,
-          body: { error: "AMOUNT_INVALID", message: "amount must be a positive decimal" },
+          body: {
+            error: "AMOUNT_INVALID",
+            field: "sourceAmount.amount",
+            message: "amount must be a positive decimal",
+          },
         };
       }
       const corridor = options.corridors.get(intent.corridorId);
@@ -380,6 +575,20 @@ export function createService(options: ServiceOptions): Service {
         return {
           status: 404,
           body: { error: "unknown corridor", corridorId: intent.corridorId },
+        };
+      }
+      // Asset match AFTER the corridor lookup: the body says what asset it
+      // claims to be denominated in, the manifest is the authority on what this
+      // lane actually settles. Without this, a body naming the wrong asset was
+      // accepted and handed to the anchor to discover at quote time.
+      if (!assetMatchesCorridor(intent.sourceAmount.asset, corridor)) {
+        return {
+          status: 422,
+          body: {
+            error: "AMOUNT_INVALID",
+            field: "sourceAmount.asset",
+            message: "asset does not match the corridor's source or bridge asset",
+          },
         };
       }
       // Owner comes from the VALIDATED bearer, never from the body — a client

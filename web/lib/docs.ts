@@ -177,6 +177,7 @@ Body is a \`PaymentIntent\`:
 | \`409\` | \`QUOTE_EXPIRED\` | Anchor quote expired before settlement could begin |
 | \`409\` | \`KYC_REQUIRED\` | Customer KYC incomplete or customer action required |
 | \`409\` | \`MANIFEST_CHANGED\` | Corridor manifest changed since the run started; resume refused before settle |
+| \`409\` | \`DRY_RUN_COMPLETE\` | A \`dryRun: true\` run passed the pre-settle gate and stopped before settling; nothing was sent. The HTTP API never starts dry runs, so this code only appears from the engine or CLI |
 | \`413\` | \`payload too large\` | Request body exceeds \`maxBodyBytes\` cap (default 64 KiB) |
 | \`422\` | \`AMOUNT_INVALID\` | Amount is not a positive decimal or cannot be settled |
 | \`422\` | \`CAPABILITY_MISMATCH\` | Adapter capabilities do not match corridor manifest or settlement strategies |

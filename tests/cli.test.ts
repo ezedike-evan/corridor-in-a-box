@@ -443,6 +443,19 @@ describe("corridor CLI", () => {
       expect(r3.stderr).toContain("positive decimal amount");
     });
 
+    it("argument validation: exits 2 when --dry-run is combined with --write", () => {
+      const r = run([
+        "canary",
+        "corridors/reference.corridor.yaml",
+        "--amount",
+        "1.00",
+        "--dry-run",
+        "--write",
+      ]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("--write records a completed payment");
+    });
+
     it("argument validation: exits 2 when --network is invalid", () => {
       const r = run([
         "canary",

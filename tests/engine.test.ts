@@ -2229,6 +2229,158 @@ describe("pre-settle gate enforcement", () => {
   });
 });
 
+describe("engine dry run", () => {
+  const passingGate: PreSettleGate = {
+    evaluate: async () => ({
+      passed: true,
+      results: [
+        { name: "anchor.drift", passed: true, detail: "toml unchanged", durationMs: 2 },
+        {
+          name: "chain.balance",
+          passed: true,
+          detail: "balance covers amount",
+          durationMs: 3,
+        },
+      ],
+    }),
+  };
+
+  function harness(gate: PreSettleGate = passingGate) {
+    const calls = { submit: 0, findExisting: 0 };
+    const submitter: SettlementSubmitter = {
+      submit: async () => {
+        calls.submit++;
+        return ok({ stellarTxHash: "0xshould-not-exist" });
+      },
+      findExisting: async () => {
+        calls.findExisting++;
+        return ok(undefined);
+      },
+      refund: async () => fail("SETTLEMENT_FAILED", "not reached", { retryable: false }),
+    };
+    const store = new InMemoryIdempotencyStore();
+    const audit = new InMemoryAuditLog();
+    const health = new InMemoryCorridorHealthStore();
+    const deps: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      idempotency: store,
+      audit,
+      health,
+      trustManifestWithoutAttestation: true,
+      gate,
+    };
+    return { deps, calls, store, audit, health };
+  }
+
+  it("stops after the gate without ever calling submit() or findExisting()", async () => {
+    const h = harness();
+    const r = await execute(intent("dry-1"), corridor(), h.deps, { dryRun: true });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("DRY_RUN_COMPLETE");
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.cause).toEqual({
+        dryRun: true,
+        checks: [
+          expect.objectContaining({ name: "anchor.drift", passed: true }),
+          expect.objectContaining({ name: "chain.balance", passed: true }),
+        ],
+      });
+    }
+    expect(h.calls).toEqual({ submit: 0, findExisting: 0 });
+
+    const stored = await h.store.get("dry-1");
+    expect(stored?.state).toBe("failed");
+    expect(stored?.lastError).toMatch(/^DRY_RUN_COMPLETE: /);
+    expect(stored?.transactionId).toBeDefined();
+    expect(stored?.stellarTxHash).toBeUndefined();
+  });
+
+  it("records every gate check result in the audit trail and never enters settling", async () => {
+    const h = harness();
+    await execute(intent("dry-2"), corridor(), h.deps, { dryRun: true });
+
+    expect(h.audit.entries.map((e) => e.to)).toEqual([
+      "quoted",
+      "compliant",
+      "opened",
+      "verifying",
+      "failed",
+    ]);
+    const names = ["anchor.drift", "chain.balance"];
+    const verifying = h.audit.entries.find((e) => e.to === "verifying");
+    expect(verifying?.checks?.map((c) => c.name)).toEqual(names);
+    const terminal = h.audit.entries.find((e) => e.to === "failed");
+    expect(terminal?.error).toMatch(/^DRY_RUN_COMPLETE: /);
+    expect(terminal?.checks?.map((c) => c.name)).toEqual(names);
+  });
+
+  it("does not count against the corridor's circuit breaker", async () => {
+    const h = harness();
+    for (const key of ["dry-b1", "dry-b2", "dry-b3", "dry-b4"]) {
+      await execute(intent(key), corridor(), h.deps, { dryRun: true });
+    }
+    const row = await h.health.get("test");
+    expect(row?.state ?? "closed").toBe("closed");
+    expect(row?.consecutiveFailures ?? 0).toBe(0);
+  });
+
+  it("ends with the gate's own refusal when a check fails", async () => {
+    const h = harness({
+      evaluate: async () => ({
+        passed: false,
+        results: [
+          {
+            name: "chain.balance",
+            passed: false,
+            detail: "balance too low",
+            code: "PRESETTLE_INSUFFICIENT_FUNDS",
+            durationMs: 1,
+          },
+        ],
+      }),
+    });
+    const r = await execute(intent("dry-3"), corridor(), h.deps, { dryRun: true });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+    expect(h.calls.submit).toBe(0);
+    const verifying = h.audit.entries.find((e) => e.to === "verifying");
+    expect(verifying?.checks?.[0]).toMatchObject({ name: "chain.balance", passed: false });
+  });
+
+  it("spends the idempotency key so a later real run cannot reuse it", async () => {
+    const h = harness();
+    await execute(intent("dry-4"), corridor(), h.deps, { dryRun: true });
+    const replay = await execute(intent("dry-4"), corridor(), h.deps);
+
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.error.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(h.calls.submit).toBe(0);
+  });
+
+  it("still stops before settling when the gate is explicitly skipped", async () => {
+    const h = harness();
+    const { gate: _gate, ...rest } = h.deps;
+    const r = await execute(
+      intent("dry-5"),
+      corridor(),
+      { ...rest, unsafeSkipPreSettleGate: true },
+      { dryRun: true },
+    );
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("DRY_RUN_COMPLETE");
+    expect(h.calls.submit).toBe(0);
+    const verifying = h.audit.entries.find((e) => e.to === "verifying");
+    expect(verifying?.checks?.[0].name).toBe("gate.skipped");
+  });
+});
+
 describe("SettlementStrategy", () => {
   // Helper: run a full payment through execute() with custom deps override.
   async function run(depsOverride: Partial<EngineDeps> = {}) {

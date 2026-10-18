@@ -1,28 +1,24 @@
 import Link from "next/link";
-import { ArrowRight, CircleCheck, CircleHelp, CircleSlash } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { Card } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
+import { LivenessBadge } from "@/components/LivenessBadge";
 import { liveness, type Corridor } from "@/lib/corridors";
-
-// Green is reserved for corridors whose endpoints someone has actually checked.
-// A lane with plausible-looking URLs that nobody has confirmed is amber, not
-// green — the badge reports what we know, not what the YAML claims.
-const BADGE = {
-  proven: { variant: "success", Icon: CircleCheck, label: "proven" },
-  verified: { variant: "success", Icon: CircleCheck, label: "verified" },
-  unverified: { variant: "warning", Icon: CircleHelp, label: "unverified" },
-  "not-runnable": { variant: "default", Icon: CircleSlash, label: "not runnable" },
-} as const;
 
 export function CorridorCard({ corridor }: { corridor: Corridor }) {
   const live = liveness(corridor);
-  const badge = BADGE[live.state];
 
   return (
     <Card className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="font-mono text-sm font-semibold">{corridor.id}</h3>
+          <h3 className="font-mono text-sm font-semibold">
+            <Link
+              href={`/corridors/${corridor.id}`}
+              className="hover:text-blue-600 hover:underline dark:hover:text-blue-400"
+            >
+              {corridor.id}
+            </Link>
+          </h3>
           <div className="mt-1 flex items-center gap-1.5 text-sm text-secondary-text">
             {corridor.fx.path.map((hop, i) => (
               <span key={i} className="flex items-center gap-1.5">
@@ -37,9 +33,7 @@ export function CorridorCard({ corridor }: { corridor: Corridor }) {
             ))}
           </div>
         </div>
-        <Badge variant={badge.variant}>
-          <badge.Icon size={12} /> {badge.label}
-        </Badge>
+        <LivenessBadge state={live.state} />
       </div>
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
@@ -55,15 +49,26 @@ export function CorridorCard({ corridor }: { corridor: Corridor }) {
         </p>
       )}
 
-      <Link
-        href={`/payments?corridor=${corridor.id}`}
-        // Every card says "Run a payment"; the label says which corridor, and still
-        // starts with the visible words so voice control can say them.
-        aria-label={`Run a payment on ${corridor.id}`}
-        className="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400"
-      >
-        Run a payment <ArrowRight size={14} />
-      </Link>
+      <div className="flex flex-wrap items-center gap-4">
+        <Link
+          href={`/corridors/${corridor.id}`}
+          // Every card says "Corridor details"; the label says which corridor, and still
+          // starts with the visible words so voice control can say them.
+          aria-label={`Corridor details for ${corridor.id}`}
+          className="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400"
+        >
+          Corridor details <ArrowRight size={14} aria-hidden="true" />
+        </Link>
+        <Link
+          href={`/payments?corridor=${corridor.id}`}
+          // Every card says "Run a payment"; the label says which corridor, and still
+          // starts with the visible words so voice control can say them.
+          aria-label={`Run a payment on ${corridor.id}`}
+          className="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:underline dark:text-blue-400"
+        >
+          Run a payment <ArrowRight size={14} aria-hidden="true" />
+        </Link>
+      </div>
     </Card>
   );
 }

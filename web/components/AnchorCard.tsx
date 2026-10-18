@@ -6,6 +6,7 @@ import {
   STALE_AFTER_LEDGERS,
   type AnchorAttestation,
 } from "@/lib/registry";
+import { approxLedgerDuration } from "@/lib/freshness";
 
 /**
  * One attested anchor.
@@ -76,7 +77,8 @@ export function AnchorCard({ anchor }: { anchor: AnchorAttestation }) {
       <div className="flex flex-col gap-1 border-t border-border pt-3 text-xs text-secondary-text">
         <div>
           attested at ledger <span className="font-mono">{anchor.attestedLedger}</span> ·{" "}
-          {anchor.staleness.toLocaleString()} ledgers ago
+          {anchor.staleness.toLocaleString("en-US")} ledgers ({approxLedgerDuration(anchor.staleness)})
+          ago
           {stale && <span className="font-medium text-yellow-700 dark:text-yellow-500"> · stale</span>}
         </div>
         <div className="truncate">
