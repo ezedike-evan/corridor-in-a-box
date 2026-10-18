@@ -196,6 +196,7 @@ function makeChaosAdapter(
   });
   const openedOk = (): OpenTransaction => ({
     transactionId: "tx_chaos",
+    instructions: { kind: "stellar_payment", to: DEPOSIT, memo: MEMO, memoType: "text" },
     depositAddress: DEPOSIT,
     memo: MEMO,
     memoType: "text",

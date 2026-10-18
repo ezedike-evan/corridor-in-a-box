@@ -69,7 +69,8 @@ packages/
   attester/      attestation writer for the conformance registry
   sep31/         ONE generic adapter for any standards-compliant SEP-31
                  anchor (SEP-10 auth + SEP-12 KYC; crypto behind an injected signer)
-  sep6/          the same port for a SEP-6 withdrawal anchor: opens
+  sep6/          ONE generic adapter for any standards-compliant SEP-6
+                 anchor: GET /info discovery + capabilities, opens
                  GET /withdraw-exchange and reads the deposit instructions back
                  from GET /transaction, so settle and reconcile are unchanged
   stellar/       the only package on the money path that touches the chain;
@@ -85,8 +86,8 @@ corridors/       the manifests — ALL corridor-specifics live here,
                  nowhere else
 contracts/       Soroban registry + attester contracts
 scripts/         reference-anchor.sh + assert-testnet-corridor.ts
-docs/            key management, "why not Anchor Platform", SEP coverage,
-                 operations, …
+docs/            key management, bespoke adapters, "why not Anchor Platform",
+                 SEP coverage, operations, …
 examples/        runnable end-to-end demo
 ```
 
@@ -97,8 +98,9 @@ Three boundaries do the work:
    YAML file, not a code change.
 2. **engine ↔ adapters** — the engine knows only the `AnchorAdapter` interface.
    Standards-compliant anchors share one adapter; bespoke exchange/OTC desks
-   implement the same interface. Proprietary implementations could be maintained
-   separately; none is included in this repo.
+   implement the same interface (see [docs/adapters.md](./docs/adapters.md)).
+   Proprietary implementations could be maintained separately; none is included
+   in this repo.
 3. **router seam** — the open repo ships the `RouteResolver` interface plus two
    resolvers: `StaticRouteResolver` (trust the manifest) and
    `RegistryRouteResolver` (require a fresh on-chain attestation). A
@@ -228,10 +230,20 @@ Every record carries `attested_ledger`, so staleness is visible on chain. An
 attestation is never wrong, only old, and a consumer must be able to see the
 difference without trusting the writer to have pruned it.
 
+Soroban storage expires, so a record nobody touches would eventually be archived
+and `get_anchor` would fail. Every write extends the entry it touched and the
+contract instance by 90 days (when under 30 are left), and `bump(domain)` lets
+anyone extend a record without re-attesting it; it leaves `attested_ledger`
+alone, so a bumped record is kept alive but not made to look fresh. An entry that
+has already been archived has to be restored first (a `RestoreFootprint`
+operation, `stellar contract restore`); see the header of
+`contracts/registry/src/lib.rs`.
+
 ```bash
 pnpm probe:anchor testanchor.stellar.org   # probe a live anchor, print the facts
 pnpm registry:read                         # read the registry via @corridor/registry
-cd contracts && cargo test                 # 21 contract tests
+pnpm registry:read --sep 24 --passed sep10_auth   # filter; --max-age and --json too
+cd contracts && cargo test                 # 39 contract tests
 ```
 
 ## Proof against a real SEP-31 anchor

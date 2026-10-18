@@ -10,8 +10,8 @@
   },
   "main": "./src/index.ts",
   "dependencies": {
-    "@corridor/types": "workspace:*",
+    "@corridor/adapter-kit": "workspace:*",
     "@corridor/manifest": "workspace:*",
-    "@corridor/adapter-kit": "workspace:*"
+    "@corridor/types": "workspace:*"
   }
 }

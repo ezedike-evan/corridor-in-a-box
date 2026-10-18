@@ -7,11 +7,9 @@
 // `dest.protocol: sep6` corridor plugs into that port here. The on-chain settle
 // leg is NOT in this package — an SEP-6 withdrawal settles through the existing
 // StellarPaymentStrategy with no engine change, because `openTransaction`
-// returns the same flat `OpenTransaction` as SEP-31. Note for the reader of the
-// issue text: #183's discriminated `DepositInstructions` union has NOT landed
-// in this tree, so "where to send the asset" is still
-// `depositAddress`/`memo`/`memoType` — exactly what `buildSettlementRequest`
-// (packages/engine/src/verbs.ts) reads off `opened`.
+// returns the same flat `OpenTransaction` as SEP-31. `openTransaction` fills
+// `instructions` (a `stellar_payment` with the anchor's account and memo), which is
+// what the engine's `settle()` routes on.
 //
 // ENDPOINT EVIDENCE (#197 — which method/path, and why). The issue brief named
 // `POST /transactions/withdraw-exchange`; no version of SEP-6 has ever defined
@@ -59,6 +57,39 @@ export interface Sep10Signer {
   readonly account: string;
   /** Sign the base64 challenge XDR and return the signed XDR. */
   signChallenge(challengeXdr: string, networkPassphrase: string): Promise<string>;
+}
+
+/** One field an anchor asks for on a SEP-6 withdraw type. */
+export interface Sep6Field {
+  readonly description?: string;
+  readonly choices?: readonly string[];
+  readonly optional?: boolean;
+}
+
+/** A single withdraw type (e.g. "bank_account") and the fields it requires. */
+export interface Sep6Type {
+  readonly fields: Readonly<Record<string, Sep6Field>>;
+}
+
+/** One asset's entry under `withdraw` / `withdraw-exchange` in GET /info. */
+export interface Sep6AssetInfo {
+  /** Absent means the anchor said nothing; only an explicit `false` disables. */
+  readonly enabled?: boolean;
+  readonly authenticationRequired?: boolean;
+  readonly minAmount?: string;
+  readonly maxAmount?: string;
+  readonly feeFixed?: string;
+  readonly feePercent?: string;
+  /** Withdraw types the anchor publishes for this asset, keyed by type name. */
+  readonly types: Readonly<Record<string, Sep6Type>>;
+}
+
+/** The SEP-6 GET /info sections this adapter reads. */
+export interface Sep6Info {
+  /** Non-exchange withdraw, keyed by asset code (e.g. "ARS"). */
+  readonly withdraw: Readonly<Record<string, Sep6AssetInfo>>;
+  /** Exchange-based withdraw (`withdraw-exchange`), keyed by asset code. */
+  readonly withdrawExchange: Readonly<Record<string, Sep6AssetInfo>>;
 }
 
 export interface Sep6AdapterOptions {
@@ -222,6 +253,144 @@ function clip(s: string, max = 300): string {
   return s.length <= max ? s : `${s.slice(0, max)}…`;
 }
 
+/**
+ * The asset code SEP-6 keys /info by, from a corridor's SEP-38 asset id.
+ *
+ * `/info` uses the bare code ("ARS", "USDC"), while a manifest names the asset
+ * the SEP-38 way ("iso4217:ARS", "stellar:USDC:GISSUER"). A bare code is
+ * returned unchanged so an anchor that already matches still lines up.
+ */
+function infoAssetCode(asset: string): string {
+  const parts = asset.split(":");
+  if ((parts[0] === "iso4217" || parts[0] === "stellar") && parts.length >= 2) {
+    return parts[1] ?? asset;
+  }
+  return asset;
+}
+
+/**
+ * A decimal amount string from a SEP-6 /info number or numeric string.
+ *
+ * SEP-6 publishes `min_amount` / `max_amount` / `fee_fixed` / `fee_percent` as
+ * JSON numbers. JSON.parse has already put those through a float64 before this
+ * adapter sees them, so the best that can be done is to stop the number here:
+ * convert to a decimal string immediately and never do arithmetic on it. A
+ * value that does not survive as a plain decimal is dropped, not reported.
+ */
+function infoAmount(v: unknown): string | undefined {
+  if (typeof v === "number") {
+    if (!Number.isFinite(v) || v < 0) return undefined;
+    const s = String(v);
+    return isValidAmount(s) ? s : undefined;
+  }
+  if (typeof v === "string" && isValidAmount(v.trim())) return v.trim();
+  return undefined;
+}
+
+/** A plain JSON object, or an empty one for anything else (null, arrays, scalars). */
+function asObject(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+}
+
+/** Parse a withdraw type's `fields` map; anything malformed is dropped. */
+function parseFields(raw: unknown): Readonly<Record<string, Sep6Field>> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const fields: Record<string, Sep6Field> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const f = value as Record<string, unknown>;
+    fields[name] = {
+      ...(typeof f.description === "string" ? { description: f.description } : {}),
+      ...(Array.isArray(f.choices)
+        ? { choices: f.choices.filter((c): c is string => typeof c === "string") }
+        : {}),
+      ...(typeof f.optional === "boolean" ? { optional: f.optional } : {}),
+    };
+  }
+  return fields;
+}
+
+/** Parse the `types` map of one asset entry. */
+function parseTypes(raw: unknown): Readonly<Record<string, Sep6Type>> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const types: Record<string, Sep6Type> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const t = value as Record<string, unknown>;
+    types[name] = { fields: parseFields(t.fields) };
+  }
+  return types;
+}
+
+/** Parse one asset entry under `withdraw` / `withdraw-exchange`. */
+function parseAssetInfo(raw: unknown): Sep6AssetInfo {
+  const a = asObject(raw);
+  const minAmount = infoAmount(a.min_amount);
+  const maxAmount = infoAmount(a.max_amount);
+  const feeFixed = infoAmount(a.fee_fixed);
+  const feePercent = infoAmount(a.fee_percent);
+  return {
+    ...(typeof a.enabled === "boolean" ? { enabled: a.enabled } : {}),
+    ...(typeof a.authentication_required === "boolean"
+      ? { authenticationRequired: a.authentication_required }
+      : {}),
+    ...(minAmount !== undefined ? { minAmount } : {}),
+    ...(maxAmount !== undefined ? { maxAmount } : {}),
+    ...(feeFixed !== undefined ? { feeFixed } : {}),
+    ...(feePercent !== undefined ? { feePercent } : {}),
+    types: parseTypes(a.types),
+  };
+}
+
+/** Parse one of the two withdraw sections, keyed by asset code. */
+function parseSection(raw: unknown): Readonly<Record<string, Sep6AssetInfo>> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const section: Record<string, Sep6AssetInfo> = {};
+  for (const [code, value] of Object.entries(raw)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    section[code] = parseAssetInfo(value);
+  }
+  return section;
+}
+
+/**
+ * Parse a SEP-6 GET /info document into the shape this adapter reads.
+ *
+ * Deliberately narrow: only `withdraw` and `withdraw-exchange` are surfaced,
+ * because those are the flows a receiving-side off-ramp corridor uses. Every
+ * field is optional and untrusted; anything malformed is dropped rather than
+ * guessed, so a partial document still yields a usable (if smaller) result.
+ */
+export function parseSep6Info(raw: unknown): Sep6Info {
+  const doc = asObject(raw);
+  return {
+    withdraw: parseSection(doc.withdraw),
+    withdrawExchange: parseSection(doc["withdraw-exchange"]),
+  };
+}
+
+/**
+ * The settle leg for a SEP-6 withdrawal is a plain Stellar payment to the anchor's
+ * `withdraw_anchor_account`. `instructions` is what the engine routes on; the flat
+ * fields are the deprecated duplicates `OpenTransaction` still carries for one release.
+ */
+function stellarPayment(
+  transactionId: string,
+  to: string,
+  memo: string | undefined,
+  memoType: "text" | "hash" | "id" | undefined,
+): OpenTransaction {
+  return {
+    transactionId,
+    instructions: { kind: "stellar_payment", to, memo, memoType },
+    depositAddress: to,
+    memo,
+    memoType,
+  };
+}
+
 export class Sep6Adapter implements AnchorAdapter {
   readonly name: string;
   private readonly anchor: Sep6Anchor;
@@ -231,6 +400,9 @@ export class Sep6Adapter implements AnchorAdapter {
   private readonly fetchImpl: FetchLike;
   private readonly sep10?: Sep10Signer;
   private cachedToken?: { token: string; expMs: number };
+  /** Asset code `/info` keys by, derived from `dest.asset`. */
+  private readonly destAssetCode: string;
+  private cachedInfo?: Sep6Info;
 
   constructor(corridor: Corridor, opts: Sep6AdapterOptions = {}) {
     if (corridor.dest.protocol !== "sep6") {
@@ -241,6 +413,7 @@ export class Sep6Adapter implements AnchorAdapter {
     this.anchor = corridor.dest as Sep6Anchor;
     this.name = corridor.dest.name;
     this.settlementAsset = corridor.settlement.bridge_asset;
+    this.destAssetCode = infoAssetCode(this.anchor.asset);
     // Required by the manifest schema (`Sep6DestSchema`), guarded anyway: a
     // hand-built Corridor object that skipped parseCorridor must not reach the
     // network with an undefined base.
@@ -316,13 +489,54 @@ export class Sep6Adapter implements AnchorAdapter {
     return token ? { authorization: `Bearer ${token}` } : {};
   }
 
+  /**
+   * GET {transfer_server}/info, parsed and cached per instance.
+   *
+   * Cached because SEP-6 /info is static discovery data: refetching it on every
+   * `capabilities()` read would put a network round-trip in front of a call the
+   * engine may make often. Pass `force` to re-read and refresh the cache.
+   */
+  async info(force = false): Promise<Outcome<Sep6Info>> {
+    if (this.cachedInfo && !force) return ok(this.cachedInfo);
+    try {
+      const res = await this.fetchImpl(`${this.transferServer}/info`, { method: "GET" });
+      if (!res.ok) {
+        return fail("ANCHOR_UNAVAILABLE", `${this.name}: get-info HTTP ${res.status}`, {
+          retryable: res.status >= 500,
+        });
+      }
+      const info = parseSep6Info(await res.json());
+      this.cachedInfo = info;
+      return ok(info);
+    } catch (cause) {
+      return fail("ANCHOR_UNAVAILABLE", `${this.name}: get-info request failed`, {
+        retryable: true,
+        cause,
+      });
+    }
+  }
+
+  /** The dest asset's `withdraw-exchange` entry, from the cached /info. */
+  private withdrawExchangeEntry(): Sep6AssetInfo | undefined {
+    return this.cachedInfo?.withdrawExchange[this.destAssetCode];
+  }
+
   capabilities(): AdapterCapabilities {
     const e = this.anchor.endpoints;
+    // Before info() has run the adapter cannot know what the anchor offers, and the
+    // engine reads capabilities() without fetching /info first, so an empty list here
+    // would fail every run with CAPABILITY_MISMATCH. Assume the corridor's own
+    // `withdraw-exchange` lane until /info says otherwise. Once /info is cached, an
+    // asset the anchor omits or explicitly disables reports no settlement kinds.
+    const entry = this.withdrawExchangeEntry();
+    const settleable =
+      this.cachedInfo === undefined || (entry !== undefined && entry.enabled !== false);
     return {
       protocol: "sep6",
       quotes: e.quote_server ? ["sep38_firm"] : ["none"],
-      kyc: e.kyc_server ? "sep12" : "none",
-      settlement: ["stellar_payment"],
+      kyc: e.kyc_server ? "sep12" : "sep6_fields",
+      // The payout is a normal Stellar payment to the anchor's `withdraw_anchor_account`.
+      settlement: settleable ? ["stellar_payment"] : [],
       refunds: "report_only",
       callbacks: false,
     };
@@ -496,7 +710,7 @@ export class Sep6Adapter implements AnchorAdapter {
    * and/or the recipient's SEP-12 `customer_id`.
    *
    * The response either names the account to pay (map it to the flat
-   * pre-#183 OpenTransaction, which settle() treats as `stellar_payment`), or
+   * `stellar_payment` instructions the engine settles), or
    * it does not — a KYC-shaped answer, or v3.24.0's optional `account_id`. In
    * those cases we NEVER return a half-transaction: an empty depositAddress
    * would build a bogus payment downstream, so the caller gets a refusal and,
@@ -573,14 +787,16 @@ export class Sep6Adapter implements AnchorAdapter {
       }
       const depositAddress = nonEmptyString(j?.account_id);
       if (depositAddress) {
-        return ok<OpenTransaction>({
-          transactionId,
-          depositAddress,
-          memo: nonEmptyString(j?.memo),
-          // Carry the anchor's memo TYPE through; assuming "text" corrupts a
-          // hash memo (32 bytes > 28-byte text cap) and the submit fails.
-          memoType: parseMemoType(j?.memo_type),
-        });
+        return ok<OpenTransaction>(
+          stellarPayment(
+            transactionId,
+            depositAddress,
+            nonEmptyString(j?.memo),
+            // Carry the anchor's memo TYPE through; assuming "text" corrupts a
+            // hash memo (32 bytes > 28-byte text cap) and the submit fails.
+            parseMemoType(j?.memo_type),
+          ),
+        );
       }
       // SEP-6 ≥ v3.24.0 makes `account_id` optional in the success response —
       // testanchor returns only {"id": ...}. One follow-up read, no polling:
@@ -628,12 +844,14 @@ export class Sep6Adapter implements AnchorAdapter {
     const tx = j?.transaction as Record<string, unknown> | undefined;
     const depositAddress = nonEmptyString(tx?.withdraw_anchor_account);
     if (depositAddress) {
-      return ok<OpenTransaction>({
-        transactionId,
-        depositAddress,
-        memo: nonEmptyString(tx?.withdraw_memo),
-        memoType: parseMemoType(tx?.withdraw_memo_type),
-      });
+      return ok<OpenTransaction>(
+        stellarPayment(
+          transactionId,
+          depositAddress,
+          nonEmptyString(tx?.withdraw_memo),
+          parseMemoType(tx?.withdraw_memo_type),
+        ),
+      );
     }
     const status = (nonEmptyString(tx?.status) ?? "").toLowerCase();
     if (KYC_BLOCKED_STATUSES.has(status)) {

@@ -201,9 +201,16 @@ describe("openTransaction request shape", () => {
     );
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
-    // Pre-#183 flat shape: what `buildSettlementRequest` reads.
+    // `instructions` is what the engine routes on; the flat fields are the deprecated
+    // duplicates `OpenTransaction` still carries.
     expect(opened.value).toEqual({
       transactionId: "tx-1",
+      instructions: {
+        kind: "stellar_payment",
+        to: "GDEPOSIT",
+        memo: "aGVsbG8=",
+        memoType: "hash",
+      },
       depositAddress: "GDEPOSIT",
       memo: "aGVsbG8=",
       memoType: "hash",
@@ -482,9 +489,15 @@ describe("openTransaction follow-up GET /transaction", () => {
     expect(opened.ok).toBe(true);
     if (opened.ok) {
       expect(opened.value.depositAddress).toBe("GANCHOR");
+      expect(opened.value.instructions).toEqual({
+        kind: "stellar_payment",
+        to: "GANCHOR",
+        memo: undefined,
+        memoType: undefined,
+      });
       // Unset, not defaulted: a missing `withdraw_memo_type` must not become
       // "text", and the fields stay absent-valued exactly as @corridor/sep31
-      // leaves them on this flat pre-#183 shape.
+      // leaves them.
       expect(opened.value.memo).toBeUndefined();
       expect(opened.value.memoType).toBeUndefined();
     }

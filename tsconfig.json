@@ -16,6 +16,7 @@
     "paths": {
       "@corridor/types": ["./packages/types/src/index.ts"],
       "@corridor/manifest": ["./packages/manifest/src/index.ts"],
+      "@corridor/probe": ["./packages/probe/src/index.ts"],
       "@corridor/adapter-kit": ["./packages/adapter-kit/src/index.ts"],
       "@corridor/sep31": ["./packages/sep31/src/index.ts"],
       "@corridor/sep6": ["./packages/sep6/src/index.ts"],
