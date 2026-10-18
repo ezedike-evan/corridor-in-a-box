@@ -807,6 +807,12 @@ describe("openedTxCheck gate check (anchor.tx.match)", () => {
       },
       opened: {
         transactionId: "tx-1",
+        instructions: {
+          kind: "stellar_payment",
+          to: DEST,
+          memo: "memo-abc-123",
+          memoType: "text",
+        },
         depositAddress: DEST,
         memo: "memo-abc-123",
         memoType: "text",
@@ -1039,6 +1045,12 @@ describe("sep31InfoCheck gate check (sep31.info.asset)", () => {
       },
       opened: {
         transactionId: "tx-1",
+        instructions: {
+          kind: "stellar_payment",
+          to: "GDEPOSIT",
+          memo: "memo123",
+          memoType: "text",
+        },
         depositAddress: "GDEPOSIT",
         memo: "memo123",
         memoType: "text",
@@ -1162,6 +1174,7 @@ describe("receiverKycCheck gate check (sep12.receiver)", () => {
       },
       opened: {
         transactionId: "tx-1",
+        instructions: { kind: "stellar_payment", to: "GDEPOSIT" },
         depositAddress: "GDEPOSIT",
       },
       now: Date.now(),
@@ -1375,6 +1388,7 @@ describe("amountRangeCheck gate check (sep31.amount.range)", () => {
       },
       opened: {
         transactionId: "tx-1",
+        instructions: { kind: "stellar_payment", to: "GDEPOSIT" },
         depositAddress: "GDEPOSIT",
       },
       now: Date.now(),

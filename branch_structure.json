@@ -1,0 +1,21 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "fix/issue-193-add-a-compliancestrategy-sep-12-sep-6-inline",
+    "fix/issue-222-probe-coins-ph-ph-and-add-a-corridor-manifest",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "fix/issue-193-add-a-compliancestrategy-sep-12-sep-6-inline": "main",
+    "fix/issue-222-probe-coins-ph-ph-and-add-a-corridor-manifest": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "fix/issue-193-add-a-compliancestrategy-sep-12-sep-6-inline",
+    "fix/issue-222-probe-coins-ph-ph-and-add-a-corridor-manifest",
+    "origin"
+  ]
+}
