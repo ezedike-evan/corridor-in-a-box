@@ -152,12 +152,6 @@ export interface RefundInfo {
   readonly completeness: "full" | "partial" | "unknown";
 }
 
-/** SEP-10 challenge signer used by standards-compliant adapters. */
-export interface Sep10Signer {
-  readonly account: string;
-  signChallenge(challengeXdr: string, networkPassphrase: string): Promise<string>;
-}
-
 /** The `refunds` object as SEP-6 / SEP-31 puts it on the wire — every field untrusted. */
 export interface RawRefunds {
   amount_refunded?: unknown;

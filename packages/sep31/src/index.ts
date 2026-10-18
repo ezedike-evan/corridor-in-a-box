@@ -33,7 +33,6 @@ import {
   Sep38QuoteProvider,
   type TransactionStatus,
   parseRefunds,
-  type Sep10Signer,
 } from "@corridor/adapter-kit";
 import { Sep10Client, type Sep10Signer } from "@corridor/adapter-kit";
 import type { CheckResult, GateCheck, GateContext } from "@corridor/engine";
