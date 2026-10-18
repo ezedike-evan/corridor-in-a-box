@@ -150,6 +150,83 @@ export interface RefundInfo {
   readonly completeness: "full" | "partial" | "unknown";
 }
 
+/** SEP-10 challenge signer used by standards-compliant adapters. */
+export interface Sep10Signer {
+  readonly account: string;
+  signChallenge(challengeXdr: string, networkPassphrase: string): Promise<string>;
+}
+
+/** The `refunds` object as SEP-6 / SEP-31 puts it on the wire — every field untrusted. */
+export interface RawRefunds {
+  amount_refunded?: unknown;
+  amount_fee?: unknown;
+  payments?: unknown;
+}
+
+/**
+ * Parse SEP-6 / SEP-31's `refunds` object off a transaction record.
+ *
+ * Everything is optional and untrusted: anchors omit `refunds` entirely on the
+ * happy path, amounts arrive as strings, and a malformed field must never turn
+ * a poll into an error — the status classification is what the engine acts on
+ * and it is decided independently of this.
+ *
+ * Returns undefined rather than a zero-filled object when the refund cannot be
+ * read: "refunded nothing" and "said nothing" are different facts, and the
+ * engine must not be able to confuse them.
+ *
+ * @param settledAmount the amount that went out (`amount_in`), used to tell a
+ * partial refund from a full one. Compared with `compareAmounts` — "100" and
+ * "100.00" are the same amount of money and string equality says otherwise.
+ */
+export function parseRefunds(
+  refunds: unknown,
+  asset: string,
+  settledAmount?: string,
+): RefundInfo | undefined {
+  if (!refunds || typeof refunds !== "object" || Array.isArray(refunds)) return undefined;
+  const raw = refunds as RawRefunds;
+
+  const parseAmt = (v: unknown): string | undefined => {
+    return typeof v === "string" && isValidAmount(v.trim()) ? v.trim() : undefined;
+  };
+
+  const amountRefunded = parseAmt(raw.amount_refunded);
+  if (amountRefunded === undefined) return undefined;
+
+  const amountFee = parseAmt(raw.amount_fee) ?? "0";
+
+  const payments: RefundPayment[] = [];
+  if (Array.isArray(raw.payments)) {
+    for (const entry of raw.payments) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const p = entry as { id?: unknown; id_type?: unknown; amount?: unknown; fee?: unknown };
+      const amount = parseAmt(p.amount);
+      if (typeof p.id !== "string" || !p.id || amount === undefined) continue;
+      payments.push({
+        id: p.id,
+        ...(typeof p.id_type === "string" && p.id_type ? { idType: p.id_type } : {}),
+        amount: { asset, amount },
+        fee: { asset, amount: parseAmt(p.fee) ?? "0" },
+      });
+    }
+  }
+
+  const settled = settledAmount !== undefined ? parseAmt(settledAmount) : undefined;
+  let completeness: RefundInfo["completeness"] = "unknown";
+  if (settled !== undefined) {
+    const cmp = compareAmounts(amountRefunded, settled);
+    if (cmp.ok) completeness = cmp.value < 0 ? "partial" : "full";
+  }
+
+  return {
+    amountRefunded: { asset, amount: amountRefunded },
+    amountFee: { asset, amount: amountFee },
+    payments,
+    completeness,
+  };
+}
+
 export interface TransactionStatus {
   /** The raw status string reported by the anchor (e.g. a SEP-31 status). */
   readonly status: string;

@@ -20,14 +20,16 @@ import {
   type Outcome,
   type PaymentIntent,
 } from "@corridor/types";
-import type {
-  AdapterCapabilities,
-  AnchorAdapter,
-  KycResult,
-  OpenTransaction,
-  Quote,
-  RefundRef,
-  TransactionStatus,
+import {
+  parseRefunds,
+  type AdapterCapabilities,
+  type AnchorAdapter,
+  type KycResult,
+  type OpenTransaction,
+  type Quote,
+  type RefundRef,
+  type Sep10Signer,
+  type TransactionStatus,
 } from "@corridor/adapter-kit";
 
 type FetchLike = typeof fetch;
@@ -65,9 +67,105 @@ export interface Sep6Info {
   readonly withdrawExchange: Readonly<Record<string, Sep6AssetInfo>>;
 }
 
+/**
+ * Terminal non-success statuses defined by SEP-0006 § "Deposit and Withdraw Statuses":
+ * - `refunded`: The deposit/withdrawal was refunded.
+ * - `expired`: The deposit/withdrawal expired.
+ * - `error`: General error.
+ * - `no_market`: There is no market for the provided asset.
+ * - `too_small`: The amount was below the minimum.
+ * - `too_large`: The amount was above the maximum.
+ *
+ * @see https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md#deposit-and-withdraw-statuses
+ */
+export const SEP6_TERMINAL_FAILURE_STATUSES = new Set([
+  "refunded",
+  "expired",
+  "error",
+  "no_market",
+  "too_small",
+  "too_large",
+]);
+
+/**
+ * In flight and waiting for input from outside the engine:
+ * - `pending_customer_info_update`: Waiting for customer KYC info update.
+ * - `pending_transaction_info_update`: Waiting for transaction info update.
+ * - `pending_user`: Waiting for additional user action.
+ *
+ * @see https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md#deposit-and-withdraw-statuses
+ */
+export const SEP6_AWAITING_INPUT_STATUSES = new Set([
+  "pending_customer_info_update",
+  "pending_transaction_info_update",
+  "pending_user",
+]);
+
+/**
+ * In-flight statuses with work happening at the anchor or on the network:
+ * - `pending_anchor`: Anchor is processing.
+ * - `pending_stellar`: Stellar network transaction submitted.
+ * - `pending_external`: Transfer on external payment rail initiated.
+ * - `pending_trust`: Waiting for trustline establishment.
+ * - `pending_user_transfer_start`: User needs to transfer funds.
+ * - `pending_user_transfer_complete`: Anchor detected user transfer, waiting for confirmation.
+ *
+ * @see https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md#deposit-and-withdraw-statuses
+ */
+export const SEP6_IN_FLIGHT_STATUSES = new Set([
+  "pending_anchor",
+  "pending_stellar",
+  "pending_external",
+  "pending_trust",
+  "pending_user_transfer_start",
+  "pending_user_transfer_complete",
+]);
+
+/**
+ * Classify a SEP-6 transaction status into the engine's reconcile lifecycle.
+ *
+ * Standard deposit and withdraw status lifecycle per SEP-0006 § "Deposit and Withdraw Statuses":
+ * - settled: `completed`
+ * - terminalFailure: `refunded`, `expired`, `error`, `no_market`, `too_small`, `too_large`
+ * - awaitingInput: `pending_customer_info_update`, `pending_transaction_info_update`, `pending_user`
+ * - in-flight: known in-flight statuses + unknown statuses (fail-open to polling, never settled)
+ */
+export function mapSep6Status(raw: string): {
+  status: string;
+  phase?: "anchor" | "external";
+  settled: boolean;
+  terminalFailure: boolean;
+  awaitingInput: boolean;
+} {
+  const status = (raw ?? "").toLowerCase();
+  if (status === "completed") {
+    return { status, settled: true, terminalFailure: false, awaitingInput: false };
+  }
+  if (SEP6_TERMINAL_FAILURE_STATUSES.has(status)) {
+    return { status, settled: false, terminalFailure: true, awaitingInput: false };
+  }
+  if (SEP6_AWAITING_INPUT_STATUSES.has(status)) {
+    return { status, settled: false, terminalFailure: false, awaitingInput: true };
+  }
+  if (SEP6_IN_FLIGHT_STATUSES.has(status)) {
+    return {
+      status,
+      ...(status === "pending_external" ? { phase: "external" as const } : {}),
+      settled: false,
+      terminalFailure: false,
+      awaitingInput: false,
+    };
+  }
+  // Unrecognised status. Same shape as a known in-flight one: fail-open to
+  // polling and never to a false "settled".
+  return { status, settled: false, terminalFailure: false, awaitingInput: false };
+}
+
 export interface Sep6AdapterOptions {
   /** Inject a fetch implementation (defaults to global fetch). Handy for tests. */
   fetchImpl?: FetchLike;
+  /** SEP-10 signer. Without it the adapter calls anchors anonymously. */
+  sep10?: Sep10Signer;
 }
 
 /**
@@ -188,21 +286,41 @@ export function parseSep6Info(raw: unknown): Sep6Info {
   };
 }
 
+function nonEmptyString(v: unknown): string | undefined {
+  return typeof v === "string" && v ? v : undefined;
+}
+
+function parseMemoType(v: unknown): "text" | "hash" | "id" | undefined {
+  const memoType = typeof v === "string" ? v.toLowerCase() : undefined;
+  return memoType === "hash" || memoType === "id" || memoType === "text"
+    ? memoType
+    : undefined;
+}
+
+function jwtExpiryMs(token: string): number | undefined {
+  const payload = token.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const json = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof json.exp === "number" ? json.exp * 1000 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Receiving-side adapter for a SEP-6 anchor.
- *
- * This scaffold implements discovery only: `info()` and the `capabilities()`
- * derived from it. The verbs (`requestQuote`, `ensureCompliance`,
- * `openTransaction`, `getTransaction`, `requestRefund`) fail closed with
- * ANCHOR_UNAVAILABLE until their issues land, so a corridor wired to this
- * adapter cannot silently half-run.
  */
 export class Sep6Adapter implements AnchorAdapter {
   readonly name: string;
   private readonly anchor: Sep6Anchor;
   /** Asset code `/info` keys by, derived from `dest.asset`. */
   private readonly destAssetCode: string;
+  /** Bridge asset for this corridor — the denomination `amount_in` is reported in. */
+  private readonly settlementAsset: string;
   private readonly fetchImpl: FetchLike;
+  private readonly sep10?: Sep10Signer;
+  private cachedToken?: { token: string; expMs: number };
   private cachedInfo?: Sep6Info;
 
   constructor(corridor: Corridor, opts: Sep6AdapterOptions = {}) {
@@ -214,7 +332,65 @@ export class Sep6Adapter implements AnchorAdapter {
     this.anchor = corridor.dest as Sep6Anchor;
     this.name = this.anchor.name;
     this.destAssetCode = infoAssetCode(this.anchor.asset);
+    this.settlementAsset = corridor.settlement.bridge_asset;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.sep10 = opts.sep10;
+  }
+
+  // SEP-10 challenge/response: GET challenge, sign it, POST back for JWT.
+  private async authToken(): Promise<Outcome<string | undefined>> {
+    const webAuth = this.anchor.endpoints.web_auth;
+    if (!webAuth || !this.sep10) return ok(undefined);
+
+    const now = Date.now();
+    if (this.cachedToken && this.cachedToken.expMs - 30_000 > now) {
+      return ok(this.cachedToken.token);
+    }
+
+    const authFailed = (why: string) =>
+      fail("ANCHOR_UNAVAILABLE", `${this.name}: SEP-10 auth failed (${why})`, {
+        retryable: true,
+      });
+
+    try {
+      const url = new URL(webAuth);
+      url.searchParams.set("account", this.sep10.account);
+      url.searchParams.set("home_domain", this.anchor.endpoints.home_domain);
+      const challengeRes = await this.fetchImpl(url.toString());
+      if (!challengeRes.ok) return authFailed(`challenge HTTP ${challengeRes.status}`);
+      const challenge = (await challengeRes.json()) as {
+        transaction?: string;
+        network_passphrase?: string;
+      };
+      if (!challenge.transaction || !challenge.network_passphrase) {
+        return authFailed("challenge response missing transaction/network_passphrase");
+      }
+
+      const signed = await this.sep10.signChallenge(
+        challenge.transaction,
+        challenge.network_passphrase,
+      );
+      const tokenRes = await this.fetchImpl(webAuth, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transaction: signed }),
+      });
+      if (!tokenRes.ok) return authFailed(`token HTTP ${tokenRes.status}`);
+      const { token } = (await tokenRes.json()) as { token?: string };
+      if (!token) return authFailed("token response missing `token`");
+
+      this.cachedToken = { token, expMs: jwtExpiryMs(token) ?? now + 15 * 60_000 };
+      return ok(token);
+    } catch (cause) {
+      return fail("ANCHOR_UNAVAILABLE", `${this.name}: SEP-10 auth request failed`, {
+        retryable: true,
+        cause,
+      });
+    }
+  }
+
+  private authHeader(token: string | undefined): Record<string, string> {
+    return token ? { authorization: `Bearer ${token}` } : {};
   }
 
   /**
@@ -299,8 +475,86 @@ export class Sep6Adapter implements AnchorAdapter {
     return this.notImplemented("openTransaction");
   }
 
-  async getTransaction(_transactionId: string): Promise<Outcome<TransactionStatus>> {
-    return this.notImplemented("getTransaction");
+  async getTransaction(transactionId: string): Promise<Outcome<TransactionStatus>> {
+    const { transfer_server } = this.anchor.endpoints;
+    if (!transfer_server) {
+      return fail("ANCHOR_UNAVAILABLE", `${this.name}: no SEP-6 transfer server configured`);
+    }
+
+    const auth = await this.authToken();
+    if (!auth.ok) return auth;
+
+    try {
+      const url = new URL(`${transfer_server}/transaction`);
+      url.searchParams.set("id", transactionId);
+
+      const res = await this.fetchImpl(url.toString(), {
+        method: "GET",
+        headers: this.authHeader(auth.value),
+      });
+
+      if (!res.ok) {
+        return fail("ANCHOR_UNAVAILABLE", `${this.name}: get-tx HTTP ${res.status}`, {
+          retryable: res.status >= 500,
+        });
+      }
+
+      const j = (await res.json()) as {
+        transaction?: {
+          status?: string;
+          amount_in?: unknown;
+          amount_in_asset?: unknown;
+          refunds?: unknown;
+          withdraw_anchor_account?: unknown;
+          stellar_account_id?: unknown;
+          to?: unknown;
+          withdraw_memo?: unknown;
+          stellar_memo?: unknown;
+          deposit_memo?: unknown;
+          withdraw_memo_type?: unknown;
+          stellar_memo_type?: unknown;
+          deposit_memo_type?: unknown;
+        };
+      };
+
+      const tx = j?.transaction;
+      if (!tx || typeof tx !== "object" || typeof tx.status !== "string") {
+        return fail("ANCHOR_UNAVAILABLE", `${this.name}: invalid transaction response`);
+      }
+
+      const mapped = mapSep6Status(tx.status);
+
+      const asset =
+        typeof tx.amount_in_asset === "string" && tx.amount_in_asset
+          ? tx.amount_in_asset
+          : this.settlementAsset;
+      const settledAmount = typeof tx.amount_in === "string" ? tx.amount_in : undefined;
+
+      const refunds = parseRefunds(tx.refunds, asset, settledAmount);
+
+      const amountIn = amountString(tx.amount_in);
+      const depositAddress = nonEmptyString(
+        tx.withdraw_anchor_account ?? tx.stellar_account_id ?? tx.to,
+      );
+      const memo = nonEmptyString(tx.withdraw_memo ?? tx.stellar_memo ?? tx.deposit_memo);
+      const memoType = parseMemoType(
+        tx.withdraw_memo_type ?? tx.stellar_memo_type ?? tx.deposit_memo_type,
+      );
+
+      return ok<TransactionStatus>({
+        ...mapped,
+        ...(refunds ? { refunds } : {}),
+        ...(amountIn !== undefined ? { amountIn: { asset, amount: amountIn } } : {}),
+        ...(depositAddress !== undefined ? { depositAddress } : {}),
+        ...(memo !== undefined ? { memo } : {}),
+        ...(memoType !== undefined ? { memoType } : {}),
+      });
+    } catch (cause) {
+      return fail("ANCHOR_UNAVAILABLE", `${this.name}: get-tx failed`, {
+        retryable: true,
+        cause,
+      });
+    }
   }
 
   async requestRefund(
