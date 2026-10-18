@@ -61,3 +61,6 @@ export {
   type AttestationSource,
   type RegistryResolverOptions,
 } from "./registry-resolver";
+
+export { createAdapterRegistry } from "./adapters";
+export type { AdapterFactory, AdapterRegistry } from "./adapters";

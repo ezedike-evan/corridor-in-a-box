@@ -8,10 +8,12 @@
 #   ANCHOR_QUOTE_SERVER: https://testanchor.stellar.org/sep38
 #
 # SEP-6 GET /info advertises deposit and withdrawal for SRT, USDC, native.
-# The engine does not yet settle SEP-6 corridors (dest.protocol=sep6); liveness
-# honestly reports this lane as not runnable until the SEP-6 adapter lands.
+# `@corridor/sep6` can drive a `dest.protocol: sep6` corridor, but `liveness()`
+# only recognises `transfer_server_sep31` today, so `corridor plan` reports this
+# lane as NOT runnable. That is a gap in the liveness check, not a finding about
+# the anchor; the endpoints below were read from its published stellar.toml.
 id: testanchor-sep6
-status_note: "SDF Test Anchor (testanchor.stellar.org) on testnet via SEP-6. Confirmed 2026-10-17. Blocked on engine SEP-6 adapter."
+status_note: "SDF Test Anchor (testanchor.stellar.org) on testnet via SEP-6. Endpoints read from its stellar.toml 2026-10-17. No payment attempted. liveness() does not yet understand SEP-6 endpoints, so plan reports NOT runnable."
 
 source:
   name: Testnet Sending Anchor
