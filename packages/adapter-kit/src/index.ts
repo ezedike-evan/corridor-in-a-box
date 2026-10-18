@@ -19,6 +19,8 @@ import {
   type PaymentIntent,
 } from "@corridor/types";
 
+export { Sep10Client, jwtExpiryMs, type Sep10Signer } from "./sep10";
+
 /** A SEP-38 quote. `firm` quotes carry an id + expiry and bind the deliverer to a rate. */
 export interface Quote {
   readonly id: string;
@@ -218,10 +220,8 @@ export interface RefundRef {
 }
 
 /**
- * SHIM for #187 (minimal, to be reconciled with that issue's PR).
  * What an adapter supports, discoverable up front instead of by failing.
- * `settlement` is `readonly string[]` here because `DepositInstructions` (the
- * type #187 names) does not exist in this tree yet.
+ * Exposes supported quote styles, KYC mechanism, settlement kinds, refunds and callbacks.
  */
 export interface AdapterCapabilities {
   readonly protocol: string;
@@ -277,6 +277,36 @@ export interface Sep38QuoteProviderOptions {
    * Supplier for bearer auth token (e.g. from SEP-10).
    */
   readonly authToken?: (corridor: Corridor) => Promise<Outcome<string | undefined>>;
+}
+
+/**
+ * SEP-38 `total_price` is sell units per buy unit INCLUDING fees, so
+ * `total_price x buy_amount` must land on `sell_amount` (within `QUOTE_TOLERANCE`).
+ * Returns a description of the inconsistency, or undefined when the numbers agree or
+ * the anchor did not send a usable `total_price`. Shared by every adapter that reads a
+ * firm SEP-38 quote (SEP-31, SEP-6), so they cannot drift apart.
+ */
+export function totalPriceProblem(q: {
+  quoteId: string;
+  totalPrice: string | undefined;
+  buyAmount: string;
+  sellAmount: string;
+}): string | undefined {
+  const { quoteId, totalPrice, buyAmount, sellAmount } = q;
+  if (!totalPrice || !isValidAmount(totalPrice) || !isValidAmount(buyAmount)) return undefined;
+  const impliedSell = applyPrice(buyAmount, totalPrice);
+  if (!impliedSell.ok) return undefined;
+  const drift = subAmounts(impliedSell.value, sellAmount);
+  const tolerance = applyPrice(sellAmount, QUOTE_TOLERANCE);
+  if (!drift.ok || !tolerance.ok) return undefined;
+  const abs = drift.value.startsWith("-") ? drift.value.slice(1) : drift.value;
+  const within = compareAmounts(abs, tolerance.value);
+  if (!within.ok || within.value <= 0) return undefined;
+  return (
+    `quote ${quoteId} is internally inconsistent — ` +
+    `total_price ${totalPrice} × buy_amount ${buyAmount} = ` +
+    `${impliedSell.value}, but sell_amount is ${sellAmount}`
+  );
 }
 
 /**
@@ -353,25 +383,13 @@ export class Sep38QuoteProvider implements QuoteProvider {
         );
       }
 
-      if (j.total_price && isValidAmount(j.total_price) && isValidAmount(j.buy_amount)) {
-        const impliedSell = applyPrice(j.buy_amount, j.total_price);
-        if (impliedSell.ok) {
-          const drift = subAmounts(impliedSell.value, sellAmount);
-          const tolerance = applyPrice(sellAmount, QUOTE_TOLERANCE);
-          if (drift.ok && tolerance.ok) {
-            const abs = drift.value.startsWith("-") ? drift.value.slice(1) : drift.value;
-            const within = compareAmounts(abs, tolerance.value);
-            if (within.ok && within.value > 0) {
-              return fail(
-                "QUOTE_UNAVAILABLE",
-                `${name}: quote ${j.id} is internally inconsistent — ` +
-                  `total_price ${j.total_price} × buy_amount ${j.buy_amount} = ` +
-                  `${impliedSell.value}, but sell_amount is ${sellAmount}`,
-              );
-            }
-          }
-        }
-      }
+      const inconsistent = totalPriceProblem({
+        quoteId: j.id,
+        totalPrice: j.total_price,
+        buyAmount: j.buy_amount,
+        sellAmount,
+      });
+      if (inconsistent) return fail("QUOTE_UNAVAILABLE", `${name}: ${inconsistent}`);
 
       let fee: Money | undefined;
       if (j.fee) {
@@ -666,3 +684,5 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
     },
   };
 }
+
+export * from "./conformance";
