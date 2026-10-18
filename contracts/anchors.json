@@ -36,12 +36,6 @@
     "refreshes decays into a stale row the scheduled job will never touch — the",
     "registry's whole claim is that staleness is visible AND fixable, so every",
     "domain it holds belongs in this list.",
-    "",
-    "coins.ph (Coins.ph, Philippines) was added from the Stellar Anchor Directory.",
-    "Probe result: SEP-24/SEP-6 only — no SEP-31 receive side answers, so no corridor",
-    "manifest is written. Blocked on Scaffold @corridor/sep6 with Sep6Adapter and",
-    "GET /info parsing.",
-    "",
     "BlindPay appears in the Stellar Anchor Directory for Argentina, Brazil,",
     "Colombia, Mexico, and the United States, but the entry publishes no website",
     "or toml_file. BlindPay's official home domain is blindpay.com; its",
@@ -61,6 +55,10 @@
     "(DNS ENODATA / getaddrinfo ENOTFOUND; clickpesa.com returns HTTP 404). SEP-31",
     "is not functional and no manifest is written; blocked on active stellar.toml/SEP-6.",
     "",
+    "coins.ph is Coins.ph (Philippines), added from the Stellar Anchor Directory.",
+    "Probe result reported by the contributor on 2026-10-16: SEP-24/SEP-6 only, no SEP-31",
+    "receive side answers, so no corridor manifest is written. Blocked on SEP-6 support.",
+    "",
     "Each entry in `anchors` records curator-declared context (name, ISO 3166-1",
     "alpha-2 countries, kind, directory/manifest source, and date added). Countries",
     "and `kind` are curator-declared metadata, NOT attested facts; `domains` mirrors",
@@ -72,10 +70,10 @@
     "mint.zeam.money",
     "stellar.org",
     "lobstr.co",
-    "coins.ph",
     "blindpay.com",
     "mykobo.co",
-    "connect.clickpesa.com"
+    "connect.clickpesa.com",
+    "coins.ph"
   ],
   "anchors": [
     {
@@ -119,14 +117,6 @@
       "added": "2026-08-11"
     },
     {
-      "domain": "coins.ph",
-      "name": "Coins.ph",
-      "countries": ["PH"],
-      "kind": "other",
-      "source": "https://anchors.stellar.org",
-      "added": "2026-10-16"
-    },
-    {
       "domain": "blindpay.com",
       "name": "BlindPay",
       "countries": ["AR", "BR", "CO", "MX", "US"],
@@ -149,6 +139,14 @@
       "kind": "other",
       "source": "https://anchors.stellar.org/?s=ClickPesa",
       "added": "2026-10-17"
+    },
+    {
+      "domain": "coins.ph",
+      "name": "Coins.ph",
+      "countries": ["PH"],
+      "kind": "other",
+      "source": "https://anchors.stellar.org",
+      "added": "2026-10-16"
     }
   ]
 }
