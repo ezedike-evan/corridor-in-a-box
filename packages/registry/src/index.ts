@@ -28,6 +28,8 @@ export const PROBE_NAMES = [
   "sep38_quote",
   "sep12_status",
   "sep31_info",
+  "sep6_info",
+  "sep6_auth",
 ] as const;
 
 export type ProbeName = (typeof PROBE_NAMES)[number];
@@ -231,7 +233,7 @@ export class AnchorRegistry {
    * evidence about today, and letting callers forget to check would rebuild the
    * problem this registry exists to solve.
    */
-  async liveSep31Anchors(maxStalenessLedgers = 120_960): Promise<string[]> {
+  async liveSep31Anchors(maxStalenessLedgers = WEEK_OF_LEDGERS): Promise<string[]> {
     const all = await this.domains();
     const out: string[] = [];
     for (const domain of all) {
@@ -373,6 +375,56 @@ export function decodeAttestationEvent(event: {
     attestedLedger: attestedLedgerNum,
     attester: "",
   };
+}
+
+/** Approximate ledgers in one week at 5 seconds per ledger. (7 * 24 * 60 * 60 / 5) */
+export const WEEK_OF_LEDGERS = 120_960;
+
+/** Default maximum staleness threshold for scheduled runs: ~2 days at 5s per ledger. (2 * 24 * 60 * 60 / 5) */
+export const MAX_STALENESS_LEDGERS = 34_560;
+
+export interface StalenessRecord {
+  readonly domain: string;
+  readonly ledgersOld?: number | null;
+  readonly staleness?: number | null;
+  readonly neverAttested?: boolean;
+}
+
+export interface StaleDomain {
+  readonly domain: string;
+  readonly reason: "stale" | "never-attested";
+  readonly ledgersOld?: number | null;
+  readonly threshold: number;
+}
+
+/**
+ * Filter records for any domain that is stale or was never attested.
+ * Returns records where the domain was never attested or exceeds the staleness threshold.
+ */
+export function findStale(
+  records: readonly StalenessRecord[],
+  threshold: number = MAX_STALENESS_LEDGERS,
+): StaleDomain[] {
+  const stale: StaleDomain[] = [];
+  for (const record of records) {
+    const age = record.ledgersOld ?? record.staleness;
+    if (record.neverAttested || age === null || age === undefined) {
+      stale.push({
+        domain: record.domain,
+        reason: "never-attested",
+        ledgersOld: null,
+        threshold,
+      });
+    } else if (typeof age === "number" && age > threshold) {
+      stale.push({
+        domain: record.domain,
+        reason: "stale",
+        ledgersOld: age,
+        threshold,
+      });
+    }
+  }
+  return stale;
 }
 
 // The SDK's nativeToScVal infers `String` for JS strings only with an explicit

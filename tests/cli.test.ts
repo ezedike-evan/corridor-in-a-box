@@ -253,7 +253,7 @@ describe("corridor CLI", () => {
     const r = run(["plan", "corridors/ng-cowrie.corridor.yaml"]);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("liveness: ✓ VERIFIED");
-    expect(r.stdout).toContain("2026-08-11");
+    expect(r.stdout).toContain("2026-10-17");
   });
 
   it("plan: prints the status_note when present", () => {
