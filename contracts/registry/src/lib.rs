@@ -33,6 +33,32 @@
 //!
 //! Writes are restricted to a single configured attester contract, which holds
 //! the authorisation policy. See the `attester` crate.
+//!
+//! ## Storage lifetime
+//!
+//! Soroban persistent and instance entries expire after their TTL and are then
+//! archived: a read of an archived entry fails until someone restores it. Every
+//! write here therefore extends the entry it touched, and the contract instance
+//! (which holds `Admin`, `Attester` and the `domains()` list, and whose expiry
+//! takes the whole contract offline), by the constants below. `bump(domain)` lets
+//! anyone keep a record alive without re-attesting it, so an anchor that is no
+//! longer attested (say, one removed from `contracts/anchors.json`) is not
+//! archived just because nobody wrote to it. `bump` does not change
+//! `attested_ledger`: the record stays exactly as old as it was.
+//!
+//! The extension is capped by the network's maximum entry TTL, and an entry only
+//! lives that long if something touches it again before then. Calling `bump` for
+//! every registered domain at least once per `TTL_THRESHOLD` window is enough.
+//!
+//! ### Restoring an archived entry
+//!
+//! `bump` cannot revive an entry that has already been archived: the network
+//! rejects any transaction that touches one. Submit a `RestoreFootprint`
+//! operation for the archived key first (the Stellar CLI wraps it as
+//! `stellar contract restore`; see its `--help` for the key flags), which brings
+//! the entry back live, and then call `bump(domain)` to extend it again. Restoring
+//! the contract instance the same way brings back `Admin`, `Attester` and
+//! `domains()`.
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, BytesN, Env,
@@ -64,6 +90,18 @@ pub const PROBE_NAMES: [&str; 5] = [
 /// whoever crosses the threshold. Raise it deliberately via an upgrade if the
 /// ecosystem outgrows it rather than discovering the limit in production.
 pub const MAX_DOMAINS: u32 = 512;
+
+/// Ledgers close about every 5 seconds.
+pub const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// An entry is only extended when its remaining TTL has fallen below this, so a
+/// burst of writes pays for one extension rather than one each. 30 days.
+pub const TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+
+/// What a write or `bump` extends an entry to. 90 days: comfortably inside the
+/// network's maximum entry TTL (an extension past it is an error, not a clamp),
+/// and three times the threshold so that a write always buys a real extension.
+pub const TTL_EXTEND_TO: u32 = 90 * LEDGERS_PER_DAY;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,11 +158,38 @@ const PROBE_MASK: u32 = (1u32 << PROBE_NAMES.len()) - 1;
 
 /// Emitted on every accepted attestation, so indexers and dashboards can follow
 /// the registry without polling every key.
+///
+/// ## Event Schema Version
+/// - **v1** (initial): topic `("attested", domain)`, data `{ attested_ledger }`.
+/// - **v2** (current): topic `("attested", domain)`, data `{ seps, toml_hash, probes_run, probes_passed, attested_ledger, attester }`.
+///   Indexers can distinguish v2 from v1 by inspecting the map keys in the event data body
+///   (v2 carries the full attestation payload alongside `attested_ledger`).
 #[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Attested {
     #[topic]
     pub domain: String,
+    pub seps: u32,
+    pub toml_hash: BytesN<32>,
+    pub probes_run: u32,
+    pub probes_passed: u32,
     pub attested_ledger: u32,
+    pub attester: Address,
+}
+
+/// Keeps the contract instance (its `Admin`, `Attester` and `Domains`, and its
+/// code) alive. Called from every path that writes instance storage.
+fn extend_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+}
+
+/// Keeps one anchor record alive.
+fn extend_record(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 #[contract]
@@ -140,6 +205,7 @@ impl Registry {
         env.storage()
             .instance()
             .set(&DataKey::Domains, &Vec::<String>::new(&env));
+        extend_instance(&env);
     }
 
     /// Record (or replace) the attestation for a domain.
@@ -189,22 +255,47 @@ impl Registry {
             env.storage().instance().set(&DataKey::Domains, &domains);
         }
 
+        let attested_ledger = env.ledger().sequence();
         let record = AnchorRecord {
             domain: domain.clone(),
+            seps,
+            toml_hash: toml_hash.clone(),
+            probes_run,
+            probes_passed,
+            attested_ledger,
+            attester: attester.clone(),
+        };
+        env.storage().persistent().set(&key, &record);
+        extend_record(&env, &key);
+        extend_instance(&env);
+
+        Attested {
+            domain,
             seps,
             toml_hash,
             probes_run,
             probes_passed,
-            attested_ledger: env.ledger().sequence(),
+            attested_ledger,
             attester,
-        };
-        env.storage().persistent().set(&key, &record);
-
-        Attested {
-            domain,
-            attested_ledger: record.attested_ledger,
         }
         .publish(&env);
+        Ok(())
+    }
+
+    /// Extend the lifetime of a record, and of the contract instance, without
+    /// re-attesting. Permissionless on purpose: keeping a fact readable costs the
+    /// caller a fee and changes nothing, `attested_ledger` included, so there is
+    /// nothing to protect and no reason to make a dashboard ask the attester.
+    ///
+    /// Cannot revive an entry that is already archived; see "Restoring an
+    /// archived entry" in the header.
+    pub fn bump(env: Env, domain: String) -> Result<(), Error> {
+        let key = DataKey::Anchor(domain);
+        if !env.storage().persistent().has(&key) {
+            return Err(Error::NotFound);
+        }
+        extend_record(&env, &key);
+        extend_instance(&env);
         Ok(())
     }
 
@@ -275,6 +366,7 @@ impl Registry {
     pub fn set_attester(env: Env, attester: Address) -> Result<(), Error> {
         Self::admin(env.clone())?.require_auth();
         env.storage().instance().set(&DataKey::Attester, &attester);
+        extend_instance(&env);
         Ok(())
     }
 
