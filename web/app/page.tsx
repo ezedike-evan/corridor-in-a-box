@@ -51,7 +51,12 @@ export default async function Home() {
       </section>
 
       {/* Features */}
-      <section className="grid gap-4 sm:grid-cols-3">
+      <section aria-labelledby="features-heading" className="grid gap-4 sm:grid-cols-3">
+        {/* The cards below are h3s; without an h2 above them the outline jumps
+            from the page title straight to level three. */}
+        <h2 id="features-heading" className="sr-only">
+          What it does
+        </h2>
         <Feature
           icon={<Repeat size={20} className="text-blue-600" />}
           title="Idempotent & resumable"
@@ -91,6 +96,7 @@ export default async function Home() {
               className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-bg-subtle px-3 py-1 text-xs font-medium text-secondary-text hover:underline"
             >
               <Link2 size={13} className="text-blue-600" /> verify on chain
+              <span className="sr-only"> (opens in a new tab)</span>
             </a>
           )}
         </div>

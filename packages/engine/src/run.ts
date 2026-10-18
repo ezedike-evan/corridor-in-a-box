@@ -5,7 +5,7 @@
 // specific fact arrives via the validated manifest, every anchor-specific fact via
 // the injected RouteResolver/adapters. Add a corridor = add a manifest.
 
-import { liveness, type Corridor, type LivenessState } from "@corridor/manifest";
+import { liveness, hashCorridor, type Corridor, type LivenessState } from "@corridor/manifest";
 import {
   compareAmounts,
   fail,
@@ -350,6 +350,7 @@ export async function execute(
   const run: StoredRun = {
     idempotencyKey: intent.idempotencyKey,
     corridorId: corridor.id,
+    manifestHash: hashCorridor(corridor),
     state: "created",
     version: 0,
     owner: opts.owner,
@@ -1123,6 +1124,37 @@ async function resumeRun(
     routeTrust: route.trust,
     recordOutcome,
   });
+
+  // --- manifest pinning: fail closed if corridor configuration changed ---
+  // A run records the stable hash of the manifest it started with. If the manifest
+  // was edited after the run opened, resuming before settlement would continue
+  // under rules it was never quoted or opened with (new asset issuer, new limits,
+  // new recovery policy, different anchor endpoint).
+  //
+  // If the run has not settled, fail closed with MANIFEST_CHANGED without moving money.
+  // If it already settled, the money is already on-chain, so continue reconcile
+  // only (never re-settle) and log a warning.
+  // Legacy rows without a manifestHash are treated as legacy (allowed to resume).
+  const currentHash = hashCorridor(corridor);
+  const hashMismatch = run.manifestHash !== undefined && run.manifestHash !== currentHash;
+
+  if (hashMismatch) {
+    const hasSettled = run.state === "settled" || run.state === "reconciled";
+    if (!hasSettled) {
+      return context.die({
+        code: "MANIFEST_CHANGED",
+        message: `corridor manifest changed since run opened (${run.manifestHash} !== ${currentHash}); refusing to resume un-settled run`,
+        retryable: false,
+      });
+    }
+    (deps.logger ?? silentLogger).log("warn", "corridor.manifest.changed", {
+      idempotencyKey: run.idempotencyKey,
+      corridorId: corridor.id,
+      recordedManifestHash: run.manifestHash,
+      currentManifestHash: currentHash,
+      message: "manifest changed after settlement; resuming reconcile only",
+    });
+  }
 
   if (run.state === "created" || run.state === "quoted" || run.state === "compliant") {
     return context.die({

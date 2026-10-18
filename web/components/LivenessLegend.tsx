@@ -1,5 +1,5 @@
 import { Badge } from "@/components/ui/Badge";
-import { BADGE } from "@/components/CorridorCard";
+import { BADGE } from "@/components/LivenessBadge";
 import type { LivenessState } from "@/lib/corridors";
 
 interface TierDetail {
@@ -31,9 +31,9 @@ const TIERS: LivenessState[] = ["proven", "verified", "unverified", "not-runnabl
 export function LivenessLegend() {
   return (
     <div className="rounded-xl border border-border bg-bg-subtle/50 p-4">
-      <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-secondary-text">
+      <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-secondary-text">
         Liveness tiers & evidence requirements
-      </div>
+      </h3>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {TIERS.map((tier) => {
           const badge = BADGE[tier];
@@ -46,7 +46,7 @@ export function LivenessLegend() {
             >
               <div className="flex items-center gap-1.5 font-medium">
                 <Badge variant={badge.variant}>
-                  <Icon size={12} /> {badge.label}
+                  <Icon size={12} aria-hidden /> {badge.label}
                 </Badge>
               </div>
               <p className="text-primary-text">{detail.description}</p>
