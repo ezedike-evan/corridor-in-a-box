@@ -468,6 +468,12 @@ describe("openTransaction follow-up GET /transaction", () => {
     if (opened.ok) {
       expect(opened.value).toEqual({
         transactionId: "tx-9",
+        instructions: {
+          kind: "stellar_payment",
+          to: "GANCHOR",
+          memo: "aGVsbG8=",
+          memoType: "hash",
+        },
         depositAddress: "GANCHOR",
         memo: "aGVsbG8=",
         memoType: "hash",
@@ -854,7 +860,10 @@ describe("capabilities", () => {
     expect(new Sep6Adapter(corridor()).capabilities()).toEqual({
       protocol: "sep6",
       quotes: ["none"],
-      kyc: "none",
+      // Not "none": the engine skips ensureCompliance when kyc is "none", and this
+      // adapter refuses (KYC_REQUIRED) a lane with no kyc_server rather than assume
+      // it needs no KYC. "sep6_fields" keeps the compliance step in the run.
+      kyc: "sep6_fields",
       settlement: ["stellar_payment"],
       refunds: "report_only",
       callbacks: false,
