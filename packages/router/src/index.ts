@@ -72,3 +72,6 @@ export {
   type LoadResolverSpec,
   type LoadResolverCtx,
 } from "./load";
+
+export { createAdapterRegistry } from "./adapters";
+export type { AdapterFactory, AdapterRegistry } from "./adapters";

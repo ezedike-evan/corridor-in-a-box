@@ -37,6 +37,7 @@
     "@corridor/adapter-kit": "workspace:*",
     "@corridor/engine": "workspace:*",
     "@corridor/manifest": "workspace:*",
+    "@corridor/probe": "workspace:*",
     "@corridor/registry": "workspace:*",
     "@corridor/router": "workspace:*",
     "@corridor/sep31": "workspace:*",

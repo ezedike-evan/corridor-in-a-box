@@ -34,7 +34,12 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadCorridor, type Corridor } from "@corridor/manifest";
-import { loadResolver, StaticRouteResolver, type RouteResolver } from "@corridor/router";
+import {
+  createAdapterRegistry,
+  loadResolver,
+  StaticRouteResolver,
+  type RouteResolver,
+} from "@corridor/router";
 import { Sep31Adapter } from "@corridor/sep31";
 import {
   LocalKeypairSigner,
@@ -52,7 +57,7 @@ import {
   type EngineDeps,
   type IdempotencyStore,
 } from "@corridor/engine";
-import { createService, gracefulShutdown } from "@corridor/service";
+import { createService, gracefulShutdown, storeCheck } from "@corridor/service";
 import type { AnchorAdapter } from "@corridor/adapter-kit";
 
 function env(name: string, fallback?: string): string {
@@ -143,6 +148,28 @@ async function buildResolver(adapterFor: (c: Corridor) => AnchorAdapter): Promis
   return { resolver, label: module };
 }
 
+/** Protocol -> adapter. Register `sep6` / `custom:<id>` here as those adapters are wired. */
+function buildAdapterRegistry(sep10: StellarSep10Signer) {
+  const registry = createAdapterRegistry();
+  registry.register("sep31", (corridor) => new Sep31Adapter(corridor, { sep10 }));
+  return registry;
+}
+
+/** Fail at startup, not at the first payment, when a manifest names a protocol with no adapter. */
+function validateCorridors(
+  corridors: Map<string, Corridor>,
+  registry: ReturnType<typeof buildAdapterRegistry>,
+): void {
+  for (const c of corridors.values()) {
+    if (!registry.has(c)) {
+      console.error(
+        `✗ corridor "${c.id}" uses protocol "${c.dest.protocol}" but no adapter is registered for it`,
+      );
+      process.exit(1);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const corridors = loadCorridors();
   if (corridors.size === 0) {
@@ -156,8 +183,11 @@ async function main(): Promise<void> {
   const submitter = new StellarSettlementSubmitter({ signer, horizonUrl });
   const { store, close } = await buildStore();
   const metrics = new PrometheusMetrics();
-  const adapterFor = (corridor: Corridor) => new Sep31Adapter(corridor, { sep10 });
-  const { resolver, label: resolverLabel } = await buildResolver(adapterFor);
+  const adapters = buildAdapterRegistry(sep10);
+  validateCorridors(corridors, adapters);
+  const { resolver, label: resolverLabel } = await buildResolver((corridor) =>
+    adapters.adapterFor(corridor),
+  );
 
   const deps: EngineDeps = {
     resolver,
@@ -187,6 +217,10 @@ async function main(): Promise<void> {
         }
       : undefined,
     metricsText: () => metrics.render(),
+    // Wire the idempotency store check so /readyz reports store reachability.
+    // PostgresIdempotencyStore has ping(); InMemoryIdempotencyStore does not —
+    // only register the check when the store supports it.
+    readinessChecks: "ping" in store ? [storeCheck(store as { ping(): Promise<void> })] : [],
   });
 
   const port = Number(process.env.PORT ?? "8080");
@@ -204,7 +238,7 @@ async function main(): Promise<void> {
   for (const sig of ["SIGTERM", "SIGINT"] as const) {
     process.on(sig, () => {
       console.log(`\n${sig} received, draining…`);
-      void gracefulShutdown(srv).then(async () => {
+      void gracefulShutdown(srv, service).then(async () => {
         await close();
         process.exit(0);
       });
