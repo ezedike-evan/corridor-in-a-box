@@ -27,8 +27,10 @@ const MANIFEST_PATH = join(EXAMPLE_DIR, "stub.corridor.yaml");
 const loaded = loadCorridor(MANIFEST_PATH);
 if (!loaded.ok) throw new Error(`stub manifest failed to load: ${loaded.error.message}`);
 const CORRIDOR = loaded.value;
-const BASE_URL = bespokeBaseUrl(CORRIDOR);
-if (!BASE_URL) throw new Error("stub manifest declares no base_url");
+const declaredBaseUrl = bespokeBaseUrl(CORRIDOR);
+if (!declaredBaseUrl) throw new Error("stub manifest declares no base_url");
+// A plain `string`: narrowing a module-level const does not reach the helper functions below.
+const BASE_URL: string = declaredBaseUrl;
 
 const INTENT: PaymentIntent = {
   idempotencyKey: "stub-test-0001",

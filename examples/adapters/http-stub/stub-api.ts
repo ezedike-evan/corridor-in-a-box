@@ -62,7 +62,10 @@ export function createStubFetchImpl(opts: StubApiOptions = {}): typeof fetch {
       headers: { "content-type": "application/json" },
     });
 
-  const handler = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const handler = async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
     const rawUrl =
       typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const url = new URL(rawUrl);
