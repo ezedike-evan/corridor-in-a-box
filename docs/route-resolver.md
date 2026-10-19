@@ -90,6 +90,53 @@ Its options (via `CORRIDOR_RESOLVER_OPTIONS`):
 Refusals name the domain, e.g.
 `refusing to route to example.com: not on the operator allowlist (1 domain allowed)`.
 
+## Conformance: `describeResolverContract`
+
+`@corridor/router/testing` exports the contract above as executable vitest
+cases, so a resolver developed outside this repo can prove it honours it instead
+of discovering the drift in production:
+
+```ts
+import { describeResolverContract } from "@corridor/router/testing";
+
+describeResolverContract("MyResolver", (fixtures) => new MyResolver(fixtures.corridor));
+```
+
+Four cases:
+
+| Case                                                  | Why it is on the list                                                         |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------- |
+| a decision carries a receiving anchor                 | the engine pays into `decision.receiving`                                     |
+| the same intent twice yields the same anchor domain   | a payment that resumes after a restart must settle both halves same place     |
+| failure behaviour matches what the resolver documents | a silent fallback to a weaker source of truth is the failure this seam is for |
+| `split`, if present, sums to 1                        | weights that do not add up route more value than the payment holds            |
+
+The suite hands your factory the fixtures it will resolve
+(`resolverContractFixtures()` for the defaults): `corridor` is the one you are
+expected to route, `unresolvableCorridor` the one you are expected to refuse.
+Declare the refusal behaviour your resolver documents with `unresolvable`:
+
+```ts
+describeResolverContract("RegistryRouteResolver", () => new RegistryRouteResolver(opts), {
+  unresolvable: { outcome: "rejects", errorPattern: /not attested as serving SEP-31/ },
+});
+
+describeResolverContract("StaticRouteResolver", () => new StaticRouteResolver(for, opts), {
+  // Not a gate: it documents that it trusts the manifest, and says so.
+  unresolvable: { outcome: "resolves", trust: "manifest" },
+});
+```
+
+`checkResolverContract(name, makeResolver)` returns the per-case report instead
+of registering anything, and `expectResolverContract(report)` throws naming every
+clause that failed — which is how `tests/router.test.ts` asserts, with `it.fails`,
+that the suite really is capable of failing a broken resolver.
+
+Both built-ins and `examples/resolvers/allowlist-resolver.ts` run the suite in
+`tests/router.test.ts`, so the expectations cannot drift away from the resolvers
+they describe. vitest is a peer dependency of the `./testing` subpath only;
+importing `@corridor/router` alone does not pull it in.
+
 ## Writing your own
 
 1. Create a file (any path or package you control).
@@ -98,3 +145,6 @@ Refusals name the domain, e.g.
 3. Point `CORRIDOR_RESOLVER_MODULE` at it and restart `pnpm serve`.
 4. Read `examples/resolvers/allowlist-resolver.ts` and
    `tests/router.test.ts` for the tested shape of both.
+5. Run `describeResolverContract` over it in your own suite (see
+   [Conformance](#conformance-describeresolvercontract)) before pointing real
+   money at it.

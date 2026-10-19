@@ -29,6 +29,30 @@ be reverted on chain. The same list of spellings is pinned in
 `contracts/attester/src/test.rs` and `tests/domain.test.ts`;
 `docs/operations.md` §0 states the rule where a fleet entry is added.
 
+### Added — `describeResolverContract`: the RouteResolver contract, executable ([#260](https://github.com/ezedike-evan/corridor-in-a-box/issues/260))
+
+A private resolver is written outside this repo against the `RouteResolver`
+interface, and until now nothing shipped with it that could tell its author
+whether it honours the documented contract — `tests/router.test.ts` and
+`tests/registry-resolver.test.ts` test the built-ins and are not reusable.
+
+`@corridor/router/testing` exports `describeResolverContract(name,
+makeResolver)`, which registers four cases: a decision carries a receiving
+anchor; the same intent twice yields the same anchor domain (resume safety);
+failure behaviour matches what the resolver documents, declared per resolver via
+`unresolvable` — `RegistryRouteResolver` refuses, `StaticRouteResolver` documents
+that it trusts the manifest; and `split`, if present, sums to 1. The suite hands
+the factory the fixtures it will resolve, so a third party wires its fakes to the
+domains it is actually tested against.
+
+`checkResolverContract` returns the report without registering anything and
+`expectResolverContract` throws naming each failed clause, which is how
+`tests/router.test.ts` proves — with `it.fails` — that a deliberately broken
+resolver really fails the suite. Both built-ins and
+`examples/resolvers/allowlist-resolver.ts` run it; `docs/route-resolver.md`
+documents it for out-of-repo authors. vitest is a peer dependency of the
+`./testing` subpath only.
+
 ### Added — Zeam (South Africa) probed and added as the second VERIFIED lane ([#225](https://github.com/ezedike-evan/corridor-in-a-box/issues/225))
 
 `corridors/zeam.corridor.yaml` — USD → ZAR over `mint.zeam.money`, probed
