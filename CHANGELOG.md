@@ -41,6 +41,27 @@ would have quietly turned the evidence check off for that lane.
   cannot wave a SEP-6 lane through. The existing cases run through the
   compatibility adapter.
 
+### Added — a worked example of a bespoke HTTP anchor adapter ([#206](https://github.com/ezedike-evan/corridor-in-a-box/issues/206))
+
+`examples/adapters/http-stub/` is a complete, runnable `AnchorAdapter` for an
+anchor that speaks a proprietary HTTP API instead of SEP-31. `HttpStubAdapter`
+reports `native` quotes, `bespoke` KYC and `stellar_payment` deposit
+instructions, and drives the real engine end to end against a fictional API
+served in-process by an injected `fetchImpl`. `pnpm example:stub` runs it.
+
+Nothing in the example names a real anchor, host, endpoint or account: the
+destination is `anchor.example` (RFC 2606 reserves `.example` for exactly
+this), the routes are invented, and `tests/http-stub-adapter.test.ts` fails if
+a URL in the example points anywhere but a reserved example domain. The same
+test runs the conformance harness (`runConformance`) against the adapter, so a
+third party has a worked reference for the wiring _and_ the checks.
+
+The lane's manifest declares `protocol: custom:http-stub` and
+`endpoints.base_url`, so a bespoke destination is configuration rather than
+code: the engine needed no change to route through it, and
+`RegistryRouteResolver` still refuses it for want of an on-chain attestation
+probe unless the domain is explicitly allow-listed.
+
 ### Fixed — the attester rejects a domain that is not in canonical form ([#246](https://github.com/ezedike-evan/corridor-in-a-box/issues/246))
 
 `attest` checked only that a domain was non-empty and `<= 253` bytes, so the

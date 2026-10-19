@@ -28,6 +28,7 @@
     "prepare": "lefthook install",
     "cli": "tsx packages/cli/src/index.ts",
     "example": "tsx examples/run-payment.ts",
+    "example:stub": "tsx examples/run-stub-adapter.ts",
     "testnet": "tsx examples/run-testnet.ts",
     "serve": "tsx examples/run-service.ts",
     "verify:settle": "tsx examples/verify-settle-leg.ts",
