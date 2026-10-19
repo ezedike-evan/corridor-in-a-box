@@ -33,6 +33,63 @@
 //!
 //! Writes are restricted to a single configured attester contract, which holds
 //! the authorisation policy. See the `attester` crate.
+//!
+//! ## Storage lifetime
+//!
+//! Soroban persistent and instance entries expire after their TTL and are then
+//! archived: a read of an archived entry fails until someone restores it. Every
+//! write here therefore extends the entry it touched, and the contract instance
+//! (which holds `Admin`, `Attester` and the `domains()` list, and whose expiry
+//! takes the whole contract offline), by the constants below. `bump(domain)` lets
+//! anyone keep a record alive without re-attesting it, so an anchor that is no
+//! longer attested (say, one removed from `contracts/anchors.json`) is not
+//! archived just because nobody wrote to it. `bump` does not change
+//! `attested_ledger`: the record stays exactly as old as it was.
+//!
+//! The extension is capped by the network's maximum entry TTL, and an entry only
+//! lives that long if something touches it again before then. Calling `bump` for
+//! every registered domain at least once per `TTL_THRESHOLD` window is enough.
+//!
+//! ### Restoring an archived entry
+//!
+//! `bump` cannot revive an entry that has already been archived: the network
+//! rejects any transaction that touches one. Submit a `RestoreFootprint`
+//! operation for the archived key first (the Stellar CLI wraps it as
+//! `stellar contract restore`; see its `--help` for the key flags), which brings
+//! the entry back live, and then call `bump(domain)` to extend it again. Restoring
+//! the contract instance the same way brings back `Admin`, `Attester` and
+//! `domains()`.
+//!
+//! ## Migration
+//!
+//! When updating the registry contract in place via `upgrade()` (see `upgrade`
+//! in the implementation below), existing anchor records are retained as-is in
+//! storage. Because new probe bits are strictly appended, existing records
+//! maintain their validity and previous bit meanings. Old records written
+//! before new probes were added will read `serves_sep6 == false` until they are
+//! re-attested by an attester that runs the new probes.
+//!
+//! Anchor metadata works the same way. It lives under its own
+//! `DataKey::Meta(domain)` rather than inside `AnchorRecord`, so no existing
+//! record has to be rewritten for the field to exist. A domain attested before
+//! the upgrade simply has no meta entry, and `get_meta` answers `NotFound` for
+//! it rather than inventing an empty list — "nobody looked" and "it receives
+//! nothing" are different facts, and a default would conflate them.
+//!
+//! ## What metadata is, and what it is not
+//!
+//! `AnchorMeta` holds two things, and the facts-not-opinions rule above still
+//! applies to both, because they are different kinds of claim:
+//!
+//! - `receive_assets` is OBSERVED — the asset codes a SEP-31 `/info` response
+//!   actually listed when the probe ran.
+//! - `country` is DECLARED — the anchor's own `stellar.toml` says where it is
+//!   physically located. Nothing about it was verified.
+//!
+//! Both carry the ledger they were read at and the attester that read them, the
+//! same freshness discipline as the bitmaps. See `docs/registry-metadata.md`
+//! for why this is a second key rather than a new field on `AnchorRecord`, and
+//! for the bounds `put_meta` enforces.
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, BytesN, Env,
@@ -51,12 +108,14 @@ pub const SEP_NUMBERS: [u32; 7] = [1, 6, 10, 12, 24, 31, 38];
 /// `PROBE_NAMES[i]`. Kept separate from `seps` because "the toml claims SEP-31"
 /// and "a SEP-31 call actually succeeded" are different facts, and conflating
 /// them is how a registry starts asserting things nobody verified.
-pub const PROBE_NAMES: [&str; 5] = [
+pub const PROBE_NAMES: [&str; 7] = [
     "toml_fetch",   // stellar.toml fetched and parsed
     "sep10_auth",   // full SEP-10 challenge/response produced a JWT
     "sep38_quote",  // a firm SEP-38 quote came back with a future expiry
     "sep12_status", // SEP-12 customer status was readable
     "sep31_info",   // SEP-31 GET /info listed at least one receivable asset
+    "sep6_info",    // SEP-6 GET /info listed at least one withdraw asset
+    "sep6_auth",    // SEP-6 authenticated read succeeded
 ];
 
 /// Upper bound on registered domains. An unbounded list is an unbounded read
@@ -64,6 +123,33 @@ pub const PROBE_NAMES: [&str; 5] = [
 /// whoever crosses the threshold. Raise it deliberately via an upgrade if the
 /// ecosystem outgrows it rather than discovering the limit in production.
 pub const MAX_DOMAINS: u32 = 512;
+
+/// Upper bound on the receive asset codes stored per anchor. An anchor listing
+/// more than this has assets nobody can route through, and the list is read in
+/// full by `get_meta`, so its size is the size of that read.
+pub const MAX_RECEIVE_ASSETS: u32 = 32;
+
+/// Upper bound on one asset code, in bytes. Real codes are 3-12 characters
+/// (`NGN`, `USDC:G…`); the slack is for a quoted `iso4217:NGN`-style form
+/// without letting the field become a blob.
+pub const MAX_ASSET_CODE_LEN: u32 = 32;
+
+/// Length of a country code: ISO-3166-1 alpha-2, uppercase ASCII. Fixed rather
+/// than ranged so `country` can be compared by consumers without normalising,
+/// and so a free-text address line cannot be written into it by accident.
+pub const COUNTRY_CODE_LEN: u32 = 2;
+
+/// Ledgers close about every 5 seconds.
+pub const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// An entry is only extended when its remaining TTL has fallen below this, so a
+/// burst of writes pays for one extension rather than one each. 30 days.
+pub const TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+
+/// What a write or `bump` extends an entry to. 90 days: comfortably inside the
+/// network's maximum entry TTL (an extension past it is an error, not a clamp),
+/// and three times the threshold so that a write always buys a real extension.
+pub const TTL_EXTEND_TO: u32 = 90 * LEDGERS_PER_DAY;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +175,30 @@ pub struct AnchorRecord {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnchorMeta {
+    /// Anchor home domain this metadata was read under. Matches the
+    /// `AnchorRecord` key it sits beside; stored so a reader that only has the
+    /// value can tell what it describes.
+    pub domain: String,
+    /// OBSERVED: asset codes the anchor's SEP-31 `/info` listed as receivable.
+    /// Empty when the probe ran and it listed nothing — which is the
+    /// `testanchor.stellar.org` case this registry exists to record.
+    pub receive_assets: Vec<String>,
+    /// DECLARED: ISO-3166-1 alpha-2 country from the anchor's own
+    /// `stellar.toml`. `None` means the toml had no machine-readable country —
+    /// it is not a claim that the anchor has none.
+    pub country: Option<String>,
+    /// Ledger at which this metadata was read. A separate clock from the
+    /// record's `attested_ledger`, because the two are written by separate
+    /// calls: metadata from last week is not evidence about this week's
+    /// bitmaps, or the other way round.
+    pub attested_ledger: u32,
+    /// Which attester address produced this metadata.
+    pub attester: Address,
+}
+
+#[contracttype]
 #[derive(Clone)]
 enum DataKey {
     Admin,
@@ -98,6 +208,10 @@ enum DataKey {
     Domains,
     /// One record per domain.
     Anchor(String),
+    /// Observed/declared metadata for a domain, deliberately NOT inside
+    /// `Anchor(String)`: writing it must not have to rewrite the record, and
+    /// records that predate it must stay readable untouched.
+    Meta(String),
 }
 
 #[contracterror]
@@ -112,19 +226,153 @@ pub enum Error {
     /// A bit was set outside the defined `SEP_NUMBERS` / `PROBE_NAMES` range.
     UnknownBit = 4,
     RegistryFull = 5,
+    /// No record for the domain asked about — from a read, or from
+    /// `put_meta`, which refuses to store metadata about a domain that has
+    /// never been attested, because there would be nothing to read it against.
     NotFound = 6,
+    /// More than `MAX_RECEIVE_ASSETS` asset codes in one write.
+    TooManyAssets = 7,
+    /// An asset code was empty, or longer than `MAX_ASSET_CODE_LEN`.
+    InvalidAssetCode = 8,
+    /// The same asset code appeared twice in one write.
+    DuplicateAsset = 9,
+    /// A country that is not `COUNTRY_CODE_LEN` uppercase ASCII letters.
+    InvalidCountry = 10,
 }
 
 const SEP_MASK: u32 = (1u32 << SEP_NUMBERS.len()) - 1;
 const PROBE_MASK: u32 = (1u32 << PROBE_NAMES.len()) - 1;
 
+pub const fn sep_bit(sep: u32) -> Option<u32> {
+    let mut i = 0;
+    while i < SEP_NUMBERS.len() {
+        if SEP_NUMBERS[i] == sep {
+            return Some(1u32 << i);
+        }
+        i += 1;
+    }
+    None
+}
+
+pub const fn probe_bit(name: &str) -> Option<u32> {
+    let mut i = 0;
+    while i < PROBE_NAMES.len() {
+        let a = PROBE_NAMES[i].as_bytes();
+        let b = name.as_bytes();
+        if a.len() == b.len() {
+            let mut j = 0;
+            let mut eq = true;
+            while j < a.len() {
+                if a[j] != b[j] {
+                    eq = false;
+                    break;
+                }
+                j += 1;
+            }
+            if eq {
+                return Some(1u32 << i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Emitted on every accepted attestation, so indexers and dashboards can follow
 /// the registry without polling every key.
+///
+/// ## Event Schema Version
+/// - **v1** (initial): topic `("attested", domain)`, data `{ attested_ledger }`.
+/// - **v2** (current): topic `("attested", domain)`, data `{ seps, toml_hash, probes_run, probes_passed, attested_ledger, attester }`.
+///   Indexers can distinguish v2 from v1 by inspecting the map keys in the event data body
+///   (v2 carries the full attestation payload alongside `attested_ledger`).
 #[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Attested {
     #[topic]
     pub domain: String,
+    pub seps: u32,
+    pub toml_hash: BytesN<32>,
+    pub probes_run: u32,
+    pub probes_passed: u32,
     pub attested_ledger: u32,
+    pub attester: Address,
+}
+
+/// Emitted on every accepted metadata write. Separate from `Attested` because
+/// the two are written by separate calls and land in separate ledgers: an
+/// indexer that assumed one event per attestation would drop whichever half
+/// arrived on its own.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetaAttested {
+    #[topic]
+    pub domain: String,
+    pub receive_assets: Vec<String>,
+    pub country: Option<String>,
+    pub attested_ledger: u32,
+    pub attester: Address,
+}
+
+/// Keeps the contract instance (its `Admin`, `Attester` and `Domains`, and its
+/// code) alive. Called from every path that writes instance storage.
+fn extend_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+}
+
+/// Keeps one anchor record alive.
+fn extend_record(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
+}
+
+/// Validate a receive-asset list the way `put_meta` stores it: bounded in
+/// count, bounded per code, no empty code, no code written twice.
+///
+/// Order is not checked — the list is an observation of what an anchor's own
+/// `/info` endpoint returned, and re-sorting it here would silently rewrite
+/// what a probe saw. Duplicates are a different matter: they make `len()` a
+/// lie about how many assets an anchor receives.
+fn check_receive_assets(assets: &Vec<String>) -> Result<(), Error> {
+    if assets.len() > MAX_RECEIVE_ASSETS {
+        return Err(Error::TooManyAssets);
+    }
+    for i in 0..assets.len() {
+        let a = assets.get_unchecked(i);
+        if a.is_empty() || a.len() > MAX_ASSET_CODE_LEN {
+            return Err(Error::InvalidAssetCode);
+        }
+        for j in (i + 1)..assets.len() {
+            if a == assets.get_unchecked(j) {
+                return Err(Error::DuplicateAsset);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a declared country: absent, or exactly `COUNTRY_CODE_LEN`
+/// uppercase ASCII letters. Rejecting `ngn`-style lowercase rather than
+/// normalising it is deliberate — normalising here would mean two spellings of
+/// the same country can be written and only one of them read back.
+fn check_country(country: &Option<String>) -> Result<(), Error> {
+    let Some(code) = country else {
+        return Ok(());
+    };
+    if code.len() != COUNTRY_CODE_LEN {
+        return Err(Error::InvalidCountry);
+    }
+    let bytes = code.to_bytes();
+    for i in 0..COUNTRY_CODE_LEN {
+        let b = bytes.get(i).ok_or(Error::InvalidCountry)?;
+        if !b.is_ascii_uppercase() {
+            return Err(Error::InvalidCountry);
+        }
+    }
+    Ok(())
 }
 
 #[contract]
@@ -140,6 +388,7 @@ impl Registry {
         env.storage()
             .instance()
             .set(&DataKey::Domains, &Vec::<String>::new(&env));
+        extend_instance(&env);
     }
 
     /// Record (or replace) the attestation for a domain.
@@ -189,22 +438,114 @@ impl Registry {
             env.storage().instance().set(&DataKey::Domains, &domains);
         }
 
+        let attested_ledger = env.ledger().sequence();
         let record = AnchorRecord {
             domain: domain.clone(),
+            seps,
+            toml_hash: toml_hash.clone(),
+            probes_run,
+            probes_passed,
+            attested_ledger,
+            attester: attester.clone(),
+        };
+        env.storage().persistent().set(&key, &record);
+        extend_record(&env, &key);
+        extend_instance(&env);
+
+        Attested {
+            domain,
             seps,
             toml_hash,
             probes_run,
             probes_passed,
-            attested_ledger: env.ledger().sequence(),
+            attested_ledger,
             attester,
-        };
-        env.storage().persistent().set(&key, &record);
-
-        Attested {
-            domain,
-            attested_ledger: record.attested_ledger,
         }
         .publish(&env);
+        Ok(())
+    }
+
+    /// Record (or replace) the observed receive assets and declared country for
+    /// a domain. Same writer restriction as [`Registry::put_anchor`].
+    ///
+    /// Written separately from the record, and requires one to exist: metadata
+    /// about a domain nobody has ever attested is a claim with no facts behind
+    /// it, and it would be invisible to every read that starts from `domains()`.
+    ///
+    /// Passing an empty `receive_assets` says the probe ran and the anchor
+    /// listed nothing, which is a real finding about an anchor that advertises
+    /// SEP-31. To say nothing was observed, do not call this at all — the
+    /// absence of a meta entry is what `get_meta` reports as `NotFound`.
+    pub fn put_meta(
+        env: Env,
+        domain: String,
+        receive_assets: Vec<String>,
+        country: Option<String>,
+        attester: Address,
+    ) -> Result<(), Error> {
+        let writer: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Attester)
+            .ok_or(Error::NotInitialised)?;
+        writer.require_auth();
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Anchor(domain.clone()))
+        {
+            return Err(Error::NotFound);
+        }
+        check_receive_assets(&receive_assets)?;
+        check_country(&country)?;
+
+        let key = DataKey::Meta(domain.clone());
+        let attested_ledger = env.ledger().sequence();
+        let meta = AnchorMeta {
+            domain: domain.clone(),
+            receive_assets: receive_assets.clone(),
+            country: country.clone(),
+            attested_ledger,
+            attester: attester.clone(),
+        };
+        env.storage().persistent().set(&key, &meta);
+        extend_record(&env, &key);
+        extend_instance(&env);
+
+        MetaAttested {
+            domain,
+            receive_assets,
+            country,
+            attested_ledger,
+            attester,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Extend the lifetime of a record, and of the contract instance, without
+    /// re-attesting. Permissionless on purpose: keeping a fact readable costs the
+    /// caller a fee and changes nothing, `attested_ledger` included, so there is
+    /// nothing to protect and no reason to make a dashboard ask the attester.
+    ///
+    /// Extends the domain's metadata entry too when it has one — it expires on
+    /// its own clock, and letting it archive while the record next to it stays
+    /// live would leave a domain that answers `get_anchor` but not `get_meta`.
+    ///
+    /// Cannot revive an entry that is already archived; see "Restoring an
+    /// archived entry" in the header.
+    pub fn bump(env: Env, domain: String) -> Result<(), Error> {
+        let key = DataKey::Anchor(domain.clone());
+        if !env.storage().persistent().has(&key) {
+            return Err(Error::NotFound);
+        }
+        extend_record(&env, &key);
+        let meta_key = DataKey::Meta(domain);
+        if env.storage().persistent().has(&meta_key) {
+            extend_record(&env, &meta_key);
+        }
+        extend_instance(&env);
         Ok(())
     }
 
@@ -213,6 +554,27 @@ impl Registry {
             .persistent()
             .get(&DataKey::Anchor(domain))
             .ok_or(Error::NotFound)
+    }
+
+    /// Observed receive assets and declared country for a domain.
+    ///
+    /// `NotFound` covers both "never attested" and "attested before this existed":
+    /// a record written by the previous version of this contract simply has no
+    /// meta entry, and inventing an empty one would report an anchor as
+    /// receiving nothing when nobody has asked it yet.
+    pub fn get_meta(env: Env, domain: String) -> Result<AnchorMeta, Error> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Meta(domain))
+            .ok_or(Error::NotFound)
+    }
+
+    /// Whether an anchor was OBSERVED receiving a given asset code, e.g. "does
+    /// this anchor pay out NGN". Matches the stored list exactly — a caller that
+    /// wants to compare `NGN` against `iso4217:NGN` is comparing two different
+    /// things an anchor may well answer differently.
+    pub fn receives_asset(env: Env, domain: String, code: String) -> Result<bool, Error> {
+        Ok(Self::get_meta(env, domain)?.receive_assets.contains(&code))
     }
 
     /// Every registered domain. Bounded by `MAX_DOMAINS`.
@@ -251,10 +613,27 @@ impl Registry {
     /// Whether the domain both advertises SEP-31 and passed the SEP-31 probe.
     /// The question an operator actually has, answered without a decoder ring.
     pub fn serves_sep31(env: Env, domain: String) -> Result<bool, Error> {
+        Self::serves(env, domain, 31)
+    }
+
+    /// Whether the domain both advertises SEP-6 and passed the sep6_info probe.
+    pub fn serves_sep6(env: Env, domain: String) -> Result<bool, Error> {
+        Self::serves(env, domain, 6)
+    }
+
+    /// Generic query: whether the domain advertises the given SEP and passed
+    /// its defined probe. Returns false for SEPs with no defined probe.
+    pub fn serves(env: Env, domain: String, sep: u32) -> Result<bool, Error> {
         let r = Self::get_anchor(env, domain)?;
-        let sep31_bit = 1u32 << 5; // index of 31 in SEP_NUMBERS
-        let probe_bit = 1u32 << 4; // index of sep31_info in PROBE_NAMES
-        Ok(r.seps & sep31_bit != 0 && r.probes_passed & probe_bit != 0)
+        let (sep_bit, probe_bit) = match sep {
+            31 => (sep_bit(31), probe_bit("sep31_info")),
+            6 => (sep_bit(6), probe_bit("sep6_info")),
+            _ => return Ok(false),
+        };
+        let (Some(sb), Some(pb)) = (sep_bit, probe_bit) else {
+            return Ok(false);
+        };
+        Ok(r.seps & sb != 0 && r.probes_passed & pb != 0)
     }
 
     pub fn admin(env: Env) -> Result<Address, Error> {
@@ -275,6 +654,7 @@ impl Registry {
     pub fn set_attester(env: Env, attester: Address) -> Result<(), Error> {
         Self::admin(env.clone())?.require_auth();
         env.storage().instance().set(&DataKey::Attester, &attester);
+        extend_instance(&env);
         Ok(())
     }
 
