@@ -49,6 +49,13 @@ describe("explain", () => {
     expect(r.message).toContain("contract error #3");
   });
 
+  it("flags that #4 can come from the registry (UnknownBit), not only the attester", () => {
+    const r = explain("HostError: Error(Contract, #4)");
+    expect(r.code).toBe(4);
+    expect(r.message).toContain("invalid domain");
+    expect(r.message).toContain("UnknownBit");
+  });
+
   it("surfaces every known contract error code", () => {
     for (const code of [
       AttesterContractError.NotInitialised,

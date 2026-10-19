@@ -53,6 +53,57 @@ resolver really fails the suite. Both built-ins and
 documents it for out-of-repo authors. vitest is a peer dependency of the
 `./testing` subpath only.
 
+### Added — observed receive assets and a declared country on registry records ([#242](https://github.com/ezedike-evan/corridor-in-a-box/issues/242), design in [#241](https://github.com/ezedike-evan/corridor-in-a-box/issues/241))
+
+The registry could already answer "does this anchor serve SEP-31", but not "what
+does it actually receive", which is the question a corridor is built around. Two
+kinds of fact are recorded, and the distinction is the design:
+`receive_assets` is OBSERVED (the codes a SEP-31 `/info` response listed when the
+probe ran) and `country` is DECLARED (the anchor's own
+`[DOCUMENTATION] ORG_PHYSICAL_ADDRESS`, verified by nobody).
+
+- `docs/registry-metadata.md` records the decisions: its own `Meta(String)`
+  storage key rather than new fields on `Anchor`, a separate `attest_meta` write
+  with its own cooldown so a deployed attester keeps working and a sweep can
+  write both halves in one ledger, the bounds (32 assets, 32 characters per
+  code, 2 uppercase letters for a country), and why an empty list and an absent
+  one are different findings.
+- `contracts/registry`: `put_meta`, `get_meta`, `receives_asset`, an
+  `AnchorMeta` record, a `MetaAttested` event, and errors `TooManyAssets`,
+  `InvalidAssetCode`, `DuplicateAsset`, `InvalidCountry`. A domain with no
+  metadata reads `NotFound`, so a record written before this upgrade still
+  decodes and reports nothing invented. `bump` keeps the metadata entry alive
+  beside the record it describes.
+- `contracts/attester`: `attest_meta` gates on enrolment and cooldown, checks the
+  same bounds before relaying (so a caller sees the attester's error numbers
+  rather than a cross-contract revert), and `DataKey::LastMeta` holds its
+  cooldown separately from the bitmap write's.
+- `packages/probe`: `declaredCountry` maps an address line's last segment to
+  ISO-3166-1 alpha-2 through an allowlist of names and alpha-3 codes, and
+  returns nothing rather than guessing; `tomlValue` is still not a TOML parser.
+  `ProbeResult.country` is set only when the toml declared one.
+- `packages/attester`: `attestMeta` refuses locally when `sep31_info` produced no
+  observed list, so an empty list can only ever mean "asked, receives nothing".
+  Encodes `Option<String>` as Void/`String` and the asset list element-wise.
+- `packages/registry`: `AnchorAttestation.receiveAssets` / `.country` (absent, not
+  empty, when unrecorded), `getMeta` (null only for `NotFound`), `receivesAsset`,
+  `getAnchor(domain, { meta: true })`, and `RegistryContractError`.
+- `pnpm attest` submits both halves per domain; `pnpm registry:read` prints
+  "not recorded" beside "nothing — asked and it accepts no asset" as two lines
+  that mean different things.
+
+The testnet contracts are not redeployed by this change: `upgrade()` needs the
+enrolled operator key, so `contracts/deployments.json` still records the wasm
+that is live, and the hashes change when that job runs.
+
+### Added — `justfile` for the day-to-day commands ([#288](https://github.com/ezedike-evan/corridor-in-a-box/issues/288))
+
+`install`, `check`, `contracts`, `web`, `pg-test`, `anchor-up` / `anchor-down` /
+`anchor-doctor`, `secret-scan` and `ci`, each calling the same commands
+`.github/workflows/ci.yml` calls, so the local gate and CI cannot drift.
+`pg-test` starts and removes the Postgres container CI gets from a service, and
+`just --list` documents every recipe. CONTRIBUTING.md now points at `just ci`.
+
 ### Added — Zeam (South Africa) probed and added as the second VERIFIED lane ([#225](https://github.com/ezedike-evan/corridor-in-a-box/issues/225))
 
 `corridors/zeam.corridor.yaml` — USD → ZAR over `mint.zeam.money`, probed

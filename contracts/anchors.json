@@ -76,6 +76,11 @@
     "or a CNY/CNH/HKD asset; see corridors/ng-cn.corridor.yaml for the probe results",
     "of 2026-10-18. Their countries are the directory's listing, not attested facts.",
     "",
+    "flutterwave.com is Flutterwave (Nigeria/Africa payments provider). Not listed",
+    "in anchors.stellar.org (https://anchors.stellar.org/?search=Flutterwave).",
+    "Probed 2026-10-19: toml_fetch returns HTTP 404 (https://flutterwave.com/.well-known/stellar.toml).",
+    "Flutterwave publishes no Stellar anchor or SEP-31 receive endpoint; no manifest is written.",
+    "",
     "Each entry in `anchors` records curator-declared context (name, ISO 3166-1",
     "alpha-2 countries, kind, directory/manifest source, and date added). Countries",
     "and `kind` are curator-declared metadata, NOT attested facts; `domains` mirrors",
@@ -97,7 +102,8 @@
     "lightnet.io",
     "owlting.com",
     "arf.one",
-    "stellar-sep-24.banxa.com"
+    "stellar-sep-24.banxa.com",
+    "flutterwave.com"
   ],
   "anchors": [
     {
@@ -227,6 +233,14 @@
       "kind": "other",
       "source": "https://anchors.stellar.org/?search=Banxa",
       "added": "2026-10-18"
+    },
+    {
+      "domain": "flutterwave.com",
+      "name": "Flutterwave",
+      "countries": ["NG"],
+      "kind": "other",
+      "source": "https://flutterwave.com",
+      "added": "2026-10-19"
     }
   ]
 }
