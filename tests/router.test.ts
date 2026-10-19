@@ -67,6 +67,8 @@ describe("StaticRouteResolver", () => {
   });
 
   it("registry resolver reports trust: 'attested'", async () => {
+    // The older, SEP-31-only source shape: it is adapted, so an embedder that
+    // already wired one up keeps working.
     const registry = {
       servesSep31: async () => true,
       staleness: async () => 0,
@@ -374,7 +376,7 @@ function adapterForDomain(corridor: Corridor): AnchorAdapter {
 /** Attests the resolved domain and nothing else. */
 function fakeRegistry(): AttestationSource {
   return {
-    servesSep31: async (domain) => domain === RESOLVED_DOMAIN,
+    serves: async (domain) => domain === RESOLVED_DOMAIN,
     staleness: async () => 0,
     tomlHash: async () => "0".repeat(64),
   };
