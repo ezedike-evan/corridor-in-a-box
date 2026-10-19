@@ -189,6 +189,19 @@ export class AnchorAttester {
 }
 
 /**
+ * The attester calls the registry, and a registry error surfaces through the attester
+ * with the REGISTRY's number. The two contracts number their errors independently, so
+ * #3 and #4 mean different things depending on which contract raised them. Without
+ * this hint a registry rejection is reported as an attester error: when the deployed
+ * registry predates the probe names in `@corridor/probe`, every domain that ran a
+ * newer probe came back as "invalid domain" (registry `UnknownBit` is also #4).
+ */
+const REGISTRY_CODE_HINT: Record<number, string> = {
+  3: "if the registry raised it: probes_passed set a bit probes_run did not (PassedExceedsRun)",
+  4: "if the registry raised it: a SEP or probe bit the deployed registry does not know (UnknownBit); upgrade() the registry to the current PROBE_NAMES",
+};
+
+/**
  * Map a raw host error onto the contract's own vocabulary where we can.
  *
  * `code` is the contract error number whenever the host error names one (even
@@ -202,5 +215,9 @@ export function explain(error: string): {
   if (!m) return { message: error };
   const code = Number(m[1]);
   const known = CONTRACT_ERRORS[code as AttesterContractError] as string | undefined;
-  return { code, message: known ? `${known} (contract error #${code})` : error };
+  const hint = REGISTRY_CODE_HINT[code];
+  return {
+    code,
+    message: known ? `${known} (contract error #${code})${hint ? ` — ${hint}` : ""}` : error,
+  };
 }

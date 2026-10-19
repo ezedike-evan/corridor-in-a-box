@@ -269,9 +269,9 @@ export function PaymentRunner({ initialCorridor }: { initialCorridor?: string })
             live region only speaks about changes to something already there; it
             says "running" while the trail animates (so its steps are not read out
             one by one) and the outcome once it is known. */}
-        <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        <output aria-live="polite" aria-atomic="true" className="sr-only">
           {announceRun(running, result, reached)}
-        </p>
+        </output>
 
         <ol aria-labelledby={ids.heading} className="flex flex-col gap-1.5">
           {ALL_STATES.map((state) => {
