@@ -32,6 +32,18 @@ pnpm example             # run a payment end-to-end (mocked anchor + settle)
 Node 22+ and pnpm 9+ are required (see `.nvmrc` and `packageManager` in
 `package.json`).
 
+The commands CI runs are also collected in the [`justfile`](./justfile), so you
+do not have to read `.github/workflows/ci.yml` to find them. `just --list` shows
+every recipe; `just ci` runs the whole gate.
+
+```bash
+cargo install just       # or brew install just, or https://github.com/casey/just#installation
+just install             # both pnpm roots: the monorepo and web/
+just check               # lint, typecheck, test
+just contracts           # cargo fmt --check, clippy -D warnings, test, wasm build
+just ci                  # all of the above, plus web and the Postgres test
+```
+
 ## Git hooks
 
 `pnpm install` runs a `prepare` script that installs [lefthook](https://github.com/evilmartians/lefthook)
@@ -49,7 +61,16 @@ full gate.
 
 ## Before you open a PR
 
-Run the full gate locally — CI runs the same three commands:
+Run the full gate locally. `just ci` runs the same steps as CI's build,
+contracts, web and integration-postgres jobs; CI also has a gitleaks job, whose
+local equivalent is `just secret-scan`. `just ci` needs a container runtime for
+the Postgres job — without one, run `just check && just contracts && just web`.
+
+```bash
+just ci
+```
+
+Or, without `just`, the three commands the monorepo gate is made of:
 
 ```bash
 pnpm lint && pnpm typecheck && pnpm test

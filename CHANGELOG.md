@@ -28,6 +28,103 @@ code: the engine needed no change to route through it, and
 `RegistryRouteResolver` still refuses it for want of an on-chain attestation
 probe unless the domain is explicitly allow-listed.
 
+### Fixed — the attester rejects a domain that is not in canonical form ([#246](https://github.com/ezedike-evan/corridor-in-a-box/issues/246))
+
+`attest` checked only that a domain was non-empty and `<= 253` bytes, so the
+registry — which keys records by the raw string and appends every key to the
+bounded `Domains` list — accepted `Cowrie.Exchange`, `cowrie.exchange.` and
+`https://cowrie.exchange/` as three permanent records for one anchor, each
+wasting one of 512 slots nobody can reclaim.
+
+`contracts/attester` now requires the canonical spelling: labels of lowercase
+letters and digits with `-` inside a label only, joined by single dots. A leading,
+trailing or doubled dot, a leading or trailing hyphen, uppercase, a scheme, a
+path, whitespace or any non-ASCII byte is `Error::InvalidDomain`. Ports are
+rejected deliberately, and the reason is documented on `is_canonical_domain`: a
+home domain is an origin, not a listener.
+
+`isCanonicalDomain` in `@corridor/probe` mirrors the rule byte for byte, and
+`AnchorAttester.attest` refuses a non-canonical domain before it loads the
+account or simulates, so `pnpm attest` fails on the spelling instead of paying to
+be reverted on chain. The same list of spellings is pinned in
+`contracts/attester/src/test.rs` and `tests/domain.test.ts`;
+`docs/operations.md` §0 states the rule where a fleet entry is added.
+
+### Added — `describeResolverContract`: the RouteResolver contract, executable ([#260](https://github.com/ezedike-evan/corridor-in-a-box/issues/260))
+
+A private resolver is written outside this repo against the `RouteResolver`
+interface, and until now nothing shipped with it that could tell its author
+whether it honours the documented contract — `tests/router.test.ts` and
+`tests/registry-resolver.test.ts` test the built-ins and are not reusable.
+
+`@corridor/router/testing` exports `describeResolverContract(name,
+makeResolver)`, which registers four cases: a decision carries a receiving
+anchor; the same intent twice yields the same anchor domain (resume safety);
+failure behaviour matches what the resolver documents, declared per resolver via
+`unresolvable` — `RegistryRouteResolver` refuses, `StaticRouteResolver` documents
+that it trusts the manifest; and `split`, if present, sums to 1. The suite hands
+the factory the fixtures it will resolve, so a third party wires its fakes to the
+domains it is actually tested against.
+
+`checkResolverContract` returns the report without registering anything and
+`expectResolverContract` throws naming each failed clause, which is how
+`tests/router.test.ts` proves — with `it.fails` — that a deliberately broken
+resolver really fails the suite. Both built-ins and
+`examples/resolvers/allowlist-resolver.ts` run it; `docs/route-resolver.md`
+documents it for out-of-repo authors. vitest is a peer dependency of the
+`./testing` subpath only.
+
+### Added — observed receive assets and a declared country on registry records ([#242](https://github.com/ezedike-evan/corridor-in-a-box/issues/242), design in [#241](https://github.com/ezedike-evan/corridor-in-a-box/issues/241))
+
+The registry could already answer "does this anchor serve SEP-31", but not "what
+does it actually receive", which is the question a corridor is built around. Two
+kinds of fact are recorded, and the distinction is the design:
+`receive_assets` is OBSERVED (the codes a SEP-31 `/info` response listed when the
+probe ran) and `country` is DECLARED (the anchor's own
+`[DOCUMENTATION] ORG_PHYSICAL_ADDRESS`, verified by nobody).
+
+- `docs/registry-metadata.md` records the decisions: its own `Meta(String)`
+  storage key rather than new fields on `Anchor`, a separate `attest_meta` write
+  with its own cooldown so a deployed attester keeps working and a sweep can
+  write both halves in one ledger, the bounds (32 assets, 32 characters per
+  code, 2 uppercase letters for a country), and why an empty list and an absent
+  one are different findings.
+- `contracts/registry`: `put_meta`, `get_meta`, `receives_asset`, an
+  `AnchorMeta` record, a `MetaAttested` event, and errors `TooManyAssets`,
+  `InvalidAssetCode`, `DuplicateAsset`, `InvalidCountry`. A domain with no
+  metadata reads `NotFound`, so a record written before this upgrade still
+  decodes and reports nothing invented. `bump` keeps the metadata entry alive
+  beside the record it describes.
+- `contracts/attester`: `attest_meta` gates on enrolment and cooldown, checks the
+  same bounds before relaying (so a caller sees the attester's error numbers
+  rather than a cross-contract revert), and `DataKey::LastMeta` holds its
+  cooldown separately from the bitmap write's.
+- `packages/probe`: `declaredCountry` maps an address line's last segment to
+  ISO-3166-1 alpha-2 through an allowlist of names and alpha-3 codes, and
+  returns nothing rather than guessing; `tomlValue` is still not a TOML parser.
+  `ProbeResult.country` is set only when the toml declared one.
+- `packages/attester`: `attestMeta` refuses locally when `sep31_info` produced no
+  observed list, so an empty list can only ever mean "asked, receives nothing".
+  Encodes `Option<String>` as Void/`String` and the asset list element-wise.
+- `packages/registry`: `AnchorAttestation.receiveAssets` / `.country` (absent, not
+  empty, when unrecorded), `getMeta` (null only for `NotFound`), `receivesAsset`,
+  `getAnchor(domain, { meta: true })`, and `RegistryContractError`.
+- `pnpm attest` submits both halves per domain; `pnpm registry:read` prints
+  "not recorded" beside "nothing — asked and it accepts no asset" as two lines
+  that mean different things.
+
+The testnet contracts are not redeployed by this change: `upgrade()` needs the
+enrolled operator key, so `contracts/deployments.json` still records the wasm
+that is live, and the hashes change when that job runs.
+
+### Added — `justfile` for the day-to-day commands ([#288](https://github.com/ezedike-evan/corridor-in-a-box/issues/288))
+
+`install`, `check`, `contracts`, `web`, `pg-test`, `anchor-up` / `anchor-down` /
+`anchor-doctor`, `secret-scan` and `ci`, each calling the same commands
+`.github/workflows/ci.yml` calls, so the local gate and CI cannot drift.
+`pg-test` starts and removes the Postgres container CI gets from a service, and
+`just --list` documents every recipe. CONTRIBUTING.md now points at `just ci`.
+
 ### Added — Zeam (South Africa) probed and added as the second VERIFIED lane ([#225](https://github.com/ezedike-evan/corridor-in-a-box/issues/225))
 
 `corridors/zeam.corridor.yaml` — USD → ZAR over `mint.zeam.money`, probed

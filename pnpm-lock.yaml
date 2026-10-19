@@ -208,6 +208,9 @@ importers:
       '@corridor/types':
         specifier: workspace:*
         version: link:../types
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@26.6.4)
 
   packages/sep31:
     dependencies:

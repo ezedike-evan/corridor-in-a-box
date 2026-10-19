@@ -21,6 +21,7 @@
       "@corridor/sep31": ["./packages/sep31/src/index.ts"],
       "@corridor/sep6": ["./packages/sep6/src/index.ts"],
       "@corridor/router": ["./packages/router/src/index.ts"],
+      "@corridor/router/testing": ["./packages/router/src/testing.ts"],
       "@corridor/engine": ["./packages/engine/src/index.ts"],
       "@corridor/stellar": ["./packages/stellar/src/index.ts"],
       "@corridor/service": ["./packages/service/src/index.ts"],

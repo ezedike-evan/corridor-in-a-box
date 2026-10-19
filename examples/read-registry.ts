@@ -158,7 +158,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  const records = await Promise.all(domains.map((domain) => registry.getAnchor(domain)));
+  // One extra read per domain: metadata lives under its own key, and an
+  // operator asking "what does this anchor actually do" is asking about it.
+  const records = await Promise.all(
+    domains.map((domain) => registry.getAnchor(domain, { meta: true })),
+  );
   const stalenessByDomain: Record<string, number> = {};
   for (const domain of domains) {
     stalenessByDomain[domain] = await registry.staleness(domain);
@@ -187,6 +191,16 @@ async function main(): Promise<void> {
     console.log(`  probes passed  ${a.probesPassed.join(", ") || "none"}`);
     console.log(`  probes FAILED  ${failed.join(", ") || "none"}`);
     console.log(`  toml sha256    ${a.tomlHash.slice(0, 32)}…`);
+    // "not recorded" and "receives nothing" are different findings and printing
+    // them the same way would rebuild the mistake the registry exists to fix.
+    console.log(
+      `  receives       ${
+        a.receiveAssets === undefined
+          ? "not recorded"
+          : a.receiveAssets.join(", ") || "nothing — asked and it accepts no asset"
+      }`,
+    );
+    console.log(`  declared in    ${a.country ?? "no country declared"}`);
     console.log(
       `  attested at    ledger ${a.attestedLedger} (${stalenessByDomain[a.domain]} ledgers ago)`,
     );
