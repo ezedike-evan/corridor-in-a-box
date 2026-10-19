@@ -20,6 +20,7 @@ import { isSafeUrl } from "./url-safety";
 
 export { tomlHash } from "./toml-hash";
 export { isSafeUrl } from "./url-safety";
+export { isCanonicalDomain, MAX_DOMAIN_LEN } from "./domain";
 export { renderSweepMarkdown, renderSweepJson, isUsableSep31OffRamp } from "./report";
 export {
   ANCHOR_KINDS,

@@ -44,7 +44,7 @@
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractevent, contractimpl, contracttype, Address,
-    BytesN, Env, String,
+    Bytes, BytesN, Env, String,
 };
 
 /// The slice of the registry's interface this contract calls.
@@ -94,7 +94,9 @@ pub enum Error {
     NotAnAttester = 2,
     /// Re-attested the same domain before `min_interval` ledgers had passed.
     TooSoon = 3,
-    /// A domain must be a plausible host, not an empty or absurd string.
+    /// A domain is not in canonical form: empty, oversized, or spelled in a way
+    /// that would create a second record for an anchor that already has one.
+    /// See [`is_canonical_domain`].
     InvalidDomain = 4,
 }
 
@@ -114,6 +116,73 @@ pub const TTL_EXTEND_TO: u32 = 90 * LEDGERS_PER_DAY;
 /// Guards against a caller writing an empty key or an unbounded blob into the
 /// registry's domain list, where it would be permanent and readable by everyone.
 const MAX_DOMAIN_LEN: u32 = 253; // RFC 1035 maximum hostname length.
+
+/// One accepted spelling of one anchor.
+///
+/// The registry keys records by the raw string (`DataKey::Anchor(domain)`) and
+/// appends every new key to the bounded `Domains` list, so a domain that is
+/// merely spelled differently — `Cowrie.Exchange`, `cowrie.exchange.`,
+/// `https://cowrie.exchange/` — is a second permanent record for the same
+/// anchor, burning one of `MAX_DOMAINS` slots that can never be reclaimed and
+/// showing a reader two conflicting facts about one host.
+///
+/// Canonical form, and the only form accepted here: labels of lowercase ASCII
+/// letters and digits, with `-` allowed inside a label but never first or last,
+/// joined by single dots. Ports are deliberately NOT allowed (`:` is rejected) —
+/// a home domain is an origin, and SEP-10 requires the `HOME_DOMAIN` to name the
+/// same host the toml is served from, so a port would be a different anchor's
+/// key, not a different spelling of this one.
+///
+/// The TypeScript mirror is `isCanonicalDomain` in `@corridor/probe`; keep the
+/// two in step, and the attester CLI refuses a non-canonical domain before it
+/// pays for a simulation.
+fn is_canonical_domain(domain: &String) -> bool {
+    if domain.is_empty() || domain.len() > MAX_DOMAIN_LEN {
+        return false;
+    }
+    let bytes = domain.to_bytes();
+    let len = bytes.len();
+
+    let mut label_start: u32 = 0;
+    let mut i: u32 = 0;
+    loop {
+        // A dot ends a label; the end of the string ends the last one.
+        if i == len || bytes.get_unchecked(i) == b'.' {
+            if !is_canonical_label(&bytes, label_start, i) {
+                return false;
+            }
+            if i == len {
+                return true;
+            }
+            label_start = i + 1;
+        }
+        i += 1;
+    }
+}
+
+/// One label, `bytes[start..end]`: non-empty, alphanumeric at both ends, and
+/// nothing but lowercase letters, digits and inner hyphens in between. An empty
+/// label (a leading, trailing or doubled dot) fails on the spot.
+fn is_canonical_label(bytes: &Bytes, start: u32, end: u32) -> bool {
+    if start == end {
+        return false;
+    }
+    if !bytes.get_unchecked(start).is_ascii_alphanumeric()
+        || !bytes.get_unchecked(end - 1).is_ascii_alphanumeric()
+    {
+        return false;
+    }
+    let mut i = start;
+    while i < end {
+        let c = bytes.get_unchecked(i);
+        // Uppercase, `_`, whitespace, any non-ASCII byte: all rejected here.
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 
 /// Emitted when an attestation is accepted and relayed to the registry.
 #[contractevent]
@@ -170,7 +239,7 @@ impl Attester {
         if !Self::is_attester(env.clone(), attester.clone()) {
             return Err(Error::NotAnAttester);
         }
-        if domain.is_empty() || domain.len() > MAX_DOMAIN_LEN {
+        if !is_canonical_domain(&domain) {
             return Err(Error::InvalidDomain);
         }
 

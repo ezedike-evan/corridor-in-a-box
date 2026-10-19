@@ -31,6 +31,13 @@ To add an anchor:
 4. Run `pnpm test` — the validation test rejects malformed or duplicate entries.
 5. Open a PR. A human reviews the diff; nothing writes the file automatically.
 
+Spell the domain in its canonical form: lowercase letters, digits, dots, and
+hyphens inside a label only — no scheme, no port, no path, no leading or
+trailing `.` or `-`. `contracts/attester` refuses anything else with
+`Error::InvalidDomain`, and `pnpm attest` refuses it before paying for a
+simulation, because the registry keys records by the raw string: `Cowrie.Exchange`
+alongside `cowrie.exchange` is one anchor with two permanent records.
+
 ## 1. Capturing the testnet end-to-end run
 
 Endpoints of one production anchor were probed live, and the full money-moving

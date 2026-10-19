@@ -7,6 +7,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Fixed — the attester rejects a domain that is not in canonical form ([#246](https://github.com/ezedike-evan/corridor-in-a-box/issues/246))
+
+`attest` checked only that a domain was non-empty and `<= 253` bytes, so the
+registry — which keys records by the raw string and appends every key to the
+bounded `Domains` list — accepted `Cowrie.Exchange`, `cowrie.exchange.` and
+`https://cowrie.exchange/` as three permanent records for one anchor, each
+wasting one of 512 slots nobody can reclaim.
+
+`contracts/attester` now requires the canonical spelling: labels of lowercase
+letters and digits with `-` inside a label only, joined by single dots. A leading,
+trailing or doubled dot, a leading or trailing hyphen, uppercase, a scheme, a
+path, whitespace or any non-ASCII byte is `Error::InvalidDomain`. Ports are
+rejected deliberately, and the reason is documented on `is_canonical_domain`: a
+home domain is an origin, not a listener.
+
+`isCanonicalDomain` in `@corridor/probe` mirrors the rule byte for byte, and
+`AnchorAttester.attest` refuses a non-canonical domain before it loads the
+account or simulates, so `pnpm attest` fails on the spelling instead of paying to
+be reverted on chain. The same list of spellings is pinned in
+`contracts/attester/src/test.rs` and `tests/domain.test.ts`;
+`docs/operations.md` §0 states the rule where a fleet entry is added.
+
 ### Added — Zeam (South Africa) probed and added as the second VERIFIED lane ([#225](https://github.com/ezedike-evan/corridor-in-a-box/issues/225))
 
 `corridors/zeam.corridor.yaml` — USD → ZAR over `mint.zeam.money`, probed

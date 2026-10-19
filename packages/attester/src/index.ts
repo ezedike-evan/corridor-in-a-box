@@ -18,6 +18,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import type { ProbeResult } from "@corridor/probe";
+import { isCanonicalDomain } from "@corridor/probe";
 import { err, fail, ok, type CorridorError, type Outcome } from "@corridor/types";
 
 export interface AttesterOptions {
@@ -107,6 +108,19 @@ export class AnchorAttester {
    * to start here rather than rely on the contract to catch it.
    */
   async attest(result: ProbeResult): Promise<Outcome<AttestationRef, AttesterError>> {
+    // The contract checks this too, and would revert. Checking it here is about
+    // the cost: a submission that reverts still gets simulated, and a domain in
+    // a non-canonical spelling would otherwise take a whole probe run plus a
+    // simulation to end up rejected.
+    if (!isCanonicalDomain(result.domain)) {
+      return fail(
+        "MANIFEST_INVALID",
+        `refusing to attest ${JSON.stringify(result.domain)}: not a canonical home domain. ` +
+          `Lowercase letters, digits, dots and inner hyphens only — no scheme, port, path, ` +
+          `uppercase, or leading/trailing dot or hyphen.`,
+      );
+    }
+
     if (result.probesPassed & ~result.probesRun) {
       return fail(
         "MANIFEST_INVALID",

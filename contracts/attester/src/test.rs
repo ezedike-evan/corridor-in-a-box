@@ -179,6 +179,90 @@ fn rejects_an_empty_domain() {
     assert_eq!(res, Err(Ok(Error::InvalidDomain)));
 }
 
+/// Every one of these is the same anchor spelled a different way. The registry
+/// keys by the raw string, so accepting any of them writes a second permanent
+/// record — and a domain, once in `Domains`, can never be taken back out.
+fn rejected_spelling(spelled: &str) {
+    let f = setup();
+    let res = f.attester_client.try_attest(
+        &f.alice,
+        &String::from_str(&f.env, spelled),
+        &SEP31,
+        &hash(&f.env, 1),
+        &0,
+        &0,
+    );
+    assert_eq!(res, Err(Ok(Error::InvalidDomain)), "{spelled} was accepted");
+    assert_eq!(
+        f.registry_client.domains().len(),
+        0,
+        "{spelled} reached the registry"
+    );
+}
+
+#[test]
+fn rejects_an_uppercase_spelling_of_an_attested_anchor() {
+    let f = setup();
+    let d = domain(&f.env);
+    f.attester_client
+        .attest(&f.alice, &d, &SEP31, &hash(&f.env, 1), &0, &0);
+
+    let res = f.attester_client.try_attest(
+        &f.alice,
+        &String::from_str(&f.env, "Cowrie.Exchange"),
+        &SEP31,
+        &hash(&f.env, 2),
+        &0,
+        &0,
+    );
+    assert_eq!(res, Err(Ok(Error::InvalidDomain)));
+    // One record, still the one the canonical spelling wrote.
+    assert_eq!(f.registry_client.domains().len(), 1);
+    assert_eq!(f.registry_client.get_anchor(&d).toml_hash, hash(&f.env, 1));
+}
+
+#[test]
+fn rejects_a_trailing_dot() {
+    rejected_spelling("cowrie.exchange.");
+}
+
+#[test]
+fn rejects_a_scheme() {
+    rejected_spelling("https://cowrie.exchange");
+}
+
+#[test]
+fn rejects_a_path() {
+    rejected_spelling("cowrie.exchange/.well-known");
+}
+
+#[test]
+fn rejects_a_port() {
+    // Deliberate: a home domain is an origin, not a listener. See
+    // `is_canonical_domain`.
+    rejected_spelling("cowrie.exchange:8000");
+}
+
+#[test]
+fn rejects_an_empty_label() {
+    rejected_spelling("cowrie..exchange");
+}
+
+#[test]
+fn rejects_a_leading_or_trailing_hyphen() {
+    rejected_spelling("-cowrie.exchange");
+    rejected_spelling("cowrie.exchange-");
+}
+
+#[test]
+fn accepts_a_canonical_domain_with_a_hyphen_inside_a_label() {
+    let f = setup();
+    let d = String::from_str(&f.env, "anchor-1.test-anchor.stellar.org");
+    f.attester_client
+        .attest(&f.alice, &d, &SEP31, &hash(&f.env, 7), &0, &0);
+    assert_eq!(f.registry_client.get_anchor(&d).toml_hash, hash(&f.env, 7));
+}
+
 #[test]
 fn the_registrys_own_validation_still_applies_through_the_cross_call() {
     let f = setup();
