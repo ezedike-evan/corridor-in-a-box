@@ -20,7 +20,7 @@ destination is `anchor.example` (RFC 2606 reserves `.example` for exactly
 this), the routes are invented, and `tests/http-stub-adapter.test.ts` fails if
 a URL in the example points anywhere but a reserved example domain. The same
 test runs the conformance harness (`runConformance`) against the adapter, so a
-third party has a worked reference for the wiring *and* the checks.
+third party has a worked reference for the wiring _and_ the checks.
 
 The lane's manifest declares `protocol: custom:http-stub` and
 `endpoints.base_url`, so a bespoke destination is configuration rather than
@@ -1151,4 +1151,3 @@ Initial public release: the walking skeleton.
 - Docs: key management, "why not Anchor Platform".
 
 [Unreleased]: https://github.com/ezedike-evan/corridor-in-a-box/commits/main
-

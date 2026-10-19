@@ -3,11 +3,11 @@
 A worked example of a **bespoke** `AnchorAdapter`: an anchor that speaks a
 proprietary HTTP API instead of SEP-31.
 
-| File | What it is |
-| --- | --- |
-| `adapter.ts` | `HttpStubAdapter implements AnchorAdapter` — the whole adapter, ~200 lines. |
-| `stub-api.ts` | A fictional HTTP API served in-process by an injected `fetchImpl`. |
-| `stub.corridor.yaml` | A manifest for a fictional bespoke lane (`protocol: custom:http-stub`). |
+| File                 | What it is                                                                  |
+| -------------------- | --------------------------------------------------------------------------- |
+| `adapter.ts`         | `HttpStubAdapter implements AnchorAdapter` — the whole adapter, ~200 lines. |
+| `stub-api.ts`        | A fictional HTTP API served in-process by an injected `fetchImpl`.          |
+| `stub.corridor.yaml` | A manifest for a fictional bespoke lane (`protocol: custom:http-stub`).     |
 
 Run it end to end:
 
@@ -25,7 +25,7 @@ No real anchor, host, endpoint or account appears in this directory. The
 destination is `anchor.example` (RFC 2606 reserves `.example` for exactly
 this), the routes are invented, the payout asset is a made-up ISO-4217 code,
 and the Stellar-looking strings are shape-correct but meaningless. The example
-demonstrates the *shape* of a bespoke integration, not any anchor that exists.
+demonstrates the _shape_ of a bespoke integration, not any anchor that exists.
 
 `tests/http-stub-adapter.test.ts` enforces that: it fails if a URL in this
 directory points at any host other than a reserved example domain.

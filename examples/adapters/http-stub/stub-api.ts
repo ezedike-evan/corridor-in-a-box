@@ -27,8 +27,7 @@ export interface StubApiOptions {
  * `G` plus 55 base32 characters) but not a real account — it is a made-up
  * string, and nothing in this repository can send value to it.
  */
-export const STUB_DEPOSIT_ACCOUNT =
-  "GEXAMPLESTUBDEPOSITACCOUNT222222222222222222222222222222";
+export const STUB_DEPOSIT_ACCOUNT = "GEXAMPLESTUBDEPOSITACCOUNT222222222222222222222222222222";
 
 /** The fictional memo the stub expects on the settlement payment. */
 export const STUB_MEMO_PREFIX = "STUB-ORDER";
@@ -63,10 +62,7 @@ export function createStubFetchImpl(opts: StubApiOptions = {}): typeof fetch {
       headers: { "content-type": "application/json" },
     });
 
-  const handler = async (
-    input: RequestInfo | URL,
-    init?: RequestInit,
-  ): Promise<Response> => {
+  const handler = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const rawUrl =
       typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const url = new URL(rawUrl);

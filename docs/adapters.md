@@ -418,4 +418,3 @@ You should extend your adapter's test suite with unit tests verifying:
 2. **Proprietary and bespoke adapters**:
    - Bespoke adapters for specific commercial partners, OTC desks, or proprietary APIs belong outside the core open repo (e.g. in private packages, internal microservices, or proprietary extensions).
    - Because `engine` depends solely on the `AnchorAdapter` interface from `@corridor/adapter-kit`, bespoke adapters plug directly into `EngineDeps.adapter` without modifying the engine codebase.
-

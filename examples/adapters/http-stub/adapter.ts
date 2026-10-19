@@ -270,11 +270,9 @@ export class HttpStubAdapter implements AnchorAdapter {
     _amount: Money,
     _reason: string,
   ): Promise<Outcome<RefundRef>> {
-    return fail(
-      "REFUND_UNSUPPORTED",
-      `${this.name}: this API has no refund endpoint`,
-      { retryable: false },
-    );
+    return fail("REFUND_UNSUPPORTED", `${this.name}: this API has no refund endpoint`, {
+      retryable: false,
+    });
   }
 
   /**

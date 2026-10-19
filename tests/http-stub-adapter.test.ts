@@ -17,10 +17,7 @@ import {
   execute,
 } from "@corridor/engine";
 import type { PaymentIntent } from "@corridor/types";
-import {
-  HttpStubAdapter,
-  bespokeBaseUrl,
-} from "../examples/adapters/http-stub/adapter";
+import { HttpStubAdapter, bespokeBaseUrl } from "../examples/adapters/http-stub/adapter";
 import { createStubFetchImpl } from "../examples/adapters/http-stub/stub-api";
 import { expectConformance } from "./helpers/conformance";
 
@@ -58,9 +55,13 @@ describe("HttpStubAdapter", () => {
   });
 
   it("passes the adapter conformance harness", async () => {
-    const report = await runConformance(adapter(), { intent: INTENT, corridor: CORRIDOR }, {
-      allowNetworkWrites: true,
-    });
+    const report = await runConformance(
+      adapter(),
+      { intent: INTENT, corridor: CORRIDOR },
+      {
+        allowNetworkWrites: true,
+      },
+    );
     expectConformance(report);
   });
 
@@ -77,10 +78,14 @@ describe("HttpStubAdapter", () => {
   });
 
   it("refuses to refund, because this API has no refund endpoint", async () => {
-    const result = await adapter().requestRefund("stub_order_1", {
-      asset: "USDC",
-      amount: "5.00",
-    }, "test");
+    const result = await adapter().requestRefund(
+      "stub_order_1",
+      {
+        asset: "USDC",
+        amount: "5.00",
+      },
+      "test",
+    );
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe("REFUND_UNSUPPORTED");
@@ -140,7 +145,10 @@ describe("the http-stub example", () => {
       "example.net",
       "localhost",
     ]);
-    const files = [...filesIn(EXAMPLE_DIR), fileURLToPath(new URL("../examples/run-stub-adapter.ts", import.meta.url))];
+    const files = [
+      ...filesIn(EXAMPLE_DIR),
+      fileURLToPath(new URL("../examples/run-stub-adapter.ts", import.meta.url)),
+    ];
     for (const file of files) {
       const content = readFileSync(file, "utf8");
       for (const match of content.matchAll(/https?:\/\/([^\s"'`/)]+)/g)) {
