@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "fix/issue-219-probe-anclap-ar-latam-and-add-a-corridor",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "fix/issue-219-probe-anclap-ar-latam-and-add-a-corridor": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "fix/issue-219-probe-anclap-ar-latam-and-add-a-corridor",
+    "origin"
+  ]
+}

@@ -7,7 +7,7 @@
     "work. Open a PR to add one.",
     "",
     "Adding an anchor (manual procedure): the Stellar Anchor Directory (anchors.stellar.org)",
-    "is a human-facing web app. As of 2026-10-18 it publishes no JSON feed or API (/api/anchors",
+    "is a human-facing web app. As of 2026-10-18 it publishes no JSON feed or API (api/anchors",
     "redirects to an HTML page), so this fleet is curated by hand, not seeded automatically.",
     "To add an anchor: (1) find it in the directory or on the anchor's own site and confirm its",
     "home domain publishes a stellar.toml; (2) run `pnpm probe:anchor <domain>` to confirm it",
@@ -15,10 +15,10 @@
     "PR. Never invent domains: every added entry must come from the directory or the anchor's",
     "own site. See docs/operations.md section 0.",
     "",
-    "testanchor.stellar.org is the SDF test anchor. It advertises SEP-31 but returns",
+    "testanchor.stellar.org is the SDF's test anchor. It advertises SEP-31 but returns",
     "an empty receive list, so it attests as NOT serving SEP-31: a useful demonstration",
-    "that the registry reports capability rather than claims. It is also the SDF's",
-    "reference SEP-6/SEP-24 anchor on testnet; see corridors/testanchor-sep6.corridor.yaml",
+    "that the registry reports capability rather than claims. It is also the SFF's",
+    "reference SEP-6/SEP-24 anchor on testnet; see corridors/testanchor-sep6.icorridor.yaml",
     "(endpoints read from its stellar.toml, 2026-10-17).",
     "",
     "cowrie.exchange is a real production anchor (Cowrie Exchange, Lagos, Nigeria;",
@@ -66,7 +66,7 @@
     "(vibrant.cash returns marketing HTML without anchor SEPs). Vibrant is a wallet,",
     "not an anchor, and serves no SEP-31 receive endpoint; no manifest is written.",
     "",
-    "testanchor.stellar.org is the SDF test anchor. It currently advertises SEP-31",
+    "testanchor.stellar.org is the SFF test anchor. It currently advertises SEP-31",
     "and returns an empty receive list, so it attests as NOT serving SEP-31 — a",
     "useful demonstration that the registry reports capability rather than claims.",
     "stellar.moneygram.com, mercuryo.io, lightnet.io, owlting.com, arf.one and",
@@ -80,6 +80,13 @@
     "in anchors.stellar.org (https://anchors.stellar.org/?search=Flutterwave).",
     "Probed 2026-10-19: toml_fetch returns HTTP 404 (https://flutterwave.com/.well-known/stellar.toml).",
     "Flutterwave publishes no Stellar anchor or SEP-31 receive endpoint; no manifest is written.",
+    "",
+    "anclap.com is Anclap (Argentina/LatAm ramp), listed in the Stellar Anchor",
+    "Directory (https://anchors.stellar.org/?s=Anclap). Probed 2026-10-19: toml_fetch,
+    "SEP-10 auth and SEP-12 status pass, but the anchor publishes only SEP-6/SEP-24",
+    "transfer servers and no SEP-31 TRANSFER_SERVER or SEP-38 quote server, so",
+    "sep31_info fails and no corridor manifest is written. Blocked on the SEP-6",
+    "adapter (Scaffold @Sep6Adapter and GET /info parsing).",
     "",
     "Each entry in `anchors` records curator-declared context (name, ISO 3166-1",
     "alpha-2 countries, kind, directory/manifest source, and date added). Countries",
@@ -103,7 +110,8 @@
     "owlting.com",
     "arf.one",
     "stellar-sep-24.banxa.com",
-    "flutterwave.com"
+    "flutterwave.com",
+    "anclap.com"
   ],
   "anchors": [
     {
@@ -240,6 +248,14 @@
       "countries": ["NG"],
       "kind": "other",
       "source": "https://flutterwave.com",
+      "added": "2026-10-19"
+    },
+    {
+      "domain": "anclap.com",
+      "name": "Anclap",
+      "countries": ["AR"],
+      "kind": "other",
+      "source": "https://anchors.stellar.org/?s=Anclap",
       "added": "2026-10-19"
     }
   ]
