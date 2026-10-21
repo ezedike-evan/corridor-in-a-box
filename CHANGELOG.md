@@ -7,6 +7,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — flaky-test quarantine (2026-10-21)
+
+A flaky test can be quarantined instead of deleted or silently skipped
+([#284](https://github.com/ezedike-evan/corridor-in-a-box/issues/284)):
+
+- `quarantine(issueUrl, name, fn)` in `tests/helpers/quarantine.ts` wraps a
+  sequential describe block tagged `[quarantine]`. The main `pnpm test` run
+  skips it.
+- `pnpm test:quarantine` runs only quarantined blocks, with `retry: 3`.
+- New non-blocking `quarantine` CI job (`continue-on-error: true`). Its job
+  summary lists each quarantined test, its issue, and the outcome.
+- `tests/quarantine.test.ts` fails if a `quarantine()` call has no GitHub issue URL.
+
 ### Maintenance — ESLint 10 landed
 
 - `eslint` 10 landed in [#37](https://github.com/ezedike-evan/corridor-in-a-box/pull/37).

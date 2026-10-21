@@ -46,6 +46,29 @@ pnpm lint && pnpm typecheck && pnpm test
 - Update the README or relevant doc when you change a public interface.
 - Do **not** commit secrets, signing keys, or `.env` files.
 
+### Quarantining a flaky test
+
+Don't delete or `.skip` a test that flakes. Open an issue for it, then wrap it in
+`quarantine()` from `tests/helpers/quarantine.ts`, giving the issue URL first:
+
+```ts
+quarantine(
+  "https://github.com/ezedike-evan/corridor-in-a-box/issues/123",
+  "socket 413",
+  () => {
+    it("rejects a body over the cap", async () => {
+      /* … */
+    });
+  },
+);
+```
+
+`pnpm test` skips quarantined blocks. `pnpm test:quarantine` runs only those
+blocks, retrying each test up to 3 times. The non-blocking `quarantine` CI job
+lists every quarantined test, its issue, and how it did in the job summary.
+`tests/quarantine.test.ts` fails if a `quarantine()` call has no issue URL.
+Once the issue is fixed, remove the wrapper.
+
 ## Commit messages
 
 We use [Conventional Commits](https://www.conventionalcommits.org/) prefixes

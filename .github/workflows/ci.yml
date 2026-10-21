@@ -45,6 +45,26 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
 
+  # Flaky-test quarantine (tests/helpers/quarantine.ts). Runs only the blocks
+  # tagged with quarantine(), each retried up to 3 times. Non-blocking by
+  # design: a flake must not redden main. It is not silent either: the job
+  # summary lists every quarantined test, its tracking issue, and how it did.
+  quarantine:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:quarantine --reporter=default --reporter=json --outputFile.json=quarantine-report.json
+      - name: Summarize quarantined tests
+        if: ${{ always() }}
+        run: pnpm exec tsx scripts/quarantine-summary.ts quarantine-report.json >> "$GITHUB_STEP_SUMMARY"
+
   # Exercises PostgresIdempotencyStore against a real Postgres (the atomic claim
   # + version-guarded upsert that guard against double-settlement). The test is
   # env-gated, so it only runs when CORRIDOR_TEST_DATABASE_URL points at the

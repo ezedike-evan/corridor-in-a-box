@@ -24,5 +24,5 @@
       "@corridor/service": ["./packages/service/src/index.ts"]
     }
   },
-  "include": ["packages/*/src/**/*.ts", "examples/**/*.ts", "tests/**/*.ts"]
+  "include": ["packages/*/src/**/*.ts", "examples/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
 }
