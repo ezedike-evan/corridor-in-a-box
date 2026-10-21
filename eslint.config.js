@@ -15,7 +15,7 @@ export default tseslint.config(
     // "typescript-eslint does not support TS 7.0." at import time since web/
     // moved to TypeScript 7. Revisit once typescript-eslint supports TS >=7.1:
     // https://github.com/typescript-eslint/typescript-eslint/issues/10940
-    ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**", "web/**"],
+    ignores: ["**/dist/**", "**/node_modules/**", "web/**"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
