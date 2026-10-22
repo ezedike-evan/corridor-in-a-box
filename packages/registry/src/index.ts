@@ -28,9 +28,49 @@ export const PROBE_NAMES = [
   "sep38_quote",
   "sep12_status",
   "sep31_info",
+  "sep6_info",
+  "sep6_auth",
 ] as const;
 
 export type ProbeName = (typeof PROBE_NAMES)[number];
+
+/** Protocols the registry can answer a "does this anchor serve it" query for. */
+export type Protocol = "sep31" | "sep6";
+
+/**
+ * Registry CONTRACT error codes, by their numeric value. Mirrors `enum Error` in
+ * `contracts/registry/src/lib.rs` — keep the two in step.
+ *
+ * `NotFound` is the one a caller branches on: it is the normal answer for a
+ * domain attested before metadata existed, not a failure.
+ */
+export enum RegistryContractError {
+  AlreadyInitialised = 1,
+  NotInitialised = 2,
+  PassedExceedsRun = 3,
+  UnknownBit = 4,
+  RegistryFull = 5,
+  NotFound = 6,
+  TooManyAssets = 7,
+  InvalidAssetCode = 8,
+  DuplicateAsset = 9,
+  InvalidCountry = 10,
+}
+
+/**
+ * The numeric contract error inside a simulation failure's message, if it names
+ * one.
+ *
+ * A read that reverts is reported as a message ("registry.get_meta failed:
+ * HostError: Error(Contract, #6)"), and deciding "is this the expected absence of
+ * metadata" from the English wording would be guessing. This pulls the number out
+ * so callers can compare it against {@link RegistryContractError}.
+ */
+export function contractErrorCode(error: unknown): number | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  const m = message.match(/Error\(Contract, #(\d+)\)/);
+  return m ? Number(m[1]) : undefined;
+}
 
 export interface AnchorAttestation {
   readonly domain: string;
@@ -45,6 +85,34 @@ export interface AnchorAttestation {
   /** Ledger at which this was attested. */
   readonly attestedLedger: number;
   /** Address that produced the attestation. */
+  readonly attester: string;
+  /**
+   * OBSERVED: asset codes the anchor's SEP-31 `/info` listed as receivable.
+   *
+   * Absent, not empty, when nobody has attested metadata for this domain — a
+   * record written before metadata existed, or one whose probe never reached
+   * `/info`. An empty array here means the opposite: it was asked, and the
+   * anchor receives nothing.
+   */
+  readonly receiveAssets?: readonly string[];
+  /**
+   * DECLARED, not verified: the ISO-3166-1 alpha-2 country from the anchor's own
+   * stellar.toml. Absent when the toml declared none in a machine-readable form.
+   */
+  readonly country?: string;
+}
+
+/** Metadata as stored under its own key on chain. */
+export interface AnchorMetadata {
+  readonly domain: string;
+  readonly receiveAssets: readonly string[];
+  readonly country?: string;
+  /**
+   * Ledger the metadata was read at. Separate from the record's
+   * `attestedLedger`, because the two are written by separate calls — metadata
+   * from last week is not evidence about this week's bitmaps.
+   */
+  readonly attestedLedger: number;
   readonly attester: string;
 }
 
@@ -122,6 +190,17 @@ function decodeBits<T>(mask: number, names: readonly T[]): T[] {
   return names.filter((_, i) => (mask & (1 << i)) !== 0);
 }
 
+/**
+ * The declared country as an optional property, or no property at all.
+ *
+ * On chain `None` decodes to `null`; spreading `undefined` into a record would
+ * leave a `country` key that JSON and `Object.keys` treat as a real value, so a
+ * caller reading metadata back could not tell "no country" from "not decoded".
+ */
+function metaCountry(raw: { country?: string | null }): { country?: string } {
+  return raw.country ? { country: raw.country } : {};
+}
+
 /** Raw shape the contract returns, before it is turned into something readable. */
 interface RawRecord {
   domain: string;
@@ -129,6 +208,15 @@ interface RawRecord {
   toml_hash: Uint8Array;
   probes_run: number;
   probes_passed: number;
+  attested_ledger: number;
+  attester: string;
+}
+
+/** Raw shape of `get_meta`'s return value. */
+interface RawMeta {
+  domain: string;
+  receive_assets: string[];
+  country: string | null;
   attested_ledger: number;
   attester: string;
 }
@@ -182,10 +270,19 @@ export class AnchorRegistry {
     return this.read<string[]>("domains");
   }
 
-  /** Full attestation for a domain. Throws if the domain has never been attested. */
-  async getAnchor(domain: string): Promise<AnchorAttestation> {
+  /**
+   * Full attestation for a domain. Throws if the domain has never been attested.
+   *
+   * With `{ meta: true }` the metadata is merged into the same record, so a
+   * caller that wants both halves makes one call and gets one object. It is
+   * opt-in because it costs a second read and because metadata is often absent:
+   * leaving it off means `getAnchor` keeps returning exactly what the
+   * attestation says, and nothing is silently missing when the caller never
+   * asked.
+   */
+  async getAnchor(domain: string, opts: { meta?: boolean } = {}): Promise<AnchorAttestation> {
     const raw = await this.read<RawRecord>("get_anchor", nativeToScValString(domain));
-    return {
+    const anchor: AnchorAttestation = {
       domain: raw.domain,
       seps: decodeBits(raw.seps, SEP_NUMBERS),
       probesRun: decodeBits(raw.probes_run, PROBE_NAMES),
@@ -194,6 +291,54 @@ export class AnchorRegistry {
       attestedLedger: raw.attested_ledger,
       attester: raw.attester,
     };
+    if (!opts.meta) return anchor;
+    const meta = await this.getMeta(domain);
+    if (meta === null) return anchor;
+    return { ...anchor, receiveAssets: meta.receiveAssets, ...metaCountry(meta) };
+  }
+
+  /**
+   * Observed receive assets and declared country for a domain, or `null` when
+   * the registry holds no metadata for it.
+   *
+   * `null` is only the answer to "there is no metadata here", which is the
+   * normal state of a domain attested before metadata existed. Every other
+   * reversion is rethrown: turning a budget failure or an uninitialised
+   * registry into a null would make an outage look like an anchor that has
+   * nothing to report.
+   */
+  async getMeta(domain: string): Promise<AnchorMetadata | null> {
+    let raw: RawMeta;
+    try {
+      raw = await this.read<RawMeta>("get_meta", nativeToScValString(domain));
+    } catch (e) {
+      if (contractErrorCode(e) === RegistryContractError.NotFound) return null;
+      throw e;
+    }
+    return {
+      domain: raw.domain,
+      receiveAssets: raw.receive_assets,
+      ...metaCountry(raw),
+      attestedLedger: raw.attested_ledger,
+      attester: raw.attester,
+    };
+  }
+
+  /**
+   * Whether the anchor was OBSERVED receiving `code` at its last attestation.
+   *
+   * This is the registry answering a lane question rather than a capability
+   * question: `servesSep31` says the endpoint works, this says what comes out
+   * of it. `false` for a domain with no metadata — the contract reports the
+   * absence as `NotFound`, and "not recorded" is not "not supported", so the
+   * distinction belongs to `getMeta`, which can return null.
+   */
+  async receivesAsset(domain: string, code: string): Promise<boolean> {
+    return this.read<boolean>(
+      "receives_asset",
+      nativeToScValString(domain),
+      nativeToScValString(code),
+    );
   }
 
   /** SHA-256 of the stellar.toml the latest attestation was made from. */
@@ -217,31 +362,66 @@ export class AnchorRegistry {
     return this.read<boolean>("serves_sep31", nativeToScValString(domain));
   }
 
+  /**
+   * Whether the anchor both ADVERTISES SEP-6 and PASSED the sep6_info probe.
+   * The contract keys the SEP-6 answer off sep6_info, the same way the SEP-31
+   * answer keys off sep31_info.
+   */
+  async servesSep6(domain: string): Promise<boolean> {
+    return this.read<boolean>("serves_sep6", nativeToScValString(domain));
+  }
+
+  /**
+   * Protocol-agnostic form of the two queries above, for callers that only know
+   * the protocol at runtime. It dispatches to the matching contract method
+   * rather than computing a bit locally, so the definition of "serves" stays in
+   * one place: the contract.
+   */
+  async serves(domain: string, protocol: Protocol): Promise<boolean> {
+    switch (protocol) {
+      case "sep31":
+        return this.servesSep31(domain);
+      case "sep6":
+        return this.servesSep6(domain);
+    }
+  }
+
   /** How many ledgers old the attestation is. */
   async staleness(domain: string): Promise<number> {
     return this.read<number>("staleness", nativeToScValString(domain));
   }
 
   /**
-   * Domains that are attested as genuinely serving SEP-31 receive-side AND whose
-   * attestation is fresher than `maxStalenessLedgers` (default ~1 week at 5s
-   * ledgers). The query an operator looking for an off-ramp actually has.
+   * Domains that are attested as genuinely serving `protocol` receive-side AND
+   * whose attestation is fresher than `maxStalenessLedgers` (default ~1 week at
+   * 5s ledgers). The query an operator looking for a rail actually has.
    *
    * Freshness is not optional here: an attestation from six months ago is not
    * evidence about today, and letting callers forget to check would rebuild the
    * problem this registry exists to solve.
    */
-  async liveSep31Anchors(maxStalenessLedgers = 120_960): Promise<string[]> {
+  async liveAnchors(
+    protocol: Protocol,
+    maxStalenessLedgers = WEEK_OF_LEDGERS,
+  ): Promise<string[]> {
     const all = await this.domains();
     const out: string[] = [];
     for (const domain of all) {
       const [serves, age] = await Promise.all([
-        this.servesSep31(domain),
+        this.serves(domain, protocol),
         this.staleness(domain),
       ]);
       if (serves && age <= maxStalenessLedgers) out.push(domain);
     }
     return out;
+  }
+
+  /**
+   * SEP-31 convenience wrapper over `liveAnchors`. Most callers mean the
+   * receive-side SEP-31 off-ramp, so the named form is kept.
+   */
+  async liveSep31Anchors(maxStalenessLedgers = WEEK_OF_LEDGERS): Promise<string[]> {
+    return this.liveAnchors("sep31", maxStalenessLedgers);
   }
 
   /**
@@ -373,6 +553,56 @@ export function decodeAttestationEvent(event: {
     attestedLedger: attestedLedgerNum,
     attester: "",
   };
+}
+
+/** Approximate ledgers in one week at 5 seconds per ledger. (7 * 24 * 60 * 60 / 5) */
+export const WEEK_OF_LEDGERS = 120_960;
+
+/** Default maximum staleness threshold for scheduled runs: ~2 days at 5s per ledger. (2 * 24 * 60 * 60 / 5) */
+export const MAX_STALENESS_LEDGERS = 34_560;
+
+export interface StalenessRecord {
+  readonly domain: string;
+  readonly ledgersOld?: number | null;
+  readonly staleness?: number | null;
+  readonly neverAttested?: boolean;
+}
+
+export interface StaleDomain {
+  readonly domain: string;
+  readonly reason: "stale" | "never-attested";
+  readonly ledgersOld?: number | null;
+  readonly threshold: number;
+}
+
+/**
+ * Filter records for any domain that is stale or was never attested.
+ * Returns records where the domain was never attested or exceeds the staleness threshold.
+ */
+export function findStale(
+  records: readonly StalenessRecord[],
+  threshold: number = MAX_STALENESS_LEDGERS,
+): StaleDomain[] {
+  const stale: StaleDomain[] = [];
+  for (const record of records) {
+    const age = record.ledgersOld ?? record.staleness;
+    if (record.neverAttested || age === null || age === undefined) {
+      stale.push({
+        domain: record.domain,
+        reason: "never-attested",
+        ledgersOld: null,
+        threshold,
+      });
+    } else if (typeof age === "number" && age > threshold) {
+      stale.push({
+        domain: record.domain,
+        reason: "stale",
+        ledgersOld: age,
+        threshold,
+      });
+    }
+  }
+  return stale;
 }
 
 // The SDK's nativeToScVal infers `String` for JS strings only with an explicit

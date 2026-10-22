@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { liveness, parseCorridor, LIVENESS_LABEL } from "@corridor/manifest";
+import {
+  liveness,
+  loadCorridor,
+  parseCorridor,
+  LIVENESS_LABEL,
+  hashCorridor,
+  manifestHash,
+  canonicalJson,
+} from "@corridor/manifest";
 
 const valid = {
   id: "t",
@@ -232,6 +240,12 @@ describe("manifest", () => {
   });
 
   describe("liveness tiers", () => {
+    const protocolCases = [
+      { protocol: "sep31", requiredEndpoint: "transfer_server_sep31" },
+      { protocol: "sep6", requiredEndpoint: "transfer_server" },
+      { protocol: "custom:acme", requiredEndpoint: "base_url" },
+    ] as const;
+
     const verifiedCorridor = {
       ...valid,
       dest: {
@@ -249,6 +263,51 @@ describe("manifest", () => {
       expect(LIVENESS_LABEL.unverified).toBe("unverified");
       expect(LIVENESS_LABEL["not-runnable"]).toBe("not runnable");
     });
+
+    it.each(protocolCases)(
+      "reports protocol-specific not-runnable, unverified, and verified states for $protocol",
+      ({ protocol, requiredEndpoint }) => {
+        const makeCorridor = (verifiedAt?: string) =>
+          parseCorridor({
+            ...valid,
+            dest: {
+              ...valid.dest,
+              protocol,
+              endpoints: {
+                home_domain: "d.example",
+                [requiredEndpoint]: "https://d.example/endpoint",
+                ...(verifiedAt ? { endpoints_verified_at: verifiedAt } : {}),
+              },
+            },
+          });
+
+        const unverified = makeCorridor();
+        expect(unverified.ok).toBe(true);
+        if (!unverified.ok) return;
+        expect(liveness(unverified.value)).toMatchObject({
+          protocol,
+          state: "unverified",
+          runnable: false,
+        });
+
+        const verified = makeCorridor("2026-09-20");
+        expect(verified.ok).toBe(true);
+        if (!verified.ok) return;
+        expect(liveness(verified.value)).toMatchObject({
+          protocol,
+          state: "verified",
+          runnable: true,
+        });
+
+        const missing = structuredClone(verified.value);
+        Object.assign(missing.dest.endpoints, { [requiredEndpoint]: undefined });
+        expect(liveness(missing)).toMatchObject({
+          protocol,
+          state: "not-runnable",
+          runnable: false,
+        });
+      },
+    );
 
     it("reports proven when verified and fresh proof is present", () => {
       const parsed = parseCorridor({
@@ -335,6 +394,49 @@ describe("manifest", () => {
         const live = liveness(parsed.value);
         expect(live.state).toBe("not-runnable");
         expect(live.runnable).toBe(false);
+      }
+    });
+
+    it("reports gaps and warning for external quote_source (ng-cowrie)", () => {
+      const loaded = loadCorridor("corridors/ng-cowrie.corridor.yaml");
+      expect(loaded.ok).toBe(true);
+      if (loaded.ok) {
+        const live = liveness(loaded.value);
+        expect(live.state).toBe("verified");
+        expect(live.runnable).toBe(true);
+        expect(live.gaps).toContain("quote");
+        expect(live.warnings.some((w) => w.includes("quote_source=external"))).toBe(true);
+      }
+    });
+
+    it("reports no quote gaps for valid sep38 corridor with quote_server", () => {
+      const parsed = parseCorridor(verifiedCorridor);
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) {
+        const live = liveness(parsed.value);
+        expect(live.state).toBe("verified");
+        expect(live.gaps).not.toContain("quote");
+        expect(live.warnings.some((w) => w.includes("quote_source=external"))).toBe(false);
+      }
+    });
+
+    it("warns when fx.quote_source=sep38 but dest exposes no quote_server", () => {
+      const noQuoteServer = {
+        ...verifiedCorridor,
+        dest: {
+          ...verifiedCorridor.dest,
+          endpoints: {
+            home_domain: "d.example",
+            transfer_server_sep31: "https://d.example/sep31",
+            endpoints_verified_at: "2026-09-20",
+          },
+        },
+      };
+      const parsed = parseCorridor(noQuoteServer);
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) {
+        const live = liveness(parsed.value);
+        expect(live.warnings.some((w) => w.includes("fx.quote_source=sep38"))).toBe(true);
       }
     });
   });
@@ -527,6 +629,80 @@ describe("limits", () => {
       });
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.error.message).toContain("custom:<name>");
+    });
+  });
+
+  describe("hashCorridor", () => {
+    it("computes a stable 64-hex SHA-256 hash of a validated corridor", () => {
+      const parsed = parseCorridor(valid);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const hash1 = hashCorridor(parsed.value);
+      const hash2 = manifestHash(parsed.value);
+      expect(hash1).toMatch(/^[0-9a-f]{64}$/);
+      expect(hash1).toBe(hash2);
+    });
+
+    it("produces identical hashes regardless of object key order (canonical JSON)", () => {
+      const objA = { b: 2, a: 1, nested: { y: "hello", x: "world" } };
+      const objB = { a: 1, b: 2, nested: { x: "world", y: "hello" } };
+      expect(canonicalJson(objA)).toBe(canonicalJson(objB));
+      expect(canonicalJson(objA)).toBe('{"a":1,"b":2,"nested":{"x":"world","y":"hello"}}');
+    });
+
+    it("produces different hashes when manifest fields change", () => {
+      const base = parseCorridor(valid);
+      expect(base.ok).toBe(true);
+      if (!base.ok) return;
+
+      const baseHash = hashCorridor(base.value);
+
+      // Change asset_issuer
+      const changedIssuer = parseCorridor({
+        ...valid,
+        settlement: { ...valid.settlement, asset_issuer: "GDIFFERENTISSUER" },
+      });
+      expect(changedIssuer.ok).toBe(true);
+      if (changedIssuer.ok) {
+        expect(hashCorridor(changedIssuer.value)).not.toBe(baseHash);
+      }
+
+      // Change limits
+      const changedLimits = parseCorridor({
+        ...valid,
+        limits: { min_amount: "10", max_amount: "500" },
+      });
+      expect(changedLimits.ok).toBe(true);
+      if (changedLimits.ok) {
+        expect(hashCorridor(changedLimits.value)).not.toBe(baseHash);
+      }
+
+      // Change recovery policy
+      const changedRecovery = parseCorridor({
+        ...valid,
+        recovery: { max_retries: 5, rollback: "hold" },
+      });
+      expect(changedRecovery.ok).toBe(true);
+      if (changedRecovery.ok) {
+        expect(hashCorridor(changedRecovery.value)).not.toBe(baseHash);
+      }
+
+      // Change anchor endpoint
+      const changedEndpoint = parseCorridor({
+        ...valid,
+        dest: {
+          ...valid.dest,
+          endpoints: {
+            ...valid.dest.endpoints,
+            transfer_server_sep31: "https://d.example/v2/sep31",
+          },
+        },
+      });
+      expect(changedEndpoint.ok).toBe(true);
+      if (changedEndpoint.ok) {
+        expect(hashCorridor(changedEndpoint.value)).not.toBe(baseHash);
+      }
     });
   });
 });

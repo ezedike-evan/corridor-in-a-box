@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "main",
+    "origin",
+    "security/issue-299-add-a-standalone-mock-sep-31-anchor-server-with"
+  ],
+  "parent": {
+    "main": null,
+    "origin": "main",
+    "security/issue-299-add-a-standalone-mock-sep-31-anchor-server-with": "main"
+  },
+  "order": [
+    "main",
+    "origin",
+    "security/issue-299-add-a-standalone-mock-sep-31-anchor-server-with"
+  ]
+}

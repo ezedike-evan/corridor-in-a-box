@@ -15,11 +15,15 @@
 // `fetchImpl` is injectable so the whole thing is testable without a network.
 
 import { Keypair, TransactionBuilder, type Transaction } from "@stellar/stellar-sdk";
+import { declaredCountry } from "./country";
 import { tomlHash as tomlHashText } from "./toml-hash";
 import { isSafeUrl } from "./url-safety";
 
 export { tomlHash } from "./toml-hash";
 export { isSafeUrl } from "./url-safety";
+export { isCanonicalDomain, MAX_DOMAIN_LEN } from "./domain";
+export { declaredCountry, toAlpha2 } from "./country";
+export { renderSweepMarkdown, renderSweepJson, isUsableSep31OffRamp } from "./report";
 export {
   ANCHOR_KINDS,
   isValidAnchorDomain,
@@ -39,6 +43,8 @@ export const PROBE_NAMES = [
   "sep38_quote",
   "sep12_status",
   "sep31_info",
+  "sep6_info",
+  "sep6_auth",
 ] as const;
 
 export type SepNumber = (typeof SEP_NUMBERS)[number];
@@ -73,6 +79,19 @@ export interface ProbeResult {
   readonly tomlHash: string;
   /** Per-probe detail, in the order probes were attempted. */
   readonly outcomes: readonly ProbeOutcome[];
+  /** Receive assets accepted by the anchor if SEP-31 probe passed. */
+  readonly sep31ReceiveAssets?: readonly string[];
+  /** Receive assets accepted by the anchor if SEP-31 probe passed. Kept for backwards compatibility. */
+  readonly receiveAssets?: readonly string[];
+  /**
+   * DECLARED, not verified: the ISO-3166-1 alpha-2 country the anchor gives in
+   * its own `stellar.toml` under `[DOCUMENTATION] ORG_PHYSICAL_ADDRESS`.
+   *
+   * Absent when the toml declares no country in a form that maps to a code without
+   * a judgement call. That is not "this anchor has no country" — it is "we could
+   * not read one", and on chain the difference is `None` rather than a value.
+   */
+  readonly country?: string;
   /** Raw text of stellar.toml if successfully fetched. */
   readonly toml?: string;
 }
@@ -174,6 +193,10 @@ export async function probeAnchor(
     }
   }
 
+  // Declared, straight from the toml we just hashed — no endpoint is involved,
+  // so this is read whether or not any probe past SEP-1 gets a chance to run.
+  const country = declaredCountry(toml);
+
   // --- SEP-10: a full handshake, not a reachability check ----------------
   let token: string | undefined;
   const webAuth = endpoint.get(10);
@@ -224,11 +247,12 @@ export async function probeAnchor(
       const buy = info.assets?.find((a) => a.asset.startsWith("iso4217:"));
       if (!sell || !buy) throw new Error("no stellar→fiat pair advertised");
 
+      const context = endpoint.has(6) && !endpoint.has(31) ? "sep6" : "sep31";
       const res = await get(`${sep38}/quote`, {
         method: "POST",
         headers: { "content-type": "application/json", ...authHeader },
         body: JSON.stringify({
-          context: "sep31",
+          context,
           sell_asset: sell.asset,
           buy_asset: buy.asset,
           sell_amount: "10",
@@ -262,6 +286,7 @@ export async function probeAnchor(
   }
 
   // --- SEP-31: does it receive anything? ---------------------------------
+  let sep31ReceiveAssets: string[] | undefined;
   const sep31 = endpoint.get(31);
   if (sep31) {
     try {
@@ -274,13 +299,70 @@ export async function probeAnchor(
         // exists, the lane does not.
         throw new Error("receive list is EMPTY — advertises SEP-31 but accepts nothing");
       }
+      sep31ReceiveAssets = assets;
       record("sep31_info", true, `receives ${assets.join(", ")}`);
     } catch (e) {
       record("sep31_info", false, why(e));
     }
   }
 
-  return { domain, seps, probesRun, probesPassed, tomlHash, outcomes, toml };
+  // --- SEP-6: does the transfer server withdraw anything? ----------------
+  const sep6 = endpoint.get(6);
+  let sep6Asset: string | undefined;
+  if (sep6) {
+    try {
+      const res = await get(`${sep6}/info`, { headers: authHeader });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      type Sep6Section = Record<string, { enabled?: boolean }>;
+      const j = (await res.json()) as {
+        withdraw?: Sep6Section;
+        "withdraw-exchange"?: Sep6Section;
+      };
+      // SEP-6 requires `enabled` on every asset; an asset that is not explicitly
+      // enabled is not a working lane, the same way an empty SEP-31 receive list is not.
+      const enabled = (section: Sep6Section | undefined) =>
+        Object.entries(section ?? {})
+          .filter(([, v]) => v?.enabled === true)
+          .map(([code]) => code);
+      const assets = [
+        ...new Set([...enabled(j.withdraw), ...enabled(j["withdraw-exchange"])]),
+      ];
+      if (assets.length === 0) {
+        throw new Error("withdraw list is EMPTY — advertises SEP-6 but withdraws nothing");
+      }
+      sep6Asset = assets[0];
+      record("sep6_info", true, `withdraws ${assets.join(", ")}`);
+    } catch (e) {
+      record("sep6_info", false, why(e));
+    }
+  }
+
+  // --- SEP-6 auth: an authenticated read, not just a public /info --------
+  if (sep6 && token && sep6Asset) {
+    try {
+      const res = await get(
+        `${sep6}/transactions?asset_code=${encodeURIComponent(sep6Asset)}`,
+        { headers: authHeader },
+      );
+      // As with SEP-12: a 4xx is a valid SEP-6 answer, a 5xx is not.
+      if (res.status >= 500) throw new Error(`HTTP ${res.status}`);
+      record("sep6_auth", true, `HTTP ${res.status}`);
+    } catch (e) {
+      record("sep6_auth", false, why(e));
+    }
+  }
+
+  return {
+    domain,
+    seps,
+    probesRun,
+    probesPassed,
+    tomlHash,
+    outcomes,
+    toml,
+    ...(sep31ReceiveAssets ? { sep31ReceiveAssets, receiveAssets: sep31ReceiveAssets } : {}),
+    ...(country ? { country } : {}),
+  };
 }
 
 export interface FormattedProbeResultJson {
@@ -290,6 +372,8 @@ export interface FormattedProbeResultJson {
   readonly seps: readonly SepNumber[];
   readonly probesPassed: readonly ProbeName[];
   readonly probesRun: readonly ProbeName[];
+  readonly sep31ReceiveAssets?: readonly string[];
+  readonly receiveAssets?: readonly string[];
   readonly raw: {
     readonly seps: number;
     readonly probesRun: number;
@@ -330,3 +414,6 @@ export function parseProbeArgs(args: readonly string[]): { domain?: string; json
   }
   return { domain, json };
 }
+
+export * from "./report";
+export * from "./loader";
