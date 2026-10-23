@@ -67,7 +67,7 @@
     "lefthook": "2.2.2",
     "pg": "^8.23.1",
     "prettier": "^3.9.10",
-    "tsx": "^4.23.13",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.71.1",
     "vitest": "^2.1.0"
