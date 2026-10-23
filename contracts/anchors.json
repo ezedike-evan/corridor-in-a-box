@@ -66,6 +66,11 @@
     "(vibrant.cash returns marketing HTML without anchor SEPs). Vibrant is a wallet,",
     "not an anchor, and serves no SEP-31 receive endpoint; no manifest is written.",
     "",
+    "anclap.com.ar is Anclap (Argentina / LatAm, ARS and other LatAm payouts), added",
+    "from the Stellar Anchor Directory for issue #231. Probe output and directory link",
+    "are recorded in the PR; no SEP-31 receive side has been verified, so no corridor",
+    "manifest is written. Blocked on SEP-6/SEP-24 unless the probe shows otherwise.",
+    "",
     "testanchor.stellar.org is the SDF test anchor. It currently advertises SEP-31",
     "and returns an empty receive list, so it attests as NOT serving SEP-31 — a",
     "useful demonstration that the registry reports capability rather than claims.",
@@ -97,6 +102,7 @@
     "connect.clickpesa.com",
     "coins.ph",
     "vibrantapp.com",
+    "anclap.com.ar",
     "stellar.moneygram.com",
     "mercuryo.io",
     "lightnet.io",
@@ -185,6 +191,14 @@
       "kind": "other",
       "source": "https://vibrantapp.com",
       "added": "2026-10-17"
+    },
+    {
+      "domain": "anclap.com.ar",
+      "name": "Anclap",
+      "countries": ["AR"],
+      "kind": "offramp",
+      "source": "https://anchors.stellar.org",
+      "added": "2026-10-20"
     },
     {
       "domain": "stellar.moneygram.com",
