@@ -16,6 +16,33 @@ export interface LogFields {
 
 export interface Logger {
   log(level: LogLevel, msg: string, fields?: LogFields): void;
+  /**
+   * Optional scoping convention: return a logger that stamps `fields` on every
+   * line it emits, so a caller can attach per-request context (a request id, a
+   * trace id) once instead of threading it through every call site. Sinks that
+   * already keep a structured context (pino, winston) should implement this and
+   * return their own child; everyone else gets the merging wrapper from
+   * `childLogger`.
+   */
+  child?(fields: LogFields): Logger;
+}
+
+/** A logger that folds `fields` under each line's own, delegating to `base`. */
+function mergingLogger(base: Logger, fields: LogFields): Logger {
+  return {
+    log(level: LogLevel, msg: string, line?: LogFields): void {
+      base.log(level, msg, { ...fields, ...line });
+    },
+  };
+}
+
+/**
+ * Scope `logger` to `fields`. Uses the sink's own `child()` when it has one
+ * (cheaper, and it keeps the sink's real context), otherwise wraps it in a
+ * merging logger, so this works with any injected `Logger`.
+ */
+export function childLogger(logger: Logger, fields: LogFields): Logger {
+  return logger.child ? logger.child(fields) : mergingLogger(logger, fields);
 }
 
 /** Emits one JSON object per line — friendly to log shippers and grep alike. */
@@ -27,10 +54,28 @@ export const consoleLogger: Logger = {
     else if (level === "debug") (console.debug ?? console.log)(line);
     else console.log(line);
   },
+  child(fields) {
+    // A fresh sink per scope rather than a recursion back into `childLogger`.
+    return mergingLogger(consoleLogger, fields);
+  },
 };
 
 /** Drops everything. The default, so tests and libraries stay quiet. */
-export const silentLogger: Logger = { log() {} };
+export const silentLogger: Logger = {
+  log() {},
+  child() {
+    return silentLogger;
+  },
+};
+
+/**
+ * Per-request context the engine stamps on everything a run produces. Kept as a
+ * type (not an interface) so it spreads cleanly into `LogFields`.
+ */
+export type RequestScope = {
+  readonly requestId?: string;
+  readonly traceparent?: string;
+};
 
 /** One immutable record of a single state transition. */
 export interface AuditEntry extends LogFields {
@@ -41,6 +86,10 @@ export interface AuditEntry extends LogFields {
   readonly version: number;
   readonly at: number;
   readonly error?: string;
+  /** Request id the run was started under, when the caller supplied one. */
+  readonly requestId?: string;
+  /** W3C `traceparent` of the request that started the run, when it had one. */
+  readonly traceparent?: string;
   readonly routeTrust?: "attested" | "manifest";
   /** The anchor's SEP-38 fee, in the sell asset. Present on the `settled` entry when the quote carried one. */
   readonly quoteFee?: Money;
@@ -58,6 +107,10 @@ export interface AuditDetail {
   readonly idempotencyKey: string;
   readonly corridorId: string;
   readonly at: number;
+  /** Request id the run was started under, when the caller supplied one. */
+  readonly requestId?: string;
+  /** W3C `traceparent` of the request that started the run, when it had one. */
+  readonly traceparent?: string;
   readonly detail: {
     readonly liveness: LivenessState;
     readonly effectiveCap?: string;
@@ -67,6 +120,20 @@ export interface AuditDetail {
 export interface AuditSink {
   record(entry: AuditEntry): Promise<void> | void;
   recordDetail?(detail: AuditDetail): Promise<void> | void;
+}
+
+/**
+ * An audit sink that stamps `scope` onto every entry and detail it records, so a
+ * whole run's trail can be tied back to the request that started it without
+ * every emit site repeating the field.
+ */
+export function scopedAuditSink(sink: AuditSink, scope: RequestScope): AuditSink {
+  return {
+    record: (entry) => sink.record({ ...scope, ...entry }),
+    ...(sink.recordDetail && {
+      recordDetail: (detail) => sink.recordDetail!({ ...scope, ...detail }),
+    }),
+  };
 }
 
 export type AlertKind = "held" | "refund_pending" | "breaker_tripped";

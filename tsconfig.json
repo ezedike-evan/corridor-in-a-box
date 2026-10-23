@@ -16,6 +16,7 @@
     "paths": {
       "@corridor/types": ["./packages/types/src/index.ts"],
       "@corridor/manifest": ["./packages/manifest/src/index.ts"],
+      "@corridor/manifest/liveness": ["./packages/manifest/src/liveness.ts"],
       "@corridor/probe": ["./packages/probe/src/index.ts"],
       "@corridor/adapter-kit": ["./packages/adapter-kit/src/index.ts"],
       "@corridor/sep31": ["./packages/sep31/src/index.ts"],
@@ -29,5 +30,5 @@
       "@corridor/cli/*": ["./packages/cli/src/*"]
     }
   },
-  "include": ["packages/*/src/**/*.ts", "examples/**/*.ts", "tests/**/*.ts"]
+  "include": ["packages/*/src/**/*.ts", "examples/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
 }

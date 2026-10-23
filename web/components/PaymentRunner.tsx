@@ -7,27 +7,14 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { corridors, getCorridor, liveness, VERBS } from "@/lib/corridors";
 import type { EngineDemoResult, PaymentScenario } from "@/lib/engine-demo";
+import generatedStates from "@/lib/generated/states.json";
 import { STEP_STATUS_TEXT, announceRun, stepStatus } from "@/lib/run-status";
 
 type CorridorState = EngineDemoResult["state"];
 
-const ALL_STATES: CorridorState[] = [
-  "created",
-  "quoted",
-  "compliant",
-  "opened",
-  "verifying",
-  "settling",
-  "retrying",
-  "settled",
-  "recovering",
-  "refund_pending",
-  "reconciled",
-  "completed",
-  "refunded",
-  "held",
-  "failed",
-];
+// The engine's state list, generated from packages/engine/src/state.ts by
+// `pnpm gen:web-data` rather than copied here.
+const ALL_STATES = generatedStates.states as CorridorState[];
 
 export function PaymentRunner({ initialCorridor }: { initialCorridor?: string }) {
   const [corridorId, setCorridorId] = useState(

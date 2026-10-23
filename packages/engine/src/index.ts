@@ -7,10 +7,11 @@ export {
   type ExecuteOptions,
   type RunResult,
 } from "./run";
-export { canTransition, isTerminal, TERMINAL, type CorridorState } from "./state";
+export { ALL_STATES, canTransition, isTerminal, TERMINAL, type CorridorState } from "./state";
 export {
   InMemoryIdempotencyStore,
   hasRequestedRefund,
+  hasSettlementRef,
   type IdempotencyStore,
   type StoredRun,
   type ResolutionOutcome,
@@ -47,7 +48,9 @@ export {
   UnimplementedSubmitter,
   createMockSubmitter,
   StellarPaymentStrategy,
+  AdapterSettledStrategy,
   defaultStrategies,
+  settlementId,
   type SettlementSubmitter,
   type ChainVerifier,
   type SettlementRef,
@@ -88,6 +91,8 @@ export {
 export {
   consoleLogger,
   silentLogger,
+  childLogger,
+  scopedAuditSink,
   InMemoryAuditLog,
   InMemoryAlerting,
   WebhookAlerting,
@@ -98,6 +103,7 @@ export {
   type Logger,
   type LogLevel,
   type LogFields,
+  type RequestScope,
   type AuditSink,
   type AuditEntry,
   type AuditDetail,

@@ -43,7 +43,10 @@ function recordingSubmitter() {
     submitter: {
       async submit(req: { amount: { asset: string; amount: string } }) {
         sent.push(req.amount);
-        return { ok: true as const, value: { stellarTxHash: "hash", ledger: 1 } };
+        return {
+          ok: true as const,
+          value: { kind: "stellar" as const, stellarTxHash: "hash", ledger: 1 },
+        };
       },
       async refund(): Promise<Outcome<SettlementRef>> {
         return {

@@ -12,7 +12,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
@@ -58,6 +58,15 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      # web/ renders corridor data and the state list generated from the
+      # manifests and the engine. Fail when the committed copy has drifted.
+      - name: Check web/lib/generated is up to date
+        run: |
+          pnpm gen:web-data
+          git diff --exit-code web/lib/generated || {
+            echo "::error::web/lib/generated is stale. Run 'pnpm gen:web-data' and commit the result."
+            exit 1
+          }
 
   # Exercises PostgresIdempotencyStore against a real Postgres (the atomic claim
   # + version-guarded upsert that guard against double-settlement). The test is

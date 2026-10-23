@@ -267,6 +267,7 @@ operation, `stellar contract restore`); see the header of
 pnpm probe:anchor testanchor.stellar.org   # probe a live anchor, print the facts
 pnpm registry:read                         # read the registry via @corridor/registry
 pnpm registry:read --sep 24 --passed sep10_auth   # filter; --max-age and --json too
+pnpm registry:read --country MX --asset MXN        # who pays out MXN, declared in MX
 ATTESTER_SECRET=S… pnpm attest             # probe + submit both halves: bitmaps, then observed assets and declared country
 cd contracts && cargo test                 # 68 contract tests
 ```

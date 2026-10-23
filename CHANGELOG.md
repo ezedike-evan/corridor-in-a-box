@@ -7,6 +7,104 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — every service request carries an `X-Request-Id` into the logs and the audit trail ([#269](https://github.com/ezedike-evan/corridor-in-a-box/issues/269))
+
+Engine logs and audit entries only carried `idempotencyKey` and `corridorId`,
+and the service neither assigned nor returned a request id — so an operator
+handed a `500` and a log file had no way to tie the two together.
+
+- `packages/service`: `server()` accepts an inbound `X-Request-Id` and echoes
+  it back on every response, including the transport-owned ones (413, 400 from
+  invalid JSON, 401, 404, 429, 500). An inbound id is used only if it is
+  `[A-Za-z0-9._-]{1,128}`; anything else is replaced with a fresh
+  `crypto.randomUUID()`, so a client cannot inject a log line or a header.
+- `packages/service`: `RouteResponse` gained `headers`, and `RouteRequest`
+  gained `requestId` / `traceparent`, so `route()` stays a pure function that
+  can be driven without a socket.
+- `packages/service`: a W3C `traceparent` is validated and passed through as a
+  field on the response and on every log line (full tracing is a separate
+  concern).
+- `packages/engine`: `ExecuteOptions.requestId` / `traceparent` scope the run —
+  `Logger.child(fields)` (new optional member, with `childLogger()` falling back
+  to merging for third-party loggers) and `scopedAuditSink()` wrap the deps once,
+  so _every_ emit site of a run inherits the id: transitions, the pre-settle
+  gate detail, reconcile polls, halt notices. `AuditEntry` and `AuditDetail`
+  gained optional `requestId` / `traceparent`.
+
+### Breaking — `StellarSettlementSubmitter` refuses mainnet unless it is opted in ([#275](https://github.com/ezedike-evan/corridor-in-a-box/issues/275))
+
+The "don't move real money by accident" check lived only in the example
+launchers (`examples/run-testnet.ts`, `examples/run-service.ts`,
+`scripts/assert-testnet-corridor.ts`), so an embedder wiring the library
+together themselves inherited no guard at all: the submitter picked the network
+straight from the manifest and signed whatever `settlement.network` said.
+
+- `packages/stellar`: `StellarSubmitterOptions.allowedNetworks`
+  (`readonly ("public" | "testnet")[]`) **defaults to `["testnet"]`**. A
+  corridor on a network that is not listed is refused with a non-retryable
+  `SETTLEMENT_FAILED` before `loadAccount()`, so a refusal costs no sequence
+  number, no signature and no transaction. **Embedders that settle on public
+  must now pass `allowedNetworks: ["testnet", "public"]`** — that is the whole
+  point, but it is a breaking construction-time change.
+- `packages/stellar`: a `LocalKeypairSigner` (including one built from
+  `signerSecret`) is refused on public unless `allowLocalSignerOnMainnet: true`
+  is also passed, per docs/key-management.md: a seed living in the application
+  process is a testnet convenience, not a mainnet custody model.
+- `packages/stellar`: the Horizon endpoint's own `network_passphrase` is read
+  from its root resource once, lazily, and compared with the corridor's
+  network — a testnet manifest pointed at a mainnet Horizon (or the reverse)
+  is refused rather than signed. An endpoint that cannot be reached fails
+  retryably; nothing was submitted, so retrying is safe. `fetchHorizonRoot` is
+  the test seam; the check is skipped when a fake `horizonServer` is injected
+  without it.
+- `examples/run-service.ts` and `examples/run-testnet.ts`: the submitter is
+  constructed with `allowedNetworks` derived from `CORRIDOR_ALLOW_MAINNET=1`,
+  so the launcher's opt-in and the signer's guard cannot drift apart.
+- `tests/stellar.test.ts`: public corridor without opt-in → refused with no
+  `loadAccount` call; local signer on public refused even with the network
+  allowed; explicit ack settles; endpoint/corridor passphrase mismatch refused
+  (root read once); unverifiable endpoint retryable.
+
+### Added — `tests/service-http.test.ts`: the service transport, tested over a socket ([#281](https://github.com/ezedike-evan/corridor-in-a-box/issues/281))
+
+`tests/service.test.ts` drives the pure `route()` in-process, which is the right
+way to test routing — but the transport in `server()` was mostly invisible to
+it: JSON parsing, the lowercasing of inbound headers, `resolveClientIp()` /
+`trustProxy`, the content types written on the way out, and the catch-all that
+turns an unexpected throw into a 500. Only the two body-size cases went through
+a real socket.
+
+- New black-box suite: mock adapters, mock submitter, a server on port 0, and
+  assertions on status bytes, headers and response bodies. It covers POST
+  `/payments` → 200 and reading that key back, 401 without a key, a mixed-case
+  `Authorization` still authenticating, a cross-tenant `GET /payments/:key` →
+  404, 429 after the token bucket drains, `/metrics` served as
+  `text/plain; version=0.0.4` verbatim and unmetered, a forged
+  `X-Forwarded-For` ignored by default and honoured under `trustProxy`, invalid
+  JSON → 400, and a rejecting store → 500 with the same server still answering
+  the next request.
+- Servers are closed through `gracefulShutdown()` in `afterEach`, not
+  `server.close()`, so nothing outlives the test.
+- 12 tests, ~0.3 s. No production code changed.
+
+### Fixed — `web/` reads corridor data and the state list from the repo, not hand copies ([#293](https://github.com/ezedike-evan/corridor-in-a-box/issues/293))
+
+`web/lib/corridors.ts` had hand-copied four of the six manifests and kept its
+own copy of `liveness()`, which still treated every lane as SEP-31. The
+payment runner hand-listed the engine's states.
+
+- `pnpm gen:web-data` (`scripts/gen-web-data.ts`) loads every
+  `corridors/*.corridor.yaml` with `@corridor/manifest` and reads the state
+  machine from `@corridor/engine`. It writes
+  `web/lib/generated/{corridors,states}.json`, which are committed.
+- `web/` imports those files and calls `@corridor/manifest`'s own `liveness()`,
+  so the site now shows all six corridors and reports SEP-6 lanes correctly.
+  Liveness is computed at render time, not generated: proof freshness depends
+  on today's date.
+- `@corridor/engine` exports `ALL_STATES`, and `CorridorState` is derived from it.
+- `tests/web-data.test.ts` and a CI step fail when the generated files are
+  stale.
+
 ### Fixed — `RegistryRouteResolver` checks the protocol the corridor declares, not SEP-31 ([#211](https://github.com/ezedike-evan/corridor-in-a-box/issues/211))
 
 The registry-backed resolver asked every lane the same question — "is this

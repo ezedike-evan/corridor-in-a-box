@@ -39,9 +39,8 @@ function corridor(
     },
     fx: { path: ["ARS", "USDC", "ARS"], who_holds_risk: "receiving_anchor" },
     compliance: { source_jurisdiction: "AR", dest_jurisdiction: "AR" },
-    // testnet, not public: `liveness()` only knows SEP-31's
-    // `transfer_server_sep31`, so a SEP-6 dest reads as "not-runnable" and the
-    // engine refuses it outright on the public network.
+    // testnet, not public: this fixture exercises the SEP-6 lane without live
+    // network settlement.
     settlement: { network: "testnet", asset_issuer: "GISSUER", ...settlement },
     recovery: {},
   });

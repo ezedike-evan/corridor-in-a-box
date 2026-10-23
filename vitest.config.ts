@@ -7,6 +7,8 @@ export default defineConfig({
   resolve: {
     alias: {
       "@corridor/types": r("./packages/types/src/index.ts"),
+      // Listed before the package root: a string alias also matches subpaths.
+      "@corridor/manifest/liveness": r("./packages/manifest/src/liveness.ts"),
       "@corridor/manifest": r("./packages/manifest/src/index.ts"),
       "@corridor/probe": r("./packages/probe/src/index.ts"),
       "@corridor/adapter-kit": r("./packages/adapter-kit/src/index.ts"),

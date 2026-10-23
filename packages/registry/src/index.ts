@@ -139,6 +139,18 @@ export interface AttestationFilter {
   readonly passed?: readonly ProbeName[];
   /** The attestation must be no staler than this many ledgers. */
   readonly maxAge?: number;
+  /**
+   * The anchor must have DECLARED this ISO-3166-1 alpha-2 country, compared
+   * exactly (the contract only stores uppercase). A record with no declared
+   * country never matches.
+   */
+  readonly country?: string;
+  /**
+   * The anchor must have been OBSERVED receiving every one of these asset
+   * codes, compared exactly. A record with no recorded receive list — one
+   * attested before metadata existed — never matches.
+   */
+  readonly asset?: readonly string[];
 }
 
 /**
@@ -149,20 +161,27 @@ export interface AttestationFilter {
  * network read per filter. Filters intersect, so a record is kept only when it
  * satisfies every supplied condition and adding a filter never widens the
  * result. A domain missing from `stalenessByDomain` cannot satisfy `maxAge` and
- * is dropped rather than assumed fresh.
+ * is dropped rather than assumed fresh. Likewise a record with no metadata
+ * cannot satisfy `country` or `asset`: "not recorded" is not a match.
  */
 export function filterAttestations(
   records: readonly AnchorAttestation[],
   stalenessByDomain: Readonly<Record<string, number>>,
   opts: AttestationFilter = {},
 ): AnchorAttestation[] {
-  const { sep, passed, maxAge } = opts;
+  const { sep, passed, maxAge, country, asset } = opts;
   return records.filter((record) => {
     if (sep && !sep.every((n) => record.seps.includes(n))) return false;
     if (passed && !passed.every((p) => record.probesPassed.includes(p))) return false;
     if (maxAge !== undefined) {
       const age = stalenessByDomain[record.domain];
       if (age === undefined || age > maxAge) return false;
+    }
+    if (country !== undefined && record.country !== country) return false;
+    if (asset && asset.length > 0) {
+      const received = record.receiveAssets;
+      if (received === undefined || !asset.every((code) => received.includes(code)))
+        return false;
     }
     return true;
   });

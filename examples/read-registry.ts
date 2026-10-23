@@ -2,6 +2,7 @@
 //
 //   pnpm registry:read
 //   pnpm registry:read --sep 24 --passed sep10_auth --max-age 120960 --json
+//   pnpm registry:read --country MX --asset MXN
 //
 // Hits the deployed testnet contract for real — no mocks, no fixtures. The
 // addresses come from contracts/deployments.json so this and the dashboard
@@ -9,8 +10,13 @@
 //
 // Filters intersect, so an anchor is listed only when it satisfies every flag
 // you pass. It must advertise every `--sep`, pass every `--passed`, and be no
-// staler than `--max-age`. Unknown SEP numbers and probe names are refused
-// rather than silently matching nothing.
+// staler than `--max-age`, have declared `--country`, and have been observed
+// receiving every `--asset`. Unknown SEP numbers and probe names are refused
+// rather than silently matching nothing. A record attested before metadata
+// existed has no country or receive list, so it never matches those two.
+//
+// Provenance stays visible in both outputs: the country is what the anchor
+// DECLARED about itself, the receive assets are what a probe OBSERVED.
 
 import { readFileSync } from "node:fs";
 import {
@@ -33,13 +39,16 @@ interface Deployments {
 }
 
 const USAGE = [
-  "usage: pnpm registry:read [--sep <n>]... [--passed <probe>]... [--max-age <ledgers>] [--json]",
+  "usage: pnpm registry:read [--sep <n>]... [--passed <probe>]... [--max-age <ledgers>]",
+  "                          [--country <CC>] [--asset <code>]... [--json]",
   "",
   "  --sep <n>          only anchors advertising SEP-<n>; repeatable, narrows",
   `                     one of: ${SEP_NUMBERS.map((n) => `SEP-${n}`).join(", ")}`,
   "  --passed <probe>   only anchors that passed <probe>; repeatable, narrows",
   `                     one of: ${PROBE_NAMES.join(", ")}`,
   "  --max-age <n>      only attestations at most <n> ledgers old",
+  "  --country <CC>     only anchors that declared this ISO-3166-1 alpha-2 country",
+  "  --asset <code>     only anchors observed receiving <code>; repeatable, narrows",
   "  --json             print the matching attestations as JSON",
 ].join("\n");
 
@@ -61,6 +70,8 @@ function parseArgs(
   const sep: number[] = [];
   const passed: ProbeName[] = [];
   let maxAge: number | undefined;
+  let country: string | undefined;
+  const asset: string[] = [];
   let json = false;
 
   let i = 0;
@@ -104,6 +115,31 @@ function parseArgs(
         return { ok: false, error: `--max-age needs a non-negative integer, got: ${raw}` };
       }
       maxAge = n;
+    } else if (flag === "--country") {
+      const raw = value();
+      if (raw === undefined)
+        return { ok: false, error: "--country needs an ISO-3166-1 alpha-2 code" };
+      if (!/^[A-Za-z]{2}$/.test(raw)) {
+        return {
+          ok: false,
+          error: `--country needs a two-letter ISO-3166-1 alpha-2 code, got: ${raw}`,
+        };
+      }
+      // An anchor declares exactly one country, so a second one could only
+      // ever match nothing.
+      if (country !== undefined)
+        return { ok: false, error: "--country can be given only once" };
+      country = raw.toUpperCase();
+    } else if (flag === "--asset") {
+      const raw = value();
+      if (raw === undefined) return { ok: false, error: "--asset needs an asset code" };
+      if (raw.length > MAX_ASSET_CODE_LEN) {
+        return {
+          ok: false,
+          error: `--asset code is longer than ${MAX_ASSET_CODE_LEN} characters: ${raw}`,
+        };
+      }
+      asset.push(raw);
     } else {
       return { ok: false, error: `unknown argument: ${arg}` };
     }
@@ -113,16 +149,31 @@ function parseArgs(
   return {
     ok: true,
     options: {
-      filter: { sep, passed, maxAge },
+      filter: { sep, passed, maxAge, country, asset },
       json,
-      filtered: sep.length > 0 || passed.length > 0 || maxAge !== undefined,
+      filtered:
+        sep.length > 0 ||
+        passed.length > 0 ||
+        maxAge !== undefined ||
+        country !== undefined ||
+        asset.length > 0,
     },
   };
 }
 
+/** Mirrors `MAX_ASSET_CODE_LEN` in contracts/registry: no stored code is longer. */
+const MAX_ASSET_CODE_LEN = 32;
+
+/**
+ * Where each metadata field came from, emitted beside it in `--json` so a
+ * consumer cannot mistake the anchor's own claim for something a probe saw.
+ */
+const PROVENANCE = { receiveAssets: "observed", country: "declared" } as const;
+
 /** An attestation plus how stale it is, the shape `--json` emits. */
 interface StaleAttestation extends AnchorAttestation {
   readonly staleness: number;
+  readonly provenance: typeof PROVENANCE;
 }
 
 async function main(): Promise<void> {
@@ -174,6 +225,7 @@ async function main(): Promise<void> {
     const out: StaleAttestation[] = matches.map((a) => ({
       ...a,
       staleness: stalenessByDomain[a.domain],
+      provenance: PROVENANCE,
     }));
     console.log(JSON.stringify(out, null, 2));
     return;
@@ -197,10 +249,14 @@ async function main(): Promise<void> {
       `  receives       ${
         a.receiveAssets === undefined
           ? "not recorded"
-          : a.receiveAssets.join(", ") || "nothing — asked and it accepts no asset"
+          : a.receiveAssets.length === 0
+            ? "nothing — asked and it accepts no asset (observed)"
+            : `${a.receiveAssets.join(", ")} (observed)`
       }`,
     );
-    console.log(`  declared in    ${a.country ?? "no country declared"}`);
+    console.log(
+      `  declared in    ${a.country === undefined ? "no country declared" : `${a.country} (declared, not verified)`}`,
+    );
     console.log(
       `  attested at    ledger ${a.attestedLedger} (${stalenessByDomain[a.domain]} ledgers ago)`,
     );
