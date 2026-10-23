@@ -1,4 +1,3 @@
-
 // The orchestrator. execute() runs one payment across one corridor:
 //   quote → comply → open → settle → reconcile → complete
 // driving the state machine, persisting after each step (so it's resumable), and
@@ -6,7 +5,7 @@
 // specific fact arrives via the validated manifest, every anchor-specific fact via
 // the injected RouteResolver/adapters. Add a corridor = add a manifest.
 
-import { liveness, type Corridor, type LivenessState } from "@corridor/manifest";
+import { liveness, hashCorridor, type Corridor, type LivenessState } from "@corridor/manifest";
 import {
   compareAmounts,
   fail,
@@ -30,16 +29,18 @@ import { canTransition, isTerminal, type CorridorState } from "./state";
 import {
   InMemoryIdempotencyStore,
   hasRequestedRefund,
+  hasSettlementRef,
   type IdempotencyStore,
   type StoredRun,
 } from "./idempotency";
-import type {
-  ChainVerifier,
-  RefundRequest,
-  SettlementRef,
-  SettlementRequest,
-  SettlementStrategy,
-  SettlementSubmitter,
+import {
+  settlementId,
+  type ChainVerifier,
+  type RefundRequest,
+  type SettlementRef,
+  type SettlementRequest,
+  type SettlementStrategy,
+  type SettlementSubmitter,
 } from "./ports";
 import {
   anchorTerminalStatus,
@@ -60,11 +61,14 @@ import { checkCompatibility } from "./compat";
 import {
   noopMetrics,
   silentLogger,
+  childLogger,
+  scopedAuditSink,
   type AuditEntry,
   type AuditSink,
   type Alerting,
   type Logger,
   type Metrics,
+  type RequestScope,
 } from "./observability";
 import type { CheckResult, GateContext, PreSettleGate } from "./gate";
 import {
@@ -168,6 +172,8 @@ export interface RunResult {
   readonly state: CorridorState;
   readonly transactionId?: string;
   readonly stellarTxHash?: string;
+  readonly settlementKind?: "stellar" | "adapter";
+  readonly settlementRef?: SettlementRef;
   /** Ordered list of states the run passed through — useful for the example/CLI. */
   readonly trail: readonly CorridorState[];
 }
@@ -185,6 +191,39 @@ export interface ExecuteOptions {
    * on-chain attestation.
    */
   trustManifestWithoutAttestation?: boolean;
+  /**
+   * Run quote → comply → open → pre-settle gate against the real anchor, then
+   * stop before `settling`: `SettlementSubmitter.submit()` (and `findExisting`)
+   * are never called. Every gate result is recorded on the audit trail.
+   *
+   * When the gate passes, the run is persisted as `failed` with
+   * `DRY_RUN_COMPLETE` and that error is returned, its `cause` carrying the
+   * gate report (`{ dryRun: true, checks }`). A gate refusal ends exactly as it
+   * would on a real run. Either way the idempotency key is spent.
+   *
+   * The receiving anchor is left holding an opened SEP-31 transaction that is
+   * never funded; it expires on the anchor's side.
+   */
+  dryRun?: boolean;
+  /**
+   * Correlation id for the request that started this run — the HTTP layer's
+   * `X-Request-Id`. Stamped on every log line and audit entry the run produces,
+   * so a 500 at the edge can be tied back to the lines behind it. The engine
+   * never generates one; callers own the id.
+   */
+  requestId?: string;
+  /**
+   * W3C `traceparent` of the request that started this run, passed through as a
+   * field on the same lines. Full tracing (spans, export) is not the engine's
+   * job — this only keeps the ids correlatable until it is.
+   */
+  traceparent?: string;
+}
+
+/** The `cause` of a `DRY_RUN_COMPLETE` error: what the gate said before the run stopped. */
+export interface DryRunReport {
+  readonly dryRun: true;
+  readonly checks: readonly CheckResult[];
 }
 
 /**
@@ -198,6 +237,27 @@ export interface ExecuteOptions {
  * flight and may yet be resolved either way by the anchor's refund report.
  */
 type RecordOutcome = (state: CorridorState, e?: CorridorError) => Promise<void>;
+
+/** The request context to stamp on a run's output, or undefined when there is none. */
+function requestScopeOf(opts: ExecuteOptions): RequestScope | undefined {
+  const { requestId, traceparent } = opts;
+  if (!requestId && !traceparent) return undefined;
+  return { ...(requestId && { requestId }), ...(traceparent && { traceparent }) };
+}
+
+/**
+ * Rebind the injected logger/audit sink to `scope`, leaving every other dep (and
+ * dep identity elsewhere) untouched. Scoping happens once per run rather than at
+ * each emit site, so nothing added later — a new log line, a new verb — can
+ * forget the request id.
+ */
+function withRequestScope(deps: EngineDeps, scope: RequestScope): EngineDeps {
+  return {
+    ...deps,
+    logger: childLogger(deps.logger ?? silentLogger, scope),
+    ...(deps.audit && { audit: scopedAuditSink(deps.audit, scope) }),
+  };
+}
 
 function makeRecordOutcome(
   deps: EngineDeps,
@@ -221,9 +281,14 @@ function makeRecordOutcome(
 export async function execute(
   intent: PaymentIntent,
   corridor: Corridor,
-  deps: EngineDeps,
+  depsIn: EngineDeps,
   opts: ExecuteOptions = {},
 ): Promise<Outcome<RunResult>> {
+  // One request, one scope: when the caller names the request that started this
+  // run, every log line and audit entry below inherits that id — including the
+  // early refusals, which are exactly the ones an operator has to explain.
+  const scope = requestScopeOf(opts);
+  const deps = scope ? withRequestScope(depsIn, scope) : depsIn;
   const store = deps.idempotency ?? new InMemoryIdempotencyStore();
   const now = deps.now ?? (() => Date.now());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -358,6 +423,7 @@ export async function execute(
   const run: StoredRun = {
     idempotencyKey: intent.idempotencyKey,
     corridorId: corridor.id,
+    manifestHash: hashCorridor(corridor),
     state: "created",
     version: 0,
     owner: opts.owner,
@@ -429,8 +495,20 @@ export async function execute(
   });
   const { advance, die, finishFailure } = context;
 
-  const strategies = deps.strategies ?? defaultStrategies(deps.submitter);
   const caps = adapter.capabilities();
+  // When the corridor declares a `receive_asset` different from the bridge
+  // asset, the settle must route through the DEX via pathPaymentStrictSend.
+  // Prefer an explicitly supplied strategy list; otherwise build the path
+  // strategy (or fall back to the default strategies when no factory is
+  // wired, which keeps existing callers working).
+  const receiveAsset = corridor.settlement.receive_asset;
+  const needsPath =
+    receiveAsset !== undefined && receiveAsset !== corridor.settlement.bridge_asset;
+  const strategies =
+    deps.strategies ??
+    (needsPath && deps.pathPaymentStrategy
+      ? [deps.pathPaymentStrategy(deps.submitter)]
+      : defaultStrategies(deps.submitter, adapter));
   const compat = checkCompatibility(corridor, caps, strategies);
   if (!compat.ok) {
     return die({
@@ -633,26 +711,31 @@ export async function execute(
       }
     }
 
+    // --- dry run: the gate passed; stop before any money can move ---------
+    // `die`, not a new terminal state: `failed` already means "nothing was
+    // sent", which is exactly true here, and the breaker treats the code as
+    // neutral (it is not in LANE_FAILURE_CODES).
+    if (opts.dryRun) {
+      const report: DryRunReport = { dryRun: true, checks: gateChecks };
+      return die(
+        {
+          code: "DRY_RUN_COMPLETE",
+          message: `dry run stopped before settling after ${gateChecks.length} pre-settle check(s) passed; anchor transaction ${opened.value.transactionId} was opened and will not be funded`,
+          retryable: false,
+          cause: report,
+        },
+        gateChecks,
+      );
+    }
+
     {
       const t = await advance("settling");
       if (!t.ok) return die(t.error);
     }
 
-    // When the corridor declares a `receive_asset` different from the bridge
-    // asset, the settle must route through the DEX via pathPaymentStrictSend.
-    // Prefer an explicitly supplied strategy list; otherwise build the path
-    // strategy (or fall back to the plain payment strategy when no factory is
-    // wired, which keeps existing callers working).
-    const receiveAsset = corridor.settlement.receive_asset;
-    const needsPath =
-      receiveAsset !== undefined && receiveAsset !== corridor.settlement.bridge_asset;
-    const strategies =
-      deps.strategies ??
-      (needsPath && deps.pathPaymentStrategy
-        ? [deps.pathPaymentStrategy(deps.submitter)]
-        : defaultStrategies(deps.submitter));
     let s: Outcome<SettlementRef>;
-    if (deps.submitter.findExisting) {
+    const instructionsKind = opened.value.instructions?.kind ?? "stellar_payment";
+    if (deps.submitter.findExisting && instructionsKind === "stellar_payment") {
       const req = buildSettlementRequest(opened.value, q.value, corridor);
       const existing = await timed("findExisting", () => deps.submitter.findExisting!(req));
       if (!existing.ok) {
@@ -661,10 +744,14 @@ export async function execute(
       if (existing.value) {
         s = ok(existing.value);
       } else {
-        s = await timed("settle", () => settle(strategies, opened.value, q.value, corridor));
+        s = await timed("settle", () =>
+          settle(strategies, opened.value, q.value, corridor, adapter),
+        );
       }
     } else {
-      s = await timed("settle", () => settle(strategies, opened.value, q.value, corridor));
+      s = await timed("settle", () =>
+        settle(strategies, opened.value, q.value, corridor, adapter),
+      );
     }
     if (!s.ok) {
       const action = recover(corridor, s.error.retryable, attempt);
@@ -680,7 +767,11 @@ export async function execute(
       }
       return finishFailure(s.error);
     }
-    run.stellarTxHash = s.value.stellarTxHash;
+    run.settlementKind = s.value.kind;
+    run.settlementRef = s.value;
+    if (s.value.kind === "stellar") {
+      run.stellarTxHash = s.value.stellarTxHash;
+    }
     const settleReq = settlementRequestFor(opened.value, q.value, corridor);
     run.settlement = {
       to: settleReq.to,
@@ -692,14 +783,16 @@ export async function execute(
     {
       const t = await advance("settled", {
         quoteFee: q.value.fee,
-        networkFee: s.value.feeCharged,
+        networkFee: s.value.kind === "stellar" ? s.value.feeCharged : undefined,
       });
       if (!t.ok) return die(t.error);
     }
 
     // Verify our own payment on-chain before trusting the anchor's word on it.
-    const v = await timed("verify", () => verifyOnChain(deps, s.value, settleReq));
-    if (!v.ok) return finishFailure(v.error);
+    if (s.value.kind === "stellar") {
+      const v = await timed("verify", () => verifyOnChain(deps, s.value, settleReq));
+      if (!v.ok) return finishFailure(v.error);
+    }
 
     // Poll until the anchor confirms payout or we hit the corridor timeout.
     // reconcileUntil returns a non-retryable error, so we never re-settle here.
@@ -783,13 +876,13 @@ function settlementRequestFor(
   };
 }
 
-/** Run the optional chain verifier; a no-op success when none is configured. */
+/** Run the optional chain verifier; a no-op success when none is configured or settlement is non-stellar. */
 async function verifyOnChain(
   deps: EngineDeps,
   ref: SettlementRef,
   req: SettlementRequest,
 ): Promise<Outcome<void>> {
-  if (!deps.chainVerifier) return ok(undefined);
+  if (!deps.chainVerifier || ref.kind !== "stellar") return ok(undefined);
   const r = await deps.chainVerifier(ref, req);
   if (r.ok) return r;
   // Never retry: the payment is already on the chain, resubmitting would double it.
@@ -918,7 +1011,7 @@ function createRunContext(init: RunContextInit): RunContext {
     // Money moved and the anchor itself reports a terminal failure: it is
     // already refunding (SEP-31 `refunds`), so we wait for its report instead of
     // asking the chain to reverse a payment it cannot reverse.
-    if (run.stellarTxHash && run.transactionId && anchorTerminalStatus(error)) {
+    if (hasSettlementRef(run) && run.transactionId && anchorTerminalStatus(error)) {
       run.lastError = `${error.code}: ${error.message}`;
       const pending = await advance("refund_pending");
       if (!pending.ok) return die(pending.error);
@@ -950,41 +1043,61 @@ function createRunContext(init: RunContextInit): RunContext {
     // Only reverse the chain if a payment actually went out. If settlement never
     // succeeded, there is nothing on-chain to undo — the sending anchor returns
     // the sender's funds off-chain — so we just record the refunded state.
+    // If settlement was off-chain (adapter-reported), it cannot be reversed on-chain
+    // by the submitter: escalate to a manual hold rather than falsely claiming refunded.
     // A refund already requested for this run is not requested again. The
     // stored id is the only evidence a resumed process has that it already
     // asked: without this check a crash between the refund and the next write
     // would send the money back twice.
-    if (run.stellarTxHash && !hasRequestedRefund(run)) {
-      if (!run.settlementAmount) {
+    if (hasSettlementRef(run)) {
+      if (run.settlementKind === "adapter" || run.settlementRef?.kind === "adapter") {
         return holdAndStop(
           {
-            code: "SETTLEMENT_FAILED",
-            message: "cannot refund: stored settlement amount is missing",
+            code: "REFUND_UNSUPPORTED",
+            message:
+              "adapter-reported settlement cannot be reversed on-chain; operator review needed",
             retryable: false,
           },
           undefined,
           error,
         );
       }
-      const req: RefundRequest = {
-        original: { stellarTxHash: run.stellarTxHash },
-        amount: {
-          asset: corridor.settlement.bridge_asset,
-          amount: run.settlementAmount,
-        },
-        corridor,
-        reason: `${error.code}: ${error.message}`,
-      };
-      const refund = await deps.submitter.refund(req);
-      // Couldn't reverse the chain payment — escalate to a manual hold.
-      // `error`, not `refund.error`, is what the breaker judges: the refund port
-      // refusing is a design invariant, while `error` is the reconcile/settlement
-      // outage that put us here.
-      if (!refund.ok) return holdAndStop(refund.error, undefined, error);
-      // Recorded before the state advance that persists it, so the very next
-      // write carries the id. Set once and never rewritten — see the coalesce
-      // in PostgresIdempotencyStore.put.
-      run.refundId = refund.value.stellarTxHash;
+      if (!hasRequestedRefund(run)) {
+        if (!run.settlementAmount) {
+          return holdAndStop(
+            {
+              code: "SETTLEMENT_FAILED",
+              message: "cannot refund: stored settlement amount is missing",
+              retryable: false,
+            },
+            undefined,
+            error,
+          );
+        }
+        const originalRef: SettlementRef =
+          run.settlementRef?.kind === "stellar"
+            ? run.settlementRef
+            : { kind: "stellar", stellarTxHash: run.stellarTxHash! };
+        const req: RefundRequest = {
+          original: originalRef,
+          amount: {
+            asset: corridor.settlement.bridge_asset,
+            amount: run.settlementAmount,
+          },
+          corridor,
+          reason: `${error.code}: ${error.message}`,
+        };
+        const refund = await deps.submitter.refund(req);
+        // Couldn't reverse the chain payment — escalate to a manual hold.
+        // `error`, not `refund.error`, is what the breaker judges: the refund port
+        // refusing is a design invariant, while `error` is the reconcile/settlement
+        // outage that put us here.
+        if (!refund.ok) return holdAndStop(refund.error, undefined, error);
+        // Recorded before the state advance that persists it, so the very next
+        // write carries the id. Set once and never rewritten — see the coalesce
+        // in PostgresIdempotencyStore.put.
+        run.refundId = settlementId(refund.value);
+      }
     }
     run.lastError = `${error.code}: ${error.message}`;
     const refunded = await advance("refunded");
@@ -1010,6 +1123,8 @@ function toResult(run: StoredRun, trail: readonly CorridorState[]): RunResult {
     state: run.state,
     transactionId: run.transactionId,
     stellarTxHash: run.stellarTxHash,
+    settlementKind: run.settlementKind,
+    settlementRef: run.settlementRef,
     trail,
   };
 }
@@ -1153,6 +1268,37 @@ async function resumeRun(
     recordOutcome,
   });
 
+  // --- manifest pinning: fail closed if corridor configuration changed ---
+  // A run records the stable hash of the manifest it started with. If the manifest
+  // was edited after the run opened, resuming before settlement would continue
+  // under rules it was never quoted or opened with (new asset issuer, new limits,
+  // new recovery policy, different anchor endpoint).
+  //
+  // If the run has not settled, fail closed with MANIFEST_CHANGED without moving money.
+  // If it already settled, the money is already on-chain, so continue reconcile
+  // only (never re-settle) and log a warning.
+  // Legacy rows without a manifestHash are treated as legacy (allowed to resume).
+  const currentHash = hashCorridor(corridor);
+  const hashMismatch = run.manifestHash !== undefined && run.manifestHash !== currentHash;
+
+  if (hashMismatch) {
+    const hasSettled = run.state === "settled" || run.state === "reconciled";
+    if (!hasSettled) {
+      return context.die({
+        code: "MANIFEST_CHANGED",
+        message: `corridor manifest changed since run opened (${run.manifestHash} !== ${currentHash}); refusing to resume un-settled run`,
+        retryable: false,
+      });
+    }
+    (deps.logger ?? silentLogger).log("warn", "corridor.manifest.changed", {
+      idempotencyKey: run.idempotencyKey,
+      corridorId: corridor.id,
+      recordedManifestHash: run.manifestHash,
+      currentManifestHash: currentHash,
+      message: "manifest changed after settlement; resuming reconcile only",
+    });
+  }
+
   if (run.state === "created" || run.state === "quoted" || run.state === "compliant") {
     return context.die({
       code: "IDEMPOTENCY_CONFLICT",
@@ -1248,33 +1394,44 @@ async function resumeRun(
       if (!submitted.ok) return context.finishFailure(submitted.error);
       ref = submitted.value;
     }
-    run.stellarTxHash = ref.stellarTxHash;
+    run.settlementKind = ref.kind;
+    run.settlementRef = ref;
+    if (ref.kind === "stellar") {
+      run.stellarTxHash = ref.stellarTxHash;
+    }
     run.settlement = {
       to: request.to,
       memo: request.memo,
       memoType: request.memoType,
       amount: request.amount,
     };
-    const settled = await context.advance("settled", { networkFee: ref.feeCharged });
+    const settled = await context.advance("settled", {
+      networkFee: ref.kind === "stellar" ? ref.feeCharged : undefined,
+    });
     if (!settled.ok) return context.die(settled.error);
   }
 
   if (run.state === "settled") {
     if (!run.transactionId) return conflict("settled run has no transactionId");
-    if (deps.chainVerifier) {
+    if (!hasSettlementRef(run)) return conflict("settled run has no settlement reference");
+    if (
+      deps.chainVerifier &&
+      (run.settlementKind === "stellar" || (!run.settlementKind && run.stellarTxHash))
+    ) {
       const saved = run.settlement;
-      if (!saved || !run.stellarTxHash) {
+      const ref =
+        run.settlementRef ??
+        (run.stellarTxHash
+          ? { kind: "stellar" as const, stellarTxHash: run.stellarTxHash }
+          : undefined);
+      if (!saved || !ref || ref.kind !== "stellar") {
         // Written before the request was recorded: nothing to compare against.
         (deps.logger ?? silentLogger).log("warn", "corridor.verify.skipped", {
           idempotencyKey: run.idempotencyKey,
           reason: "run has no recorded settlement request",
         });
       } else {
-        const v = await verifyOnChain(
-          deps,
-          { stellarTxHash: run.stellarTxHash },
-          { ...saved, corridor },
-        );
+        const v = await verifyOnChain(deps, ref, { ...saved, corridor });
         if (!v.ok) {
           // Money moved and the chain disagrees: park for a human, do not fail.
           const held = await context.holdAndStop(v.error);

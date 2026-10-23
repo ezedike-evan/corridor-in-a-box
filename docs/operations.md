@@ -11,6 +11,33 @@ running migrations, and the project's versioning/release policy.
 > Treat this runbook as the plan for a self-run testnet/close-beta pilot, not a
 > claim of production-readiness.
 
+## 0. Adding an anchor to the fleet
+
+`contracts/anchors.json` is the fleet's curated list of anchors. It is **not**
+seeded automatically from the Stellar Anchor Directory (anchors.stellar.org):
+the directory is a human-facing web app with no documented machine-readable
+feed, so every entry is a deliberate, reviewed addition. Never invent a domain —
+every entry must come from the directory or the anchor's own site.
+
+To add an anchor:
+
+1. Find it on [anchors.stellar.org](https://anchors.stellar.org) and open its
+   `stellar.toml` (`https://<home-domain>/.well-known/stellar.toml`).
+2. Record the home domain, the countries and currencies it serves, and the SEPs
+   it claims (`TRANSFER_SERVER_SEP0031`, `ANCHOR_QUOTE_SERVER`, `KYC_SERVER`,
+   `WEB_AUTH_ENDPOINT`).
+3. Add a structured entry to `contracts/anchors.json` with those fields and a
+   `$comment` noting where the data came from and when it was checked.
+4. Run `pnpm test` — the validation test rejects malformed or duplicate entries.
+5. Open a PR. A human reviews the diff; nothing writes the file automatically.
+
+Spell the domain in its canonical form: lowercase letters, digits, dots, and
+hyphens inside a label only — no scheme, no port, no path, no leading or
+trailing `.` or `-`. `contracts/attester` refuses anything else with
+`Error::InvalidDomain`, and `pnpm attest` refuses it before paying for a
+simulation, because the registry keys records by the raw string: `Cowrie.Exchange`
+alongside `cowrie.exchange` is one anchor with two permanent records.
+
 ## 1. Capturing the testnet end-to-end run
 
 Endpoints of one production anchor were probed live, and the full money-moving
@@ -278,6 +305,31 @@ whether it reached `completed`.
 - `4`: Stack unfit (`doctor` check failed)
 - `5`: Not completed (payment failed or did not reach `completed`)
 
+### `corridor canary --dry-run` — everything up to the gate, no payment
+
+```bash
+CORRIDOR_SIGNER_SECRET=S… corridor canary <file.corridor.yaml> --amount 1.00 --dry-run
+```
+
+Runs SEP-10 auth, the SEP-38 quote, SEP-12 KYC, the SEP-31 open and every
+pre-settle gate check against the real anchor, then stops before `settling`.
+`SettlementSubmitter.submit()` is never called, so no money moves. The same
+switch is `execute(intent, corridor, deps, { dryRun: true })` in code and
+`--dry-run` on `pnpm example` / `pnpm testnet`.
+
+- A dry run that passes the gate ends in `failed` with `DRY_RUN_COMPLETE` and
+  exits `0`. Its gate results are on the `verifying` and `failed` audit entries.
+  A gate refusal ends with that check's `PRESETTLE_*` code and exits `5`, as a
+  real run would.
+- `DRY_RUN_COMPLETE` is not a lane failure: it never counts toward the circuit
+  breaker.
+- The idempotency key is spent. Use a new key for the real payment.
+- The receiving anchor is left holding an opened SEP-31 transaction that is
+  never funded. Nothing needs cleaning up on our side: the anchor expires it
+  under its own policy. Expect it to appear in the anchor's dashboard as
+  `pending_sender` until then.
+- `--dry-run` cannot be combined with `--write`: a dry run earns no proof.
+
 ## 2. Recovering a stuck payment
 
 The engine drives recovery automatically per the manifest's `recovery.rollback`
@@ -401,6 +453,10 @@ attempt before the native payment operation was submitted. Resolve the cause,
 then retry with a new key. Never bypass a failed gate by calling the submitter
 directly.
 
+A `failed` run with `DRY_RUN_COMPLETE` is not an incident: it was started with
+`dryRun: true`, passed the gate, and stopped before settling as asked (see
+`corridor canary --dry-run` above).
+
 | Code                              | Meaning                                                             | Operator action                                                                  |
 | --------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `PRESETTLE_ANCHOR_DRIFT`          | Live `/info` or `stellar.toml` no longer matches what was verified. | Re-verify the anchor and update the manifest before retrying.                    |
@@ -497,6 +553,42 @@ fail every payment on a missing table. The schema is intentionally tiny
 The `version` column carries optimistic concurrency — never edit it by hand. Any
 future schema change ships as an additive migration with a CHANGELOG entry.
 
+### The audit table is append-only
+
+`migrate()` also creates `corridor_audit`, the durable trail written by
+`PostgresAuditSink` (`packages/engine/src/audit-pg.ts`): one row per state
+transition. `examples/run-service.ts` uses it whenever `DATABASE_URL` is set. A
+retried write of the same transition is ignored, because of a unique key on
+`(idempotency_key, version, to_state)`.
+
+The code never updates or deletes an audit row. Make the database enforce that
+too. Run `migrate()` as the role that owns the tables, and run the service as a
+separate role that can only read and append to `corridor_audit`:
+
+```sql
+-- once, as the table owner, after migrate()
+create role corridor_service login password '…';
+grant select, insert, update on corridor_runs, corridor_resolutions, corridor_breakers
+  to corridor_service;
+grant select, insert on corridor_audit to corridor_service; -- no UPDATE, DELETE or TRUNCATE
+grant usage on sequence corridor_audit_id_seq to corridor_service;
+```
+
+Don't run the service as the table owner: an owner can always update or
+delete its own rows. `tests/integration/audit-pg.test.ts` checks that a role
+granted only `SELECT`/`INSERT` is refused both.
+
+To read a payment's trail, use `PostgresAuditSink.listAudit(idempotencyKey)`.
+It returns the entries oldest first.
+
+**When an audit write fails.** `record()` throws and `execute()` stops right
+there. By that point the run's new state is already saved, so the payment
+halts before its next step (it never moves money without an audit record) and
+resumes from the saved state later. The transition whose write failed is not
+recorded again on resume. It shows up as a missing `version` in that payment's
+`listAudit()` output, so a gap in the versions means an audit write failed,
+not that a step was skipped.
+
 ## 5. Scaling notes (before multi-replica)
 
 - The service's **rate limiter and in-memory idempotency store are per-process**.
@@ -562,9 +654,18 @@ terminal counter — they catch money that stopped needing a human (see §2):
 ```
 
 Useful companion series: `corridor_transition{to=…}` (throughput per state),
-`corridor_breaker_refused{corridor=…}`, and
-`corridor_verb_<verb>_ms_*` (per-verb latency summary), and `corridor_duration_ms_*`
-(end-to-end). Treat a rising `held`/`failed` rate as the page-worthy signal.
+`corridor_breaker_refused{corridor=…}`, and the timing histograms
+`corridor_verb_<verb>_seconds` (per-verb latency) and
+`corridor_duration_seconds` (end-to-end). Timing observations are converted from
+milliseconds to seconds; old `_ms_count`/`_ms_sum` samples are replaced by
+histogram `_bucket`, `_sum`, and `_count` samples. Use `histogram_quantile()` for
+latency percentiles, for example:
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(corridor_verb_settle_seconds_bucket[5m])))
+```
+
+Treat a rising `held`/`failed` rate as the page-worthy signal.
 
 The Alerting port is the integration seam for paging: inject an implementation
 that turns breaker trips, `CORRIDOR_HALTED`, and held refunds into the team's

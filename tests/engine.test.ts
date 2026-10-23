@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { parseCorridor, type Corridor } from "@corridor/manifest";
+import { parseCorridor, hashCorridor, type Corridor } from "@corridor/manifest";
 import { createMockAdapter, type OpenTransaction } from "@corridor/adapter-kit";
 import { StaticRouteResolver } from "@corridor/router";
 import { amountRangeCheck } from "@corridor/sep31";
@@ -25,7 +25,7 @@ import {
   type PathPaymentFinder,
 } from "@corridor/engine";
 import type { TransactionStatus } from "@corridor/adapter-kit";
-import { fail, ok, type Outcome, type PaymentIntent } from "@corridor/types";
+import { fail, ok, type Outcome, type PaymentIntent, settlementId } from "@corridor/types";
 
 function corridor(): Corridor {
   const r = parseCorridor({
@@ -154,10 +154,10 @@ describe("engine.execute", () => {
     const submitter: SettlementSubmitter = {
       async submit() {
         submitCalled = true;
-        return ok({ stellarTxHash: "hash", ledger: 1 });
+        return ok({ kind: "stellar", stellarTxHash: "hash", ledger: 1 });
       },
       async refund() {
-        return ok({ stellarTxHash: "refund-hash", ledger: 2 });
+        return ok({ kind: "stellar", stellarTxHash: "refund-hash", ledger: 2 });
       },
     };
     const store = new InMemoryIdempotencyStore();
@@ -223,7 +223,11 @@ describe("engine.execute", () => {
 
   it("reuses an existing on-chain settlement without calling submit()", async () => {
     let submitCalls = 0;
-    const existingRef = { stellarTxHash: "existing-tx-hash-123", ledger: 777 };
+    const existingRef = {
+      kind: "stellar" as const,
+      stellarTxHash: "existing-tx-hash-123",
+      ledger: 777,
+    };
     const submitter = createMockSubmitter({ existingRef });
     const originalSubmit = submitter.submit;
     submitter.submit = async (req) => {
@@ -346,10 +350,10 @@ describe("engine pre-settle gate", () => {
     const submitter: SettlementSubmitter = {
       async submit() {
         submitCalls++;
-        return ok({ stellarTxHash: "tx-123", ledger: 100 });
+        return ok({ kind: "stellar", stellarTxHash: "tx-123", ledger: 100 });
       },
       async refund() {
-        return ok({ stellarTxHash: "refund-123", ledger: 101 });
+        return ok({ kind: "stellar", stellarTxHash: "refund-123", ledger: 101 });
       },
     };
 
@@ -399,10 +403,10 @@ describe("engine pre-settle gate", () => {
     const submitter: SettlementSubmitter = {
       async submit() {
         submitCalls++;
-        return ok({ stellarTxHash: "tx-123", ledger: 100 });
+        return ok({ kind: "stellar", stellarTxHash: "tx-123", ledger: 100 });
       },
       async refund() {
-        return ok({ stellarTxHash: "refund-123", ledger: 101 });
+        return ok({ kind: "stellar", stellarTxHash: "refund-123", ledger: 101 });
       },
     };
     const c = corridor();
@@ -442,7 +446,7 @@ describe("engine pre-settle gate", () => {
         return fail("SETTLEMENT_FAILED", "transient network error", { retryable: true });
       },
       async refund() {
-        return ok({ stellarTxHash: "refund-123", ledger: 101 });
+        return ok({ kind: "stellar", stellarTxHash: "refund-123", ledger: 101 });
       },
     };
 
@@ -504,10 +508,10 @@ describe("engine pre-settle gate", () => {
     const submitter: SettlementSubmitter = {
       async submit() {
         submitCalled = true;
-        return ok({ stellarTxHash: "tx-123", ledger: 100 });
+        return ok({ kind: "stellar", stellarTxHash: "tx-123", ledger: 100 });
       },
       async refund() {
-        return ok({ stellarTxHash: "refund-123", ledger: 101 });
+        return ok({ kind: "stellar", stellarTxHash: "refund-123", ledger: 101 });
       },
     };
 
@@ -692,7 +696,11 @@ describe("engine crash resume states", () => {
         amount: { asset: "USDC", amount: "100.00" },
         corridor: corridor(),
       });
+      expect(existingPayment.ok).toBe(true);
       if (!existingPayment.ok) throw new Error("mock settlement did not succeed");
+      expect(existingPayment.value.kind).toBe("stellar");
+      if (existingPayment.value.kind !== "stellar")
+        throw new Error("expected stellar settlement");
       await store.put({ ...resumableRun(state, key), stellarTxHash: undefined });
       const r = await execute(intent(key), corridor(), {
         ...deps(),
@@ -775,6 +783,109 @@ describe("engine crash resume states", () => {
     expect((await store.get(key))?.state).toBe("refunded");
     expect((await store.get(key))?.refundId).toBeTruthy();
   });
+
+  describe("manifest pinning on crash resume", () => {
+    it("resumes normally when the manifest hash is unchanged", async () => {
+      const store = new InMemoryIdempotencyStore();
+      const key = "resume-hash-unchanged";
+      const c = corridor();
+      const hash = hashCorridor(c);
+      await store.put({
+        ...resumableRun("settled", key),
+        manifestHash: hash,
+      });
+
+      const r = await execute(intent(key), c, { ...deps(), idempotency: store });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+    });
+
+    it("fails with MANIFEST_CHANGED before settle and does not submit payment", async () => {
+      const store = new InMemoryIdempotencyStore();
+      const key = "resume-hash-changed-before-settle";
+      const c = corridor();
+      let submitted = false;
+      const submitter = createMockSubmitter();
+      const origSubmit = submitter.submit.bind(submitter);
+      submitter.submit = async (req) => {
+        submitted = true;
+        return origSubmit(req);
+      };
+
+      // Run crashed in 'opened' state under an old manifest hash
+      await store.put({
+        ...resumableRun("opened", key),
+        stellarTxHash: undefined,
+        manifestHash: "old_manifest_hash_that_differed_from_current",
+      });
+
+      const r = await execute(intent(key), c, {
+        ...deps(),
+        submitter,
+        idempotency: store,
+      });
+
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error.code).toBe("MANIFEST_CHANGED");
+        expect(r.error.message).toContain("corridor manifest changed since run opened");
+      }
+      // Submitter must never have been called: money must not move!
+      expect(submitted).toBe(false);
+      expect((await store.get(key))?.state).toBe("failed");
+    });
+
+    it("continues reconcile only and logs a warning when manifest changed after settle", async () => {
+      const store = new InMemoryIdempotencyStore();
+      const key = "resume-hash-changed-after-settle";
+      const c = corridor();
+      let submitted = false;
+      const submitter = createMockSubmitter();
+      submitter.submit = async () => {
+        submitted = true;
+        throw new Error("should not be called");
+      };
+
+      const warnings: { msg: string; fields?: Record<string, unknown> }[] = [];
+      const logger = {
+        log: (level: string, msg: string, fields?: Record<string, unknown>) => {
+          if (level === "warn") warnings.push({ msg, fields });
+        },
+      };
+
+      // Run crashed in 'settled' state under an old manifest hash
+      await store.put({
+        ...resumableRun("settled", key),
+        manifestHash: "old_manifest_hash_that_differs",
+      });
+
+      const r = await execute(intent(key), c, {
+        ...deps(),
+        submitter,
+        idempotency: store,
+        logger,
+      });
+
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+      expect(submitted).toBe(false);
+      expect(warnings.some((w) => w.msg === "corridor.manifest.changed")).toBe(true);
+    });
+
+    it("allows legacy runs without a manifest hash to resume (backward compatibility)", async () => {
+      const store = new InMemoryIdempotencyStore();
+      const key = "resume-legacy-no-hash";
+      const c = corridor();
+      await store.put({
+        ...resumableRun("settled", key),
+        manifestHash: undefined,
+      });
+
+      const r = await execute(intent(key), c, { ...deps(), idempotency: store });
+      expect(r.ok).toBe(true);
+      expect((await store.get(key))?.state).toBe("completed");
+    });
+  });
 });
 
 // Helper: build a corridor with custom recovery policy / timeout.
@@ -839,7 +950,7 @@ describe("engine recovery", () => {
       submitter: {
         submit: base.submit,
         refund: async (req) => {
-          refunded.push(req.original.stellarTxHash);
+          refunded.push(settlementId(req.original));
           return base.refund(req);
         },
       },
@@ -1130,7 +1241,7 @@ describe("engine recovery", () => {
       submitter: {
         submit: base.submit,
         refund: async (req) => {
-          refunded.push(req.original.stellarTxHash);
+          refunded.push(settlementId(req.original));
           return base.refund(req);
         },
       },
@@ -1191,7 +1302,7 @@ describe("engine recovery", () => {
       submitter: {
         submit: base.submit,
         refund: async (req) => {
-          refunded.push(req.original.stellarTxHash);
+          refunded.push(settlementId(req.original));
           return base.refund(req);
         },
       },
@@ -1571,7 +1682,7 @@ function refundHarness(
   const submitter: SettlementSubmitter = {
     submit: base.submit,
     async refund(req) {
-      refundCalls.push({ stellarTxHash: req.original.stellarTxHash, reason: req.reason });
+      refundCalls.push({ stellarTxHash: settlementId(req.original), reason: req.reason });
       if (opts.refundError) {
         return fail("SETTLEMENT_FAILED", opts.refundError, { retryable: false });
       }
@@ -1961,6 +2072,7 @@ describe("Quote fee and settlement amount validation", () => {
     const submitter: SettlementSubmitter = {
       submit: async () =>
         ok({
+          kind: "stellar",
           stellarTxHash: "tx-fee-hash",
           ledger: 12345,
           feeCharged: "100",
@@ -1999,7 +2111,7 @@ describe("engine chain verifier", () => {
       {
         ...h.deps,
         chainVerifier: async (ref, req) => {
-          seen.push({ to: req.to, amount: req.amount.amount, hash: ref.stellarTxHash });
+          seen.push({ to: req.to, amount: req.amount.amount, hash: settlementId(ref) });
           return ok(undefined);
         },
       },
@@ -2194,7 +2306,7 @@ describe("pre-settle gate enforcement", () => {
         if (submitCalls === 1) {
           return fail("SETTLEMENT_FAILED", "transient failure", { retryable: true });
         }
-        return ok({ stellarTxHash: "0xabc", anchorTxId: "tx-123" });
+        return ok({ kind: "stellar", stellarTxHash: "0xabc", anchorTxId: "tx-123" });
       },
       refund: async () => fail("SETTLEMENT_FAILED", "not reached", { retryable: false }),
     };
@@ -2214,6 +2326,158 @@ describe("pre-settle gate enforcement", () => {
     expect(submitCalls).toBe(2);
     // Gate was evaluated before first settle and re-evaluated before retry settle
     expect(gateEvaluations).toBe(2);
+  });
+});
+
+describe("engine dry run", () => {
+  const passingGate: PreSettleGate = {
+    evaluate: async () => ({
+      passed: true,
+      results: [
+        { name: "anchor.drift", passed: true, detail: "toml unchanged", durationMs: 2 },
+        {
+          name: "chain.balance",
+          passed: true,
+          detail: "balance covers amount",
+          durationMs: 3,
+        },
+      ],
+    }),
+  };
+
+  function harness(gate: PreSettleGate = passingGate) {
+    const calls = { submit: 0, findExisting: 0 };
+    const submitter: SettlementSubmitter = {
+      submit: async () => {
+        calls.submit++;
+        return ok({ kind: "stellar", stellarTxHash: "0xshould-not-exist" });
+      },
+      findExisting: async () => {
+        calls.findExisting++;
+        return ok(undefined);
+      },
+      refund: async () => fail("SETTLEMENT_FAILED", "not reached", { retryable: false }),
+    };
+    const store = new InMemoryIdempotencyStore();
+    const audit = new InMemoryAuditLog();
+    const health = new InMemoryCorridorHealthStore();
+    const deps: EngineDeps = {
+      resolver: new StaticRouteResolver(() => createMockAdapter(), {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      idempotency: store,
+      audit,
+      health,
+      trustManifestWithoutAttestation: true,
+      gate,
+    };
+    return { deps, calls, store, audit, health };
+  }
+
+  it("stops after the gate without ever calling submit() or findExisting()", async () => {
+    const h = harness();
+    const r = await execute(intent("dry-1"), corridor(), h.deps, { dryRun: true });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("DRY_RUN_COMPLETE");
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.cause).toEqual({
+        dryRun: true,
+        checks: [
+          expect.objectContaining({ name: "anchor.drift", passed: true }),
+          expect.objectContaining({ name: "chain.balance", passed: true }),
+        ],
+      });
+    }
+    expect(h.calls).toEqual({ submit: 0, findExisting: 0 });
+
+    const stored = await h.store.get("dry-1");
+    expect(stored?.state).toBe("failed");
+    expect(stored?.lastError).toMatch(/^DRY_RUN_COMPLETE: /);
+    expect(stored?.transactionId).toBeDefined();
+    expect(stored?.stellarTxHash).toBeUndefined();
+  });
+
+  it("records every gate check result in the audit trail and never enters settling", async () => {
+    const h = harness();
+    await execute(intent("dry-2"), corridor(), h.deps, { dryRun: true });
+
+    expect(h.audit.entries.map((e) => e.to)).toEqual([
+      "quoted",
+      "compliant",
+      "opened",
+      "verifying",
+      "failed",
+    ]);
+    const names = ["anchor.drift", "chain.balance"];
+    const verifying = h.audit.entries.find((e) => e.to === "verifying");
+    expect(verifying?.checks?.map((c) => c.name)).toEqual(names);
+    const terminal = h.audit.entries.find((e) => e.to === "failed");
+    expect(terminal?.error).toMatch(/^DRY_RUN_COMPLETE: /);
+    expect(terminal?.checks?.map((c) => c.name)).toEqual(names);
+  });
+
+  it("does not count against the corridor's circuit breaker", async () => {
+    const h = harness();
+    for (const key of ["dry-b1", "dry-b2", "dry-b3", "dry-b4"]) {
+      await execute(intent(key), corridor(), h.deps, { dryRun: true });
+    }
+    const row = await h.health.get("test");
+    expect(row?.state ?? "closed").toBe("closed");
+    expect(row?.consecutiveFailures ?? 0).toBe(0);
+  });
+
+  it("ends with the gate's own refusal when a check fails", async () => {
+    const h = harness({
+      evaluate: async () => ({
+        passed: false,
+        results: [
+          {
+            name: "chain.balance",
+            passed: false,
+            detail: "balance too low",
+            code: "PRESETTLE_INSUFFICIENT_FUNDS",
+            durationMs: 1,
+          },
+        ],
+      }),
+    });
+    const r = await execute(intent("dry-3"), corridor(), h.deps, { dryRun: true });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("PRESETTLE_INSUFFICIENT_FUNDS");
+    expect(h.calls.submit).toBe(0);
+    const verifying = h.audit.entries.find((e) => e.to === "verifying");
+    expect(verifying?.checks?.[0]).toMatchObject({ name: "chain.balance", passed: false });
+  });
+
+  it("spends the idempotency key so a later real run cannot reuse it", async () => {
+    const h = harness();
+    await execute(intent("dry-4"), corridor(), h.deps, { dryRun: true });
+    const replay = await execute(intent("dry-4"), corridor(), h.deps);
+
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.error.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(h.calls.submit).toBe(0);
+  });
+
+  it("still stops before settling when the gate is explicitly skipped", async () => {
+    const h = harness();
+    const { gate: _gate, ...rest } = h.deps;
+    const r = await execute(
+      intent("dry-5"),
+      corridor(),
+      { ...rest, unsafeSkipPreSettleGate: true },
+      { dryRun: true },
+    );
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("DRY_RUN_COMPLETE");
+    expect(h.calls.submit).toBe(0);
+    const verifying = h.audit.entries.find((e) => e.to === "verifying");
+    expect(verifying?.checks?.[0].name).toBe("gate.skipped");
   });
 });
 
@@ -2245,6 +2509,7 @@ describe("SettlementStrategy", () => {
     // Spy to verify the correct strategy's settle() was called.
     const spySettle = vi.fn().mockResolvedValue(
       ok({
+        kind: "stellar",
         stellarTxHash: "spy000000000000000000000000000000000000000000000000000000000001",
         ledger: 1,
       }),
@@ -2604,5 +2869,235 @@ describe("engine adapter capabilities compatibility (#188)", () => {
       expect(r.value.state).toBe("completed");
       expect(r.value.trail).toContain("compliant");
     }
+  });
+});
+
+describe("adapter-reported (off-chain) settlement (#186)", () => {
+  it("mock adapter with adapter_settled instructions reaches completed with no submitter call", async () => {
+    let submitCalled = false;
+    let findExistingCalled = false;
+    const submitter: SettlementSubmitter = {
+      async submit() {
+        submitCalled = true;
+        return ok({ kind: "stellar", stellarTxHash: "stellar-tx-should-not-be-called" });
+      },
+      async findExisting() {
+        findExistingCalled = true;
+        return ok(undefined);
+      },
+      async refund() {
+        return fail("SETTLEMENT_FAILED", "not reached", { retryable: false });
+      },
+    };
+
+    const confirmSettlementSpy = vi.fn().mockResolvedValue(
+      ok({
+        kind: "adapter" as const,
+        reference: "otc_ref_98765",
+        reportedAt: 1700000000000,
+      }),
+    );
+
+    const adapter = createMockAdapter({
+      instructions: { kind: "adapter_settled", reference: "otc_ref_98765" },
+    });
+    adapter.confirmSettlement = confirmSettlementSpy;
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => adapter, {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      idempotency: new InMemoryIdempotencyStore(),
+      trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
+    };
+
+    const r = await execute(intent("adapter-settled-1"), corridor(), d);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+
+    expect(r.value.state).toBe("completed");
+    expect(r.value.settlementKind).toBe("adapter");
+    expect(r.value.settlementRef).toEqual({
+      kind: "adapter",
+      reference: "otc_ref_98765",
+      reportedAt: 1700000000000,
+    });
+    expect(r.value.stellarTxHash).toBeUndefined();
+    expect(confirmSettlementSpy).toHaveBeenCalledOnce();
+    expect(submitCalled).toBe(false);
+    expect(findExistingCalled).toBe(false);
+  });
+
+  it("resume from settled with an adapter settlement ref re-polls and does not re-settle", async () => {
+    let submitCalled = false;
+    let findExistingCalled = false;
+    const submitter: SettlementSubmitter = {
+      async submit() {
+        submitCalled = true;
+        return ok({ kind: "stellar", stellarTxHash: "should-not-be-called" });
+      },
+      async findExisting() {
+        findExistingCalled = true;
+        return ok(undefined);
+      },
+      async refund() {
+        return fail("SETTLEMENT_FAILED", "not reached", { retryable: false });
+      },
+    };
+
+    const confirmSettlementSpy = vi.fn().mockResolvedValue(
+      ok({
+        kind: "adapter" as const,
+        reference: "ref_confirm_should_not_be_called",
+        reportedAt: Date.now(),
+      }),
+    );
+
+    const adapter = createMockAdapter();
+    adapter.confirmSettlement = confirmSettlementSpy;
+    let pollCount = 0;
+    const origGetTransaction = adapter.getTransaction.bind(adapter);
+    adapter.getTransaction = async (txId) => {
+      pollCount++;
+      return origGetTransaction(txId);
+    };
+
+    const store = new InMemoryIdempotencyStore();
+    const key = "resume-adapter-settled";
+    await store.put({
+      idempotencyKey: key,
+      corridorId: "test",
+      state: "settled",
+      version: 4,
+      transactionId: "tx_adapter_resume",
+      quoteId: "q_adapter_resume",
+      quoteExpiresAt: Date.now() + 60_000,
+      quoteFirm: true,
+      settlementAmount: "100.00",
+      settlementKind: "adapter",
+      settlementRef: {
+        kind: "adapter",
+        reference: "otc_ref_existing",
+        reportedAt: 1600000000000,
+      },
+    });
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => adapter, {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      idempotency: store,
+      trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
+    };
+
+    const r = await execute(intent(key), corridor(), d);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+
+    expect(r.value.state).toBe("completed");
+    expect(r.value.settlementKind).toBe("adapter");
+    expect(r.value.settlementRef).toEqual({
+      kind: "adapter",
+      reference: "otc_ref_existing",
+      reportedAt: 1600000000000,
+    });
+    expect(r.value.stellarTxHash).toBeUndefined();
+
+    // Re-polled via getTransaction
+    expect(pollCount).toBeGreaterThanOrEqual(1);
+    // Did NOT re-settle:
+    expect(confirmSettlementSpy).not.toHaveBeenCalled();
+    expect(submitCalled).toBe(false);
+    expect(findExistingCalled).toBe(false);
+
+    const persisted = await store.get(key);
+    expect(persisted?.state).toBe("completed");
+    expect(persisted?.settlementKind).toBe("adapter");
+    expect(persisted?.settlementRef).toEqual({
+      kind: "adapter",
+      reference: "otc_ref_existing",
+      reportedAt: 1600000000000,
+    });
+  });
+
+  it("failure after an adapter settlement ends in held, not refunded", async () => {
+    let t = 0;
+    const adapter = createMockAdapter({
+      settled: false,
+      instructions: { kind: "adapter_settled", reference: "otc_ref_fail" },
+      confirmSettlementResult: ok({
+        kind: "adapter",
+        reference: "otc_ref_fail",
+        reportedAt: 1700000000000,
+      }),
+    });
+    let submitCalled = false;
+    let refundCalled = false;
+    const submitter: SettlementSubmitter = {
+      async submit() {
+        submitCalled = true;
+        return fail("SETTLEMENT_FAILED", "unexpected submit", { retryable: false });
+      },
+      async refund() {
+        refundCalled = true;
+        return fail("SETTLEMENT_FAILED", "unexpected refund", { retryable: false });
+      },
+    };
+    const store = new InMemoryIdempotencyStore();
+    const audit = new InMemoryAuditLog();
+    const key = "adapter-settled-timeout";
+
+    const d: EngineDeps = {
+      resolver: new StaticRouteResolver(() => adapter, {
+        trustManifestWithoutAttestation: true,
+      }),
+      submitter,
+      idempotency: store,
+      audit,
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      reconcilePollMs: 500,
+      trustManifestWithoutAttestation: true,
+      unsafeSkipPreSettleGate: true,
+    };
+
+    const r = await execute(
+      intent(key),
+      corridorWith({ max_retries: 0, timeout_seconds: 1, rollback: "refund_sender" }),
+      d,
+    );
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("REFUND_UNSUPPORTED");
+    }
+
+    const persisted = await store.get(key);
+    expect(persisted?.state).toBe("held");
+    expect(persisted?.state).not.toBe("refunded");
+    expect(persisted?.settlementKind).toBe("adapter");
+    expect(persisted?.settlementRef).toEqual({
+      kind: "adapter",
+      reference: "otc_ref_fail",
+      reportedAt: expect.any(Number),
+    });
+    expect(persisted?.lastError).toContain("REFUND_UNSUPPORTED");
+
+    // The audit trail confirms we stepped into recovering, then held (not refunded)
+    const trail = audit.entries.map((e) => e.to);
+    expect(trail).toContain("settled");
+    expect(trail).toContain("recovering");
+    expect(trail).toContain("held");
+    expect(trail).not.toContain("refunded");
+
+    // No submitter calls were made
+    expect(submitCalled).toBe(false);
+    expect(refundCalled).toBe(false);
   });
 });

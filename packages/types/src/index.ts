@@ -18,6 +18,7 @@ export const isErr = <T, E>(o: Outcome<T, E>): o is Err<E> => !o.ok;
 
 export type CorridorErrorCode =
   | "MANIFEST_INVALID"
+  | "MANIFEST_CHANGED"
   | "CAPABILITY_MISMATCH"
   | "AMOUNT_INVALID"
   | "ENGINE_MISCONFIGURED"
@@ -55,7 +56,14 @@ export type CorridorErrorCode =
    * caller's fault and not retryable - retrying the same payment would fail
    * the same way until someone looks at why the lane stopped settling.
    */
-  | "CORRIDOR_HALTED";
+  | "CORRIDOR_HALTED"
+  /**
+   * Not a failure of the lane: a run started with `dryRun: true` passed every
+   * pre-settle gate check and stopped there, as asked, without submitting the
+   * settle payment. The run is persisted as `failed` so its key cannot later
+   * be reused to move money.
+   */
+  | "DRY_RUN_COMPLETE";
 
 /**
  * Returns true if the error code is a pre-settle gate check refusal.
@@ -148,6 +156,30 @@ export interface PaymentIntent {
    * goes to the anchor through SEP-12, never through here.
    */
   readonly destinationFields?: Readonly<Record<string, string>>;
+}
+
+// --- Settlement references ----------------------------------------------
+export type SettlementRef =
+  | {
+      readonly kind: "stellar";
+      readonly stellarTxHash: string;
+      readonly ledger?: number;
+      /** Network fee actually charged, in stroops, as Horizon's `fee_charged` reports it. */
+      readonly feeCharged?: string;
+      /** Stellar claimable balance id (when created via createClaimableBalance). */
+      readonly claimableBalanceId?: string;
+    }
+  | {
+      readonly kind: "adapter";
+      readonly reference: string;
+      readonly reportedAt: number;
+    };
+
+export function settlementId(ref: SettlementRef): string {
+  if (ref.kind === "adapter") {
+    return ref.reference;
+  }
+  return ref.stellarTxHash;
 }
 
 // --- Decimal-safe money math ---------------------------------------------

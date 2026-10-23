@@ -7,12 +7,21 @@
 // InMemoryIdempotencyStore is for tests/examples. In production back this with
 // Postgres (a row per idempotencyKey, optimistic concurrency on `version`).
 
-import type { Money } from "@corridor/types";
+import type { Money, SettlementRef } from "@corridor/types";
 import type { CorridorState } from "./state";
 
 export interface StoredRun {
   readonly idempotencyKey: string;
   readonly corridorId: string;
+  /**
+   * SHA-256 hash of the validated corridor manifest under which the run started.
+   * On crash resume, the engine compares this to the current manifest hash:
+   * if changed before settlement, it fails closed with MANIFEST_CHANGED;
+   * if changed after settlement, it reconciles only and logs a warning.
+   * Undefined on legacy runs created before this field existed (which are
+   * permitted to resume under legacy behavior).
+   */
+  manifestHash?: string;
   state: CorridorState;
   version: number;
   transactionId?: string;
@@ -21,6 +30,8 @@ export interface StoredRun {
   quoteFirm?: boolean;
   settlementAmount?: string;
   stellarTxHash?: string;
+  settlementKind?: "stellar" | "adapter";
+  settlementRef?: SettlementRef;
   depositAddress?: string;
   memo?: string;
   memoType?: "text" | "hash" | "id";
@@ -90,6 +101,18 @@ export interface ListRunsOptions {
  */
 export function hasRequestedRefund(run: Pick<StoredRun, "refundId">): boolean {
   return run.refundId !== undefined && run.refundId !== "";
+}
+
+/**
+ * True when the run has recorded a settlement reference (on-chain or off-chain).
+ */
+export function hasSettlementRef(
+  run: Pick<StoredRun, "settlementRef" | "stellarTxHash">,
+): boolean {
+  return (
+    run.settlementRef !== undefined ||
+    (run.stellarTxHash !== undefined && run.stellarTxHash !== "")
+  );
 }
 
 export interface IdempotencyStore {

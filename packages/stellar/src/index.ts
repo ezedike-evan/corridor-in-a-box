@@ -9,9 +9,12 @@
 // SEP-31 settlement is a single payment (or path payment) to the receiving
 // anchor's deposit address — no smart contract involved.
 
+import { createHash } from "node:crypto";
 import {
   Asset,
   BASE_FEE,
+  Claimant,
+  getClaimableBalanceIdFromResult,
   Horizon,
   Keypair,
   Memo,
@@ -33,17 +36,22 @@ import {
   toScaled,
   type Outcome,
 } from "@corridor/types";
-import type {
-  ChainVerifier,
-  CheckResult,
-  GateCheck,
-  GateContext,
-  RefundRequest,
-  SettlementRef,
-  SettlementRequest,
-  SettlementSubmitter,
+import {
+  buildSettlementRequest,
+  type ChainVerifier,
+  type CheckResult,
+  type DepositInstructionsKind,
+  type GateCheck,
+  type GateContext,
+  type RefundRequest,
+  type SettlementRef,
+  settlementId,
+  type SettlementRequest,
+  type SettlementStrategy,
+  type SettlementStrategyContext,
+  type SettlementSubmitter,
 } from "@corridor/engine";
-import type { Sep10Signer } from "@corridor/sep31";
+import type { Sep10Signer } from "@corridor/adapter-kit";
 
 function passphraseFor(network: "public" | "testnet"): string {
   return network === "public" ? Networks.PUBLIC : Networks.TESTNET;
@@ -123,6 +131,9 @@ export class LocalKeypairSigner implements ExternalSigner {
   }
 }
 
+export { assertSignerProducesValidSignatures } from "./signers/conformance";
+export { VaultTransitSigner, type VaultTransitSignerOptions } from "./signers/vault-transit";
+
 function isKeypair(s: ExternalSigner | Keypair): s is Keypair {
   // Keypair exposes publicKey() as a method; ExternalSigner as a string property.
   return typeof (s as { publicKey: unknown }).publicKey === "function";
@@ -191,6 +202,134 @@ export interface StellarSubmitterOptions {
   /** Injectable clock/sleep for tests. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Networks this submitter may settle on. **Default `["testnet"]`** — moving
+   * real money has to be a decision, not a manifest typo. A corridor whose
+   * `settlement.network` is not listed is refused before the account is loaded
+   * and before anything is signed.
+   *
+   * Set `["testnet", "public"]` (or `["public"]`) deliberately: this is the
+   * guard that used to live only in the example launchers, which an embedder
+   * using the library directly never inherited.
+   */
+  allowedNetworks?: readonly StellarNetwork[];
+  /**
+   * Permit a `LocalKeypairSigner` (an in-process seed, including one built from
+   * `signerSecret`) to sign on the public network. Default `false`: per
+   * docs/key-management.md the mainnet seed belongs in a KMS/HSM, so a dev key
+   * must not be able to move mainnet funds even after `allowedNetworks` says the
+   * network is fine.
+   */
+  allowLocalSignerOnMainnet?: boolean;
+  /**
+   * Test seam for the Horizon-root check (see `allowedNetworks`). Called once,
+   * lazily, to read the endpoint's `network_passphrase`.
+   *
+   * Defaults to a real fetch against `horizonUrl` — and is skipped entirely when
+   * `horizonServer` is injected without one, because a fake server means the URL
+   * is not the transport actually talking to.
+   */
+  fetchHorizonRoot?: (url: string) => Promise<HorizonRoot>;
+}
+
+/** The networks a corridor manifest can name, and a submitter can be allowed on. */
+export type StellarNetwork = "public" | "testnet";
+
+/** The part of Horizon's root resource this package reads. */
+export interface HorizonRoot {
+  readonly network_passphrase?: string;
+}
+
+/** Read the root resource of a real Horizon endpoint over HTTP. */
+async function defaultFetchHorizonRoot(url: string): Promise<HorizonRoot> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as HorizonRoot;
+}
+
+class AsyncLock {
+  private lock: Promise<void> = Promise.resolve();
+
+  async withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = this.lock;
+    let release: () => void = () => {};
+    this.lock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+}
+
+/** Poll Horizon until the tx is in a ledger or we time out. Returns the ledger, feeCharged, and resultXdr. */
+async function confirmTransaction(
+  server: HorizonServerLike,
+  hash: string,
+  opts: {
+    now: () => number;
+    sleep: (ms: number) => Promise<void>;
+    confirmTimeoutMs: number;
+  },
+): Promise<Outcome<{ ledger?: number; feeCharged?: string; resultXdr?: string }>> {
+  const deadline = opts.now() + opts.confirmTimeoutMs;
+  for (;;) {
+    try {
+      const tx = await server.transactions().transaction(hash).call();
+      if (tx.successful) {
+        return ok({
+          ledger: tx.ledger_attr ?? tx.ledger,
+          feeCharged: tx.fee_charged != null ? tx.fee_charged.toString() : undefined,
+          resultXdr: (tx as { result_xdr?: string }).result_xdr,
+        });
+      }
+      return fail("SETTLEMENT_FAILED", `tx ${hash} failed on-chain`);
+    } catch {
+      // not yet visible
+    }
+    if (opts.now() >= deadline) {
+      // NOT retryable-by-resubmission: the transaction may still land (or,
+      // on the happy path, may have already landed and Horizon's read side
+      // is just lagging), and sending a second one would risk a double
+      // payment. Timeout means "needs manual reconciliation," not "safe to
+      // retry" — mirrors packages/attester/src/index.ts's confirm().
+      return fail("SETTLEMENT_TIMEOUT", `tx ${hash} not confirmed within timeout`);
+    }
+    await opts.sleep(1_000);
+  }
+}
+
+function calculateClaimableBalanceId(
+  sourcePublicKey: string,
+  sequence: string | number,
+  opIndex = 0,
+): string {
+  const sourceAccount = Keypair.fromPublicKey(sourcePublicKey).rawPublicKey();
+  const seqBuf = Buffer.alloc(8);
+  seqBuf.writeBigInt64BE(BigInt(sequence));
+  const opIdxBuf = Buffer.alloc(4);
+  opIdxBuf.writeUInt32BE(opIndex);
+
+  const hasher = createHash("sha256");
+  hasher.update(sourceAccount);
+  hasher.update(seqBuf);
+  hasher.update(opIdxBuf);
+  return "00000000" + hasher.digest().toString("hex");
+}
+
+function extractClaimableBalanceId(resultXdr?: string): string | undefined {
+  if (!resultXdr) return undefined;
+  try {
+    return getClaimableBalanceIdFromResult(
+      xdr.TransactionResult.fromXdr(resultXdr, "base64"),
+      0,
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -220,7 +359,14 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
    *  submitTransaction() settles — NOT held through the (possibly 30s)
    *  confirm() poll, so one ambiguous submission doesn't head-of-line-block
    *  every other in-flight payment from this signer. */
-  private lock: Promise<void> = Promise.resolve();
+  private readonly lock = new AsyncLock();
+  private readonly allowedNetworks: readonly StellarNetwork[];
+  private readonly allowLocalSignerOnMainnet: boolean;
+  private readonly horizonUrl: string;
+  /** Undefined when the endpoint's declared network cannot be read (fake server). */
+  private readonly rootFetcher?: (url: string) => Promise<HorizonRoot>;
+  /** Memoised `network_passphrase` of the endpoint — the root is read once. */
+  private rootPassphrase?: string;
 
   constructor(opts: StellarSubmitterOptions) {
     if (!opts.signer && !opts.signerSecret) {
@@ -245,23 +391,91 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
       );
     }
     this.fee = fee;
+    this.allowedNetworks = opts.allowedNetworks ?? ["testnet"];
+    this.allowLocalSignerOnMainnet = opts.allowLocalSignerOnMainnet ?? false;
+    this.horizonUrl = opts.horizonUrl;
+    this.rootFetcher =
+      opts.fetchHorizonRoot ?? (opts.horizonServer ? undefined : defaultFetchHorizonRoot);
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = this.lock;
-    let release: () => void = () => {};
-    this.lock = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
+    return this.lock.withLock(fn);
+  }
+
+  /**
+   * Fail closed before a signature is produced when this submitter is not
+   * allowed to move money on the corridor's network. Three independent checks,
+   * because they stop three different accidents:
+   *
+   * 1. `allowedNetworks` — the "I did not mean to run on mainnet" typo. This is
+   *    opt-in by design: the default is testnet-only, so an embedder has to ask
+   *    for real money.
+   * 2. the signer kind — a seed sitting in the process belongs to a throwaway
+   *    testnet key (docs/key-management.md), so mainnet needs both the network
+   *    opt-in AND an explicit ack that a dev key is acceptable here.
+   * 3. the endpoint's own `network_passphrase` — a testnet manifest pointed at a
+   *    mainnet Horizon (or the reverse) would otherwise sign a transaction whose
+   *    hash is meaningless to the network it lands on.
+   *
+   * Everything here runs before `loadAccount`, so a refusal costs no sequence
+   * number, no signature and no transaction.
+   */
+  private async guardNetwork(network: StellarNetwork): Promise<Outcome<void>> {
+    if (!this.allowedNetworks.includes(network)) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        `refusing to settle on network "${network}": this submitter allows ` +
+          `[${this.allowedNetworks.join(", ")}]. Settling real money is opt-in — pass ` +
+          `allowedNetworks: ["testnet", "public"] only if you mean it.`,
+        { retryable: false },
+      );
     }
+    if (network === "public" && this.signer instanceof LocalKeypairSigner) {
+      if (!this.allowLocalSignerOnMainnet) {
+        return fail(
+          "SETTLEMENT_FAILED",
+          `refusing to sign a public-network settlement with a LocalKeypairSigner: the seed ` +
+            `would live in this process. Use a KMS/HSM-backed ExternalSigner (see ` +
+            `docs/key-management.md), or pass allowLocalSignerOnMainnet: true deliberately.`,
+          { retryable: false },
+        );
+      }
+    }
+    if (!this.rootFetcher) return ok(undefined);
+
+    if (this.rootPassphrase === undefined) {
+      let root: HorizonRoot;
+      try {
+        root = await this.rootFetcher(this.horizonUrl);
+      } catch (cause) {
+        // Nothing was built, signed or submitted, so a retry is safe — but the
+        // run must not proceed on an endpoint we could not place.
+        return fail(
+          "SETTLEMENT_FAILED",
+          `cannot verify the network of Horizon ${this.horizonUrl} ` +
+            `(root resource unreadable: ${describe(cause)}); refusing to sign`,
+          { retryable: true, cause },
+        );
+      }
+      this.rootPassphrase = root.network_passphrase ?? "";
+    }
+    const expected = passphraseFor(network);
+    if (this.rootPassphrase !== expected) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        `Horizon ${this.horizonUrl} serves "${this.rootPassphrase || "unknown"}" but this ` +
+          `corridor settles on "${expected}" (${network}); refusing to sign a ` +
+          `transaction for the wrong network`,
+        { retryable: false },
+      );
+    }
+    return ok(undefined);
   }
 
   async submit(req: SettlementRequest): Promise<Outcome<SettlementRef>> {
+    const guarded = await this.guardNetwork(req.corridor.settlement.network);
+    if (!guarded.ok) return guarded;
+
     const now = this.now();
     if (req.validUntil !== undefined && req.validUntil <= now) {
       return fail("QUOTE_EXPIRED", `quote expired at ${req.validUntil} (now=${now})`, {
@@ -340,6 +554,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
       const confirmed = await this.confirm(hash as string);
       if (!confirmed.ok) return confirmed;
       return ok<SettlementRef>({
+        kind: "stellar",
         stellarTxHash: hash as string,
         ledger: confirmed.value.ledger,
         feeCharged: confirmed.value.feeCharged,
@@ -371,6 +586,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
       const landed = await this.confirm(hash as string);
       if (landed.ok) {
         return ok<SettlementRef>({
+          kind: "stellar",
           stellarTxHash: hash as string,
           ledger: landed.value.ledger,
           feeCharged: landed.value.feeCharged,
@@ -474,6 +690,7 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
         }
 
         return ok<SettlementRef>({
+          kind: "stellar",
           stellarTxHash: p.transactionHash,
           ledger: p.ledger,
         });
@@ -492,40 +709,225 @@ export class StellarSettlementSubmitter implements SettlementSubmitter {
   async refund(req: RefundRequest): Promise<Outcome<SettlementRef>> {
     return fail(
       "REFUND_UNSUPPORTED",
-      `payment ${req.original.stellarTxHash} cannot be reversed on-chain; ` +
+      `payment ${settlementId(req.original)} cannot be reversed on-chain; ` +
         `resolve out-of-band with the receiving anchor (SEP-31 gives the sender ` +
         `no refund endpoint) — see the held runbook in docs/operations.md`,
       { retryable: false },
     );
   }
 
-  /** Poll Horizon until the tx is in a ledger or we time out. Returns the ledger and feeCharged. */
+  /** Poll Horizon until the tx is in a ledger or we time out. Returns the ledger, feeCharged, and resultXdr. */
   private async confirm(
     hash: string,
-  ): Promise<Outcome<{ ledger?: number; feeCharged?: string }>> {
-    const deadline = this.now() + this.confirmTimeoutMs;
-    for (;;) {
-      try {
-        const tx = await this.server.transactions().transaction(hash).call();
-        if (tx.successful) {
-          return ok({
-            ledger: tx.ledger_attr ?? tx.ledger,
-            feeCharged: tx.fee_charged != null ? tx.fee_charged.toString() : undefined,
-          });
-        }
-        return fail("SETTLEMENT_FAILED", `tx ${hash} failed on-chain`);
-      } catch {
-        // not yet visible
+  ): Promise<Outcome<{ ledger?: number; feeCharged?: string; resultXdr?: string }>> {
+    return confirmTransaction(this.server, hash, {
+      now: this.now,
+      sleep: this.sleep,
+      confirmTimeoutMs: this.confirmTimeoutMs,
+    });
+  }
+}
+
+export interface StellarClaimableBalanceStrategyOptions extends StellarSubmitterOptions {
+  /** Default relative expiry in seconds for claimants if not specified in the request. */
+  predicateSeconds?: number;
+}
+
+export interface ClaimableBalanceSettlementRequest extends SettlementRequest {
+  readonly claimant?: string;
+  readonly predicateSeconds?: number;
+  readonly predicate?: xdr.ClaimPredicate;
+}
+
+/**
+ * Settlement strategy that satisfies `kind: "claimable_balance"`.
+ * Builds and submits `Operation.createClaimableBalance` to fund an anchor
+ * via a claimable balance on Stellar.
+ */
+export class StellarClaimableBalanceStrategy implements SettlementStrategy {
+  /** The fee actually paid per settlement transaction, in XLM decimal string (e.g. "0.00001"). */
+  static readonly fee: string = fromScaled(BigInt(BASE_FEE), STROOP_SCALE);
+
+  readonly fee: string;
+  readonly kind: DepositInstructionsKind = "claimable_balance";
+  private readonly signer: ExternalSigner;
+  private readonly server: HorizonServerLike;
+  private readonly inspector: AccountInspector;
+  private readonly confirmTimeoutMs: number;
+  private readonly now: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly defaultPredicateSeconds?: number;
+  private readonly lock = new AsyncLock();
+
+  constructor(opts: StellarClaimableBalanceStrategyOptions) {
+    if (!opts.signer && !opts.signerSecret) {
+      throw new Error(
+        "StellarClaimableBalanceStrategy: provide either `signer` or `signerSecret`",
+      );
+    }
+    this.signer = opts.signer ?? LocalKeypairSigner.fromSecret(opts.signerSecret as string);
+    this.server = opts.horizonServer ?? new Horizon.Server(opts.horizonUrl);
+    this.inspector =
+      opts.inspector ??
+      new AccountInspector({
+        horizonServer: this.server,
+        horizonUrl: opts.horizonUrl,
+      });
+    this.confirmTimeoutMs = opts.confirmTimeoutMs ?? 30_000;
+    this.now = opts.now ?? (() => Date.now());
+    this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    const fee = opts.fee ?? StellarClaimableBalanceStrategy.fee;
+    if (!toScaled(fee, STROOP_SCALE).ok) {
+      throw new Error(
+        `StellarClaimableBalanceStrategy: invalid \`fee\` "${fee}" (expected an XLM decimal string)`,
+      );
+    }
+    this.fee = fee;
+    this.defaultPredicateSeconds = opts.predicateSeconds;
+  }
+
+  private async withLock<T>(fn: () => Promise<T>): Promise<T> {
+    return this.lock.withLock(fn);
+  }
+
+  private async confirm(
+    hash: string,
+  ): Promise<Outcome<{ ledger?: number; feeCharged?: string; resultXdr?: string }>> {
+    return confirmTransaction(this.server, hash, {
+      now: this.now,
+      sleep: this.sleep,
+      confirmTimeoutMs: this.confirmTimeoutMs,
+    });
+  }
+
+  async settle({
+    opened,
+    quote,
+    corridor,
+  }: SettlementStrategyContext): Promise<Outcome<SettlementRef>> {
+    const rawOpened = opened as unknown as Record<string, unknown>;
+    const instructions = (rawOpened.instructions as Record<string, unknown> | undefined) ?? {};
+    const claimant =
+      (instructions.claimant as string | undefined) ??
+      (rawOpened.claimant as string | undefined) ??
+      opened.depositAddress;
+    const predicateSeconds =
+      (instructions.predicateSeconds as number | undefined) ??
+      (rawOpened.predicateSeconds as number | undefined);
+
+    const baseReq = buildSettlementRequest(opened, quote, corridor);
+    return this.submit({
+      ...baseReq,
+      claimant,
+      predicateSeconds,
+    });
+  }
+
+  async submit(req: ClaimableBalanceSettlementRequest): Promise<Outcome<SettlementRef>> {
+    const now = this.now();
+    if (req.validUntil !== undefined && req.validUntil <= now) {
+      return fail("QUOTE_EXPIRED", `quote expired at ${req.validUntil} (now=${now})`, {
+        retryable: false,
+      });
+    }
+
+    const claimant = req.claimant ?? req.to;
+    if (!claimant) {
+      return fail(
+        "SETTLEMENT_FAILED",
+        "claimable balance settlement requires a claimant address",
+        {
+          retryable: false,
+        },
+      );
+    }
+
+    let hash: string | undefined;
+    let calculatedBalanceId: string | undefined;
+    let submitAttempted = false;
+    try {
+      const { network } = req.corridor.settlement;
+      const passphrase = passphraseFor(network);
+      const asset = bridgeAsset(req.amount.asset, req.corridor.settlement.asset_issuer);
+
+      await this.withLock(async () => {
+        const source = await this.server.loadAccount(this.signer.publicKey);
+        const feeScaled = toScaled(this.fee, STROOP_SCALE);
+        const feeStroops = feeScaled.ok ? feeScaled.value.toString() : BASE_FEE;
+        const nowSec = Math.floor(this.now() / 1000);
+        const ttlMaxTime = nowSec + req.corridor.fx.quote_ttl_seconds;
+        const maxTime =
+          req.validUntil !== undefined
+            ? Math.min(Math.floor(req.validUntil / 1000), ttlMaxTime)
+            : ttlMaxTime;
+
+        const predicateSeconds = req.predicateSeconds ?? this.defaultPredicateSeconds;
+        const predicate =
+          req.predicate ??
+          (predicateSeconds !== undefined
+            ? Claimant.predicateBeforeRelativeTime(predicateSeconds.toString())
+            : Claimant.predicateUnconditional());
+
+        const builder = new TransactionBuilder(source, {
+          fee: feeStroops,
+          networkPassphrase: passphrase,
+        })
+          .addOperation(
+            Operation.createClaimableBalance({
+              asset,
+              amount: req.amount.amount,
+              claimants: [new Claimant(claimant, predicate)],
+            }),
+          )
+          .setTimebounds(0, maxTime);
+
+        if (req.memo) builder.addMemo(buildMemo(req.memo, req.memoType));
+
+        const tx = builder.build();
+        hash = Buffer.from(tx.hash()).toString("hex");
+        calculatedBalanceId = calculateClaimableBalanceId(source.accountId(), tx.sequence, 0);
+        await attachSignature(tx, this.signer);
+
+        submitAttempted = true;
+        await this.server.submitTransaction(tx);
+      });
+
+      const confirmed = await this.confirm(hash as string);
+      if (!confirmed.ok) return confirmed;
+      const claimableBalanceId =
+        extractClaimableBalanceId(confirmed.value.resultXdr) ?? calculatedBalanceId;
+      return ok<SettlementRef>({
+        kind: "stellar",
+        stellarTxHash: hash as string,
+        ledger: confirmed.value.ledger,
+        feeCharged: confirmed.value.feeCharged,
+        claimableBalanceId,
+      });
+    } catch (cause) {
+      if (!submitAttempted || cause instanceof TransactionFailedError) {
+        return fail("SETTLEMENT_FAILED", `settlement submit failed: ${describe(cause)}`, {
+          retryable: true,
+          cause,
+        });
       }
-      if (this.now() >= deadline) {
-        // NOT retryable-by-resubmission: the transaction may still land (or,
-        // on the happy path, may have already landed and Horizon's read side
-        // is just lagging), and sending a second one would risk a double
-        // payment. Timeout means "needs manual reconciliation," not "safe to
-        // retry" — mirrors packages/attester/src/index.ts's confirm().
-        return fail("SETTLEMENT_TIMEOUT", `tx ${hash} not confirmed within timeout`);
+      const landed = await this.confirm(hash as string);
+      if (landed.ok) {
+        const claimableBalanceId =
+          extractClaimableBalanceId(landed.value.resultXdr) ?? calculatedBalanceId;
+        return ok<SettlementRef>({
+          kind: "stellar",
+          stellarTxHash: hash as string,
+          ledger: landed.value.ledger,
+          feeCharged: landed.value.feeCharged,
+          claimableBalanceId,
+        });
       }
-      await this.sleep(1_000);
+      return fail(
+        landed.error.code,
+        `settlement submit ambiguous for tx ${hash} (${describe(cause)}); ` +
+          `confirm check: ${landed.error.message}`,
+        { retryable: landed.error.retryable, cause },
+      );
     }
   }
 }
@@ -1104,6 +1506,7 @@ export function createChainVerifier(inspector: {
   settlementFacts(hash: string): Promise<Outcome<SettlementFacts>>;
 }): ChainVerifier {
   return async (ref, req) => {
+    if (ref.kind !== "stellar") return ok(undefined);
     const facts = await inspector.settlementFacts(ref.stellarTxHash);
     if (!facts.ok) return facts;
     return verifySettlementFacts(facts.value, req);

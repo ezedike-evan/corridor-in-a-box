@@ -22,6 +22,7 @@ import {
   createChainVerifier,
   verifySettlementFacts,
   LocalKeypairSigner,
+  StellarClaimableBalanceStrategy,
   StellarSep10Signer,
   StellarSettlementSubmitter,
   StellarPathPaymentStrategy,
@@ -223,7 +224,9 @@ describe("StellarSettlementSubmitter.submit — ambiguous failure safety", () =>
 
     const r = await sub.submit(testRequest());
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.value.ledger).toBe(4_242);
+    if (!r.ok) return;
+    expect(r.value.kind).toBe("stellar");
+    if (r.value.kind === "stellar") expect(r.value.ledger).toBe(4_242);
     // Exactly one on-chain submission attempt — the fix must never resubmit
     // to resolve the ambiguity, only look the original tx up by hash.
     expect(server.submitTransaction).toHaveBeenCalledTimes(1);
@@ -414,6 +417,410 @@ describe("StellarSettlementSubmitter.fee", () => {
           fee: "not-a-number",
         }),
     ).toThrow(/invalid `fee`/);
+  });
+});
+
+describe("StellarSettlementSubmitter.submit — mainnet guard", () => {
+  // The guard belongs to the class that signs, not to the example launchers: an
+  // embedder who never runs `examples/run-testnet.ts` must still not be able to
+  // move real money because a manifest said `network: "public"`.
+  const onPublic = (): SettlementRequest => {
+    const base = testCorridor();
+    return {
+      ...testRequest(),
+      corridor: { ...base, settlement: { ...base.settlement, network: "public" } },
+    };
+  };
+  /** A KMS-shaped signer, so the local-key rule below is the only thing deciding. */
+  const kmsSigner = (): { signer: ExternalSigner } => {
+    const kp = Keypair.random();
+    return {
+      signer: { publicKey: kp.publicKey(), sign: async (data) => kp.sign(Buffer.from(data)) },
+    };
+  };
+  const refusingServer = () =>
+    fakeServer({
+      submitTransaction: async () => {
+        throw new Error("must not be reached");
+      },
+    });
+
+  it("refuses a public corridor by default, before loading the account", async () => {
+    const server = refusingServer();
+    const sub = new StellarSettlementSubmitter({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+    });
+
+    const r = await sub.submit(onPublic());
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_FAILED");
+      // A policy refusal is final: the engine must not burn retries on it.
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.message).toContain('refusing to settle on network "public"');
+    }
+    expect(server.loadAccount).not.toHaveBeenCalled();
+    expect(server.submitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("settles a public corridor once the network is opted into", async () => {
+    const server = fakeServer({
+      submitTransaction: async () => ({ successful: true }),
+      lookupTransaction: async () => ({ successful: true, ledger_attr: 7 }),
+    });
+    const sub = new StellarSettlementSubmitter({
+      horizonUrl: "unused",
+      horizonServer: server,
+      allowedNetworks: ["public"],
+      ...kmsSigner(),
+    });
+
+    const r = await sub.submit(onPublic());
+    expect(r.ok).toBe(true);
+    if (r.ok && r.value.kind === "stellar") expect(r.value.ledger).toBe(7);
+    expect(server.loadAccount).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to sign a public settlement with a local key, even when public is allowed", async () => {
+    const server = refusingServer();
+    const sub = new StellarSettlementSubmitter({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+      allowedNetworks: ["public"],
+    });
+
+    const r = await sub.submit(onPublic());
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_FAILED");
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.message).toContain("LocalKeypairSigner");
+    }
+    expect(server.loadAccount).not.toHaveBeenCalled();
+  });
+
+  it("accepts a local key on public only under an explicit allowLocalSignerOnMainnet", async () => {
+    const server = fakeServer({
+      submitTransaction: async () => ({ successful: true }),
+      lookupTransaction: async () => ({ successful: true, ledger_attr: 8 }),
+    });
+    const sub = new StellarSettlementSubmitter({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+      allowedNetworks: ["public"],
+      allowLocalSignerOnMainnet: true,
+    });
+
+    const r = await sub.submit(onPublic());
+    expect(r.ok).toBe(true);
+  });
+
+  it("refuses when the Horizon endpoint serves a different network than the corridor", async () => {
+    const server = refusingServer();
+    const root = vi.fn(async () => ({ network_passphrase: Networks.PUBLIC }));
+    const sub = new StellarSettlementSubmitter({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "https://horizon-testnet.stellar.org",
+      horizonServer: server,
+      fetchHorizonRoot: root,
+    });
+
+    // testCorridor() is testnet; the endpoint claims to be mainnet.
+    const r = await sub.submit(testRequest());
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_FAILED");
+      expect(r.error.retryable).toBe(false);
+      expect(r.error.message).toContain(Networks.PUBLIC);
+      expect(r.error.message).toContain(Networks.TESTNET);
+    }
+    expect(server.loadAccount).not.toHaveBeenCalled();
+    // The root resource is read once and memoised, not re-fetched per payment.
+    await sub.submit(testRequest());
+    expect(root).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails retryably when the endpoint network cannot be verified", async () => {
+    const server = refusingServer();
+    const sub = new StellarSettlementSubmitter({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "https://horizon-testnet.stellar.org",
+      horizonServer: server,
+      fetchHorizonRoot: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+
+    const r = await sub.submit(testRequest());
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_FAILED");
+      // Nothing was built, signed or submitted, so trying again is safe.
+      expect(r.error.retryable).toBe(true);
+      expect(r.error.message).toContain("cannot verify the network");
+    }
+    expect(server.loadAccount).not.toHaveBeenCalled();
+  });
+
+  it("settles a testnet corridor whose endpoint declares the testnet passphrase", async () => {
+    const server = fakeServer({
+      submitTransaction: async () => ({ successful: true }),
+      lookupTransaction: async () => ({ successful: true, ledger_attr: 9 }),
+    });
+    const sub = new StellarSettlementSubmitter({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "https://horizon-testnet.stellar.org",
+      horizonServer: server,
+      fetchHorizonRoot: async () => ({ network_passphrase: Networks.TESTNET }),
+    });
+
+    const r = await sub.submit(testRequest());
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("StellarClaimableBalanceStrategy", () => {
+  it("exposes kind claimable_balance", () => {
+    const strat = new StellarClaimableBalanceStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: fakeServer({ submitTransaction: async () => ({}) }),
+    });
+    expect(strat.kind).toBe("claimable_balance");
+  });
+
+  it("builds a createClaimableBalance op with the right claimant and amount (unconditional predicate)", async () => {
+    let capturedTx: Transaction | FeeBumpTransaction | undefined;
+    const recipient = Keypair.random().publicKey();
+    const server = fakeServer({
+      submitTransaction: async (tx) => {
+        capturedTx = tx;
+        return { successful: true };
+      },
+      lookupTransaction: async () => ({ successful: true, ledger_attr: 500 }),
+    });
+
+    const strat = new StellarClaimableBalanceStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+    });
+
+    const req = {
+      ...testRequest(),
+      to: recipient,
+      amount: { asset: "USDC", amount: "25.5000000" },
+    };
+
+    const res = await strat.submit(req);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.kind).toBe("stellar");
+    if (res.value.kind === "stellar") {
+      expect(res.value.ledger).toBe(500);
+      expect(res.value.claimableBalanceId).toBeDefined();
+      expect(typeof res.value.claimableBalanceId).toBe("string");
+      expect(res.value.claimableBalanceId?.length).toBe(72);
+    }
+
+    expect(capturedTx).toBeDefined();
+    if (capturedTx && "operations" in capturedTx) {
+      expect(capturedTx.operations.length).toBe(1);
+      const op = capturedTx.operations[0];
+      expect(op.type).toBe("createClaimableBalance");
+      if (op.type === "createClaimableBalance") {
+        expect(op.amount).toBe("25.5000000");
+        expect(op.claimants.length).toBe(1);
+        expect(op.claimants[0].destination).toBe(recipient);
+        expect(op.claimants[0].predicate.type).toBe("claimPredicateUnconditional");
+      }
+    }
+  });
+
+  it("builds a createClaimableBalance op with relative time predicate when predicateSeconds is specified", async () => {
+    let capturedTx: Transaction | FeeBumpTransaction | undefined;
+    const recipient = Keypair.random().publicKey();
+    const server = fakeServer({
+      submitTransaction: async (tx) => {
+        capturedTx = tx;
+        return { successful: true };
+      },
+      lookupTransaction: async () => ({ successful: true, ledger_attr: 600 }),
+    });
+
+    const strat = new StellarClaimableBalanceStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+      predicateSeconds: 3600,
+    });
+
+    const req = {
+      ...testRequest(),
+      to: recipient,
+      amount: { asset: "USDC", amount: "50" },
+    };
+
+    const res = await strat.submit(req);
+    expect(res.ok).toBe(true);
+    if (capturedTx && "operations" in capturedTx) {
+      const op = capturedTx.operations[0];
+      if (op.type === "createClaimableBalance") {
+        expect(op.claimants[0].predicate.type).toBe("claimPredicateBeforeRelativeTime");
+      }
+    }
+  });
+
+  it("settle() extracts claimant and predicate from context opened transaction", async () => {
+    let capturedTx: Transaction | FeeBumpTransaction | undefined;
+    const recipient = Keypair.random().publicKey();
+    const server = fakeServer({
+      submitTransaction: async (tx) => {
+        capturedTx = tx;
+        return { successful: true };
+      },
+      lookupTransaction: async () => ({ successful: true, ledger_attr: 700 }),
+    });
+
+    const strat = new StellarClaimableBalanceStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+    });
+
+    const opened = {
+      transactionId: "open-123",
+      depositAddress: recipient,
+      claimant: recipient,
+      predicateSeconds: 120,
+    };
+    const quote = {
+      id: "quote-123",
+      sourceAmount: { asset: "USDC", amount: "10" },
+      destinationAmount: { asset: "USDC", amount: "10" },
+      expiresAt: 2_000_000_000,
+    };
+
+    const res = await strat.settle({
+      opened: opened as unknown as import("@corridor/adapter-kit").OpenTransaction,
+      quote: quote as unknown as import("@corridor/adapter-kit").Quote,
+      corridor: testCorridor(),
+    });
+
+    expect(res.ok).toBe(true);
+    if (capturedTx && "operations" in capturedTx) {
+      const op = capturedTx.operations[0];
+      if (op.type === "createClaimableBalance") {
+        expect(op.claimants[0].destination).toBe(recipient);
+        expect(op.claimants[0].predicate.type).toBe("claimPredicateBeforeRelativeTime");
+      }
+    }
+  });
+
+  it("a confirmed Horizon rejection (TransactionFailedError) is retryable", async () => {
+    const rejection = new TransactionFailedError("tx failed", {
+      data: { extras: { result_codes: { transaction: "tx_bad_seq", operations: [] } } },
+    });
+    const server = fakeServer({
+      submitTransaction: async () => {
+        throw rejection;
+      },
+    });
+    const strat = new StellarClaimableBalanceStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+    });
+
+    const r = await strat.submit(testRequest());
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_FAILED");
+      expect(r.error.retryable).toBe(true);
+    }
+  });
+
+  it("an ambiguous failure whose tx actually landed resolves to ok, not a retry", async () => {
+    const server = fakeServer({
+      submitTransaction: async () => {
+        throw new Error("ECONNRESET");
+      },
+      lookupTransaction: async () => ({ successful: true, ledger_attr: 8_888 }),
+    });
+    const strat = new StellarClaimableBalanceStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+      ...immediateClock(),
+    });
+
+    const r = await strat.submit(testRequest());
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.kind).toBe("stellar");
+    if (r.value.kind === "stellar") {
+      expect(r.value.ledger).toBe(8_888);
+      expect(r.value.claimableBalanceId).toBeDefined();
+    }
+    expect(server.submitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("an ambiguous failure that never resolves is non-retryable, not blindly retried", async () => {
+    const server = fakeServer({
+      submitTransaction: async () => {
+        throw new Error("ECONNRESET");
+      },
+    });
+    const strat = new StellarClaimableBalanceStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+      confirmTimeoutMs: 3_000,
+      ...immediateClock(),
+    });
+
+    const r = await strat.submit(testRequest());
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SETTLEMENT_TIMEOUT");
+      expect(r.error.retryable).toBe(false);
+    }
+    expect(server.submitTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails with QUOTE_EXPIRED and never calls submitTransaction when validUntil is in the past", async () => {
+    const server = fakeServer({
+      submitTransaction: async () => {
+        throw new Error("should not be called");
+      },
+    });
+
+    const fakeNow = 1_000_000_000;
+    const quoteExpiresAt = fakeNow - 1_000;
+    const strat = new StellarClaimableBalanceStrategy({
+      signerSecret: Keypair.random().secret(),
+      horizonUrl: "unused",
+      horizonServer: server,
+      now: () => fakeNow,
+    });
+
+    const req = {
+      ...testRequest(),
+      validUntil: quoteExpiresAt,
+    };
+
+    const res = await strat.submit(req);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe("QUOTE_EXPIRED");
+      expect(res.error.retryable).toBe(false);
+    }
+    expect(server.submitTransaction).not.toHaveBeenCalled();
+    expect(server.loadAccount).not.toHaveBeenCalled();
   });
 });
 
@@ -1262,10 +1669,12 @@ describe("StellarSettlementSubmitter.findExisting", () => {
 
     const res = await sub.findExisting(req);
     expect(res.ok).toBe(true);
-    if (res.ok) {
-      expect(res.value).toBeDefined();
-      expect(res.value?.stellarTxHash).toBe("existing-tx-1");
-      expect(res.value?.ledger).toBe(500);
+    if (!res.ok) return;
+    expect(res.value).toBeDefined();
+    expect(res.value?.kind).toBe("stellar");
+    if (res.value?.kind === "stellar") {
+      expect(res.value.stellarTxHash).toBe("existing-tx-1");
+      expect(res.value.ledger).toBe(500);
     }
   });
 
@@ -1300,9 +1709,12 @@ describe("StellarSettlementSubmitter.findExisting", () => {
 
     const res = await sub.findExisting(req);
     expect(res.ok).toBe(true);
-    if (res.ok) {
-      expect(res.value?.stellarTxHash).toBe("hash-tx-1");
-      expect(res.value?.ledger).toBe(600);
+    if (!res.ok) return;
+    expect(res.value).toBeDefined();
+    expect(res.value?.kind).toBe("stellar");
+    if (res.value?.kind === "stellar") {
+      expect(res.value.stellarTxHash).toBe("hash-tx-1");
+      expect(res.value.ledger).toBe(600);
     }
   });
 
@@ -1349,8 +1761,11 @@ describe("StellarSettlementSubmitter.findExisting", () => {
 
     const res = await sub.findExisting(req);
     expect(res.ok).toBe(true);
-    if (res.ok) {
-      expect(res.value?.stellarTxHash).toBe("xlm-tx-1");
+    if (!res.ok) return;
+    expect(res.value).toBeDefined();
+    expect(res.value?.kind).toBe("stellar");
+    if (res.value?.kind === "stellar") {
+      expect(res.value.stellarTxHash).toBe("xlm-tx-1");
     }
   });
 
@@ -1630,9 +2045,9 @@ describe("settlement on-chain verification", () => {
       }),
     } as unknown as Horizon.Server;
     const verify = createChainVerifier(new AccountInspector({ horizonServer: server }));
-    expect((await verify({ stellarTxHash: "h" }, req())).ok).toBe(true);
+    expect((await verify({ kind: "stellar", stellarTxHash: "h" }, req())).ok).toBe(true);
     const bad = await verify(
-      { stellarTxHash: "h" },
+      { kind: "stellar", stellarTxHash: "h" },
       req({ to: Keypair.random().publicKey() }),
     );
     expect(bad.ok).toBe(false);

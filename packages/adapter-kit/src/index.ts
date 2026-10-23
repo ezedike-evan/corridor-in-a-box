@@ -17,7 +17,12 @@ import {
   type Money,
   type Outcome,
   type PaymentIntent,
+  type SettlementRef,
+  settlementId,
 } from "@corridor/types";
+
+export { type SettlementRef, settlementId };
+export { Sep10Client, jwtExpiryMs, type Sep10Signer } from "./sep10";
 
 /** A SEP-38 quote. `firm` quotes carry an id + expiry and bind the deliverer to a rate. */
 export interface Quote {
@@ -150,6 +155,77 @@ export interface RefundInfo {
   readonly completeness: "full" | "partial" | "unknown";
 }
 
+/** The `refunds` object as SEP-6 / SEP-31 puts it on the wire — every field untrusted. */
+export interface RawRefunds {
+  amount_refunded?: unknown;
+  amount_fee?: unknown;
+  payments?: unknown;
+}
+
+/**
+ * Parse SEP-6 / SEP-31's `refunds` object off a transaction record.
+ *
+ * Everything is optional and untrusted: anchors omit `refunds` entirely on the
+ * happy path, amounts arrive as strings, and a malformed field must never turn
+ * a poll into an error — the status classification is what the engine acts on
+ * and it is decided independently of this.
+ *
+ * Returns undefined rather than a zero-filled object when the refund cannot be
+ * read: "refunded nothing" and "said nothing" are different facts, and the
+ * engine must not be able to confuse them.
+ *
+ * @param settledAmount the amount that went out (`amount_in`), used to tell a
+ * partial refund from a full one. Compared with `compareAmounts` — "100" and
+ * "100.00" are the same amount of money and string equality says otherwise.
+ */
+export function parseRefunds(
+  refunds: unknown,
+  asset: string,
+  settledAmount?: string,
+): RefundInfo | undefined {
+  if (!refunds || typeof refunds !== "object" || Array.isArray(refunds)) return undefined;
+  const raw = refunds as RawRefunds;
+
+  const parseAmt = (v: unknown): string | undefined => {
+    return typeof v === "string" && isValidAmount(v.trim()) ? v.trim() : undefined;
+  };
+
+  const amountRefunded = parseAmt(raw.amount_refunded);
+  if (amountRefunded === undefined) return undefined;
+
+  const amountFee = parseAmt(raw.amount_fee) ?? "0";
+
+  const payments: RefundPayment[] = [];
+  if (Array.isArray(raw.payments)) {
+    for (const entry of raw.payments) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const p = entry as { id?: unknown; id_type?: unknown; amount?: unknown; fee?: unknown };
+      const amount = parseAmt(p.amount);
+      if (typeof p.id !== "string" || !p.id || amount === undefined) continue;
+      payments.push({
+        id: p.id,
+        ...(typeof p.id_type === "string" && p.id_type ? { idType: p.id_type } : {}),
+        amount: { asset, amount },
+        fee: { asset, amount: parseAmt(p.fee) ?? "0" },
+      });
+    }
+  }
+
+  const settled = settledAmount !== undefined ? parseAmt(settledAmount) : undefined;
+  let completeness: RefundInfo["completeness"] = "unknown";
+  if (settled !== undefined) {
+    const cmp = compareAmounts(amountRefunded, settled);
+    if (cmp.ok) completeness = cmp.value < 0 ? "partial" : "full";
+  }
+
+  return {
+    amountRefunded: { asset, amount: amountRefunded },
+    amountFee: { asset, amount: amountFee },
+    payments,
+    completeness,
+  };
+}
+
 export interface TransactionStatus {
   /** The raw status string reported by the anchor (e.g. a SEP-31 status). */
   readonly status: string;
@@ -218,16 +294,14 @@ export interface RefundRef {
 }
 
 /**
- * SHIM for #187 (minimal, to be reconciled with that issue's PR).
  * What an adapter supports, discoverable up front instead of by failing.
- * `settlement` is `readonly string[]` here because `DepositInstructions` (the
- * type #187 names) does not exist in this tree yet.
+ * Exposes supported quote styles, KYC mechanism, settlement kinds, refunds and callbacks.
  */
 export interface AdapterCapabilities {
   readonly protocol: string;
   readonly quotes: readonly ("sep38_firm" | "sep38_indicative" | "native" | "none")[];
   readonly kyc: "sep12" | "sep6_fields" | "bespoke" | "none";
-  readonly settlement: readonly string[];
+  readonly settlement: readonly DepositInstructions["kind"][];
   readonly refunds: "request" | "report_only" | "none";
   readonly callbacks: boolean;
 }
@@ -277,6 +351,36 @@ export interface Sep38QuoteProviderOptions {
    * Supplier for bearer auth token (e.g. from SEP-10).
    */
   readonly authToken?: (corridor: Corridor) => Promise<Outcome<string | undefined>>;
+}
+
+/**
+ * SEP-38 `total_price` is sell units per buy unit INCLUDING fees, so
+ * `total_price x buy_amount` must land on `sell_amount` (within `QUOTE_TOLERANCE`).
+ * Returns a description of the inconsistency, or undefined when the numbers agree or
+ * the anchor did not send a usable `total_price`. Shared by every adapter that reads a
+ * firm SEP-38 quote (SEP-31, SEP-6), so they cannot drift apart.
+ */
+export function totalPriceProblem(q: {
+  quoteId: string;
+  totalPrice: string | undefined;
+  buyAmount: string;
+  sellAmount: string;
+}): string | undefined {
+  const { quoteId, totalPrice, buyAmount, sellAmount } = q;
+  if (!totalPrice || !isValidAmount(totalPrice) || !isValidAmount(buyAmount)) return undefined;
+  const impliedSell = applyPrice(buyAmount, totalPrice);
+  if (!impliedSell.ok) return undefined;
+  const drift = subAmounts(impliedSell.value, sellAmount);
+  const tolerance = applyPrice(sellAmount, QUOTE_TOLERANCE);
+  if (!drift.ok || !tolerance.ok) return undefined;
+  const abs = drift.value.startsWith("-") ? drift.value.slice(1) : drift.value;
+  const within = compareAmounts(abs, tolerance.value);
+  if (!within.ok || within.value <= 0) return undefined;
+  return (
+    `quote ${quoteId} is internally inconsistent — ` +
+    `total_price ${totalPrice} × buy_amount ${buyAmount} = ` +
+    `${impliedSell.value}, but sell_amount is ${sellAmount}`
+  );
 }
 
 /**
@@ -353,25 +457,13 @@ export class Sep38QuoteProvider implements QuoteProvider {
         );
       }
 
-      if (j.total_price && isValidAmount(j.total_price) && isValidAmount(j.buy_amount)) {
-        const impliedSell = applyPrice(j.buy_amount, j.total_price);
-        if (impliedSell.ok) {
-          const drift = subAmounts(impliedSell.value, sellAmount);
-          const tolerance = applyPrice(sellAmount, QUOTE_TOLERANCE);
-          if (drift.ok && tolerance.ok) {
-            const abs = drift.value.startsWith("-") ? drift.value.slice(1) : drift.value;
-            const within = compareAmounts(abs, tolerance.value);
-            if (within.ok && within.value > 0) {
-              return fail(
-                "QUOTE_UNAVAILABLE",
-                `${name}: quote ${j.id} is internally inconsistent — ` +
-                  `total_price ${j.total_price} × buy_amount ${j.buy_amount} = ` +
-                  `${impliedSell.value}, but sell_amount is ${sellAmount}`,
-              );
-            }
-          }
-        }
-      }
+      const inconsistent = totalPriceProblem({
+        quoteId: j.id,
+        totalPrice: j.total_price,
+        buyAmount: j.buy_amount,
+        sellAmount,
+      });
+      if (inconsistent) return fail("QUOTE_UNAVAILABLE", `${name}: ${inconsistent}`);
 
       let fee: Money | undefined;
       if (j.fee) {
@@ -495,6 +587,11 @@ export interface AnchorAdapter {
   /** Poll transaction status for reconciliation. */
   getTransaction(transactionId: string): Promise<Outcome<TransactionStatus>>;
   /**
+   * For off-chain / adapter-settled transactions (#186): confirm that settlement
+   * moved off-chain and obtain a SettlementRef with the adapter's reference.
+   */
+  confirmSettlement?(transactionId: string): Promise<Outcome<SettlementRef>>;
+  /**
    * Request a refund from the receiving anchor.
    *
    * Refunds are anchor-driven operations, NOT unilateral on-chain reversals.
@@ -575,6 +672,10 @@ export interface MockAdapterOptions {
   refundStatus?: RefundInfo;
   /** Override individual fields of the reported `capabilities()`. */
   capabilities?: Partial<AdapterCapabilities>;
+  /** Custom confirmSettlement handler or result for mock testing. */
+  confirmSettlementResult?: Outcome<SettlementRef>;
+  /** Deposit instructions for openTransaction to report. */
+  instructions?: DepositInstructions;
 }
 
 export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter {
@@ -590,11 +691,14 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
   return {
     name,
     capabilities() {
+      const defaultSettlement: readonly DepositInstructions["kind"][] = opts.instructions?.kind
+        ? [opts.instructions.kind]
+        : ["stellar_payment"];
       return {
         protocol: "mock",
         quotes: ["sep38_firm"],
         kyc: "sep12",
-        settlement: ["stellar_payment"],
+        settlement: defaultSettlement,
         refunds: "request",
         callbacks: false,
         ...opts.capabilities,
@@ -615,7 +719,7 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
       return ok<KycResult>({ status: opts.kyc ?? "accepted", customerId: "cust_mock" });
     },
     async openTransaction(_intent, quote) {
-      const instructions: DepositInstructions = {
+      const instructions: DepositInstructions = opts.instructions ?? {
         kind: "stellar_payment",
         to: "GMOCK000000000000000000000000000000000000000000000000",
         memo: "mock-memo",
@@ -624,8 +728,8 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
         transactionId: `tx_${++counter}`,
         instructions,
         amountIn: quote.sourceAmount,
-        depositAddress: instructions.to,
-        memo: instructions.memo,
+        depositAddress: instructions.kind === "stellar_payment" ? instructions.to : undefined,
+        memo: instructions.kind === "stellar_payment" ? instructions.memo : undefined,
       };
       opened.set(tx.transactionId, {
         amountIn: quote.sourceAmount,
@@ -653,6 +757,14 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
         ...expected,
       });
     },
+    async confirmSettlement(transactionId) {
+      if (opts.confirmSettlementResult) return opts.confirmSettlementResult;
+      return ok<SettlementRef>({
+        kind: "adapter",
+        reference: `adapter_ref_${transactionId}`,
+        reportedAt: Date.now(),
+      });
+    },
     async requestRefund(transactionId, amount, reason) {
       if (opts.refundResult) return opts.refundResult;
       // "complete" maps to the port's `refunded`: the mock chooses a branch, it
@@ -666,3 +778,5 @@ export function createMockAdapter(opts: MockAdapterOptions = {}): AnchorAdapter 
     },
   };
 }
+
+export * from "./conformance";

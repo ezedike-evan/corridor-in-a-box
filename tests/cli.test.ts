@@ -253,7 +253,44 @@ describe("corridor CLI", () => {
     const r = run(["plan", "corridors/ng-cowrie.corridor.yaml"]);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("liveness: ✓ VERIFIED");
-    expect(r.stdout).toContain("2026-08-11");
+    expect(r.stdout).toContain("2026-10-17");
+  });
+
+  it("plan: prints SEP-6 steps for a sep6 corridor and never SEP-31", () => {
+    const r = run(["plan", "corridors/testanchor-sep6.corridor.yaml"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("protocol: sep6");
+    expect(r.stdout).toContain("SEP-6 POST /withdraw-exchange");
+    expect(r.stdout).toContain("SEP-6 GET /transaction");
+    expect(r.stdout).not.toContain("SEP-31");
+  });
+
+  it("plan: keeps SEP-31 steps for a sep31 corridor", () => {
+    const r = run(["plan", "tests/fixtures/verified.corridor.yaml"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("protocol: sep31");
+    expect(r.stdout).toContain("SEP-31 POST /transactions");
+    expect(r.stdout).toContain("SEP-31 GET /transactions/:id");
+  });
+
+  it("plan --json: emits the protocol, steps and liveness for tooling", () => {
+    const r = run(["plan", "corridors/testanchor-sep6.corridor.yaml", "--json"]);
+    expect(r.status).toBe(0);
+    const parsed = JSON.parse(r.stdout) as {
+      protocol: string;
+      steps: Array<{ verb: string; protocol: string }>;
+      liveness: { state: string };
+    };
+    expect(parsed.protocol).toBe("sep6");
+    expect(parsed.steps.map((step) => step.verb)).toEqual([
+      "quote",
+      "comply",
+      "open",
+      "settle",
+      "reconcile",
+    ]);
+    expect(parsed.steps.map((step) => step.protocol)).not.toContain("sep31");
+    expect(parsed.liveness.state).toBe("verified");
   });
 
   it("plan: prints the status_note when present", () => {
@@ -441,6 +478,19 @@ describe("corridor CLI", () => {
       const r3 = run(["canary", "corridors/reference.corridor.yaml", "--amount", "0"]);
       expect(r3.status).toBe(2);
       expect(r3.stderr).toContain("positive decimal amount");
+    });
+
+    it("argument validation: exits 2 when --dry-run is combined with --write", () => {
+      const r = run([
+        "canary",
+        "corridors/reference.corridor.yaml",
+        "--amount",
+        "1.00",
+        "--dry-run",
+        "--write",
+      ]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("--write records a completed payment");
     });
 
     it("argument validation: exits 2 when --network is invalid", () => {
