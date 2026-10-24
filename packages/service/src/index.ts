@@ -321,6 +321,10 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
 
 const reject = (field: string, reason: string) => err({ field, reason });
 
+/** Optional string fields a party may carry. `sep12Id` is the deprecated alias
+ *  of `anchorCustomerId`; both are accepted (#193). */
+const PARTY_STRING_FIELDS = ["jurisdiction", "sep12Id", "anchorCustomerId"] as const;
+
 /** Sanity-check one party object (sender/recipient): the id must be a real,
  *  non-empty string and the optional fields must at least be strings. */
 function parseParty(
@@ -331,7 +335,7 @@ function parseParty(
     return reject(field, "expected an object with a string id");
   }
   for (const key of Object.keys(v)) {
-    if (key !== "id" && key !== "jurisdiction" && key !== "sep12Id") {
+    if (key !== "id" && !(PARTY_STRING_FIELDS as readonly string[]).includes(key)) {
       return reject(`${field}.${key}`, "unknown field");
     }
   }
@@ -341,20 +345,18 @@ function parseParty(
   if (v.id.length === 0) {
     return reject(`${field}.id`, "must not be empty");
   }
-  if ("jurisdiction" in v && v.jurisdiction !== undefined) {
-    if (typeof v.jurisdiction !== "string") {
-      return reject(`${field}.jurisdiction`, "expected a string");
-    }
-  }
-  if ("sep12Id" in v && v.sep12Id !== undefined) {
-    if (typeof v.sep12Id !== "string") {
-      return reject(`${field}.sep12Id`, "expected a string");
+  for (const key of PARTY_STRING_FIELDS) {
+    if (v[key] !== undefined && typeof v[key] !== "string") {
+      return reject(`${field}.${key}`, "expected a string");
     }
   }
   const party: PartyRef = {
     id: v.id,
     ...(typeof v.jurisdiction === "string" ? { jurisdiction: v.jurisdiction } : {}),
     ...(typeof v.sep12Id === "string" ? { sep12Id: v.sep12Id } : {}),
+    ...(typeof v.anchorCustomerId === "string"
+      ? { anchorCustomerId: v.anchorCustomerId }
+      : {}),
   };
   return ok(party);
 }

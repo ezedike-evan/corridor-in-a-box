@@ -34,6 +34,8 @@ export type CorridorErrorCode =
   | "RECONCILE_MISMATCH"
   | "RECONCILE_STALLED"
   | "IDEMPOTENCY_CONFLICT"
+  /** live /info or stellar.toml no longer matches what was verified */
+  | "PRESETTLE_ANCHOR_DRIFT"
   /** the opened anchor transaction is not what we are about to pay */
   | "PRESETTLE_TX_MISMATCH"
   /** destination missing, no trustline, or not authorized */
@@ -129,17 +131,25 @@ export interface PartyRef {
    * a question nobody asked. A corridor whose dest exposes a `kyc_server`
    * requires a customer reference; the engine fails closed without it.
    *
-   * @deprecated Use `anchorCustomerId`. Retained as an alias for SEP-31 call sites.
+   * @deprecated Use `anchorCustomerId`. Still read as an alias; when both are
+   * set, `anchorCustomerId` wins (see `anchorCustomerIdOf`).
    */
   readonly sep12Id?: string;
   /**
-   * Protocol-neutral customer reference issued by the receiving anchor's KYC
-   * system (SEP-12 customer id, SEP-6 customer id, or a bespoke anchor id).
-   *
-   * Preferred over `sep12Id` when both are set. `sep12Id` is retained as a
-   * deprecated alias for existing SEP-31 call sites. Never carries raw PII.
+   * The receiving anchor's own reference for this party, whatever issued it: a
+   * SEP-12 customer id, a SEP-6 `customer_id`, or a bespoke anchor's onboarding
+   * id. Protocol-neutral successor to `sep12Id`. An opaque id, never PII.
    */
   readonly anchorCustomerId?: string;
+}
+
+/**
+ * The anchor customer reference for a party: `anchorCustomerId` when set,
+ * falling back to the deprecated `sep12Id` alias. An empty string counts as
+ * unset, so the caller's fail-closed check sees "no reference", not "".
+ */
+export function anchorCustomerIdOf(party: PartyRef): string | undefined {
+  return party.anchorCustomerId || party.sep12Id || undefined;
 }
 
 export interface PaymentIntent {
@@ -165,16 +175,6 @@ export interface PaymentIntent {
    */
   readonly destinationFields?: Readonly<Record<string, string>>;
 }
-
-/**
- * How a corridor satisfies KYC for the receiving party.
- *  - "sep12":        customer registered via SEP-12 `PUT /customer`, status checked via `GET /customer`.
- *  - "sep6_fields":  KYC fields supplied inline on the SEP-6 transfer request; the engine carries
- *                    field NAMES and operator-supplied references only, never raw PII.
- *  - "bespoke":      anchor-specific onboarding; the engine relies on `anchorCustomerId` alone.
- *  - "none":         no KYC step is required for this corridor.
- */
-export type ComplianceMethod = "sep12" | "sep6_fields" | "bespoke" | "none";
 
 // --- Settlement references ----------------------------------------------
 export type SettlementRef =

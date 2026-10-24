@@ -200,6 +200,11 @@ describe("service: strict payment body validation", () => {
       field: "recipient.sep12Id",
     },
     {
+      name: "a non-string recipient.anchorCustomerId",
+      body: { ...full(), recipient: { id: "r", anchorCustomerId: 7 } },
+      field: "recipient.anchorCustomerId",
+    },
+    {
       name: "a non-string recipient.id",
       body: { ...full(), recipient: { id: null } },
       field: "recipient.id",
@@ -276,6 +281,18 @@ describe("service: strict payment body validation", () => {
     const out = r.body as { error: string; field: string };
     expect(out.error).toBe("AMOUNT_INVALID");
     expect(out.field).toBe("sourceAmount.asset");
+  });
+
+  it("accepts recipient.anchorCustomerId alongside the deprecated sep12Id", async () => {
+    const r = await svc().route({
+      method: "POST",
+      path: "/payments",
+      body: {
+        ...intentBody("party-ref-ok"),
+        recipient: { id: "r", sep12Id: "legacy-1", anchorCustomerId: "neutral-1" },
+      },
+    });
+    expect(r.status).toBe(200);
   });
 
   it("still accepts a well-formed body end to end", async () => {
