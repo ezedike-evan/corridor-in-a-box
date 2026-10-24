@@ -97,7 +97,11 @@ export interface AuditEntry extends LogFields {
   readonly networkFee?: string;
   readonly amountRefunded?: string;
   readonly amountFee?: string;
-  /** Pre-settle gate results, recorded on the `verifying` transition. */
+  /**
+   * Pre-settle gate results, one per configured check: recorded on the
+   * transition into `verifying` and again on the one leaving it (`settling`,
+   * `failed`, or `recovering` on the way to `held`).
+   */
   readonly checks?: readonly CheckResult[];
 }
 

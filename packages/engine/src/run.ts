@@ -1008,11 +1008,20 @@ function createRunContext(init: RunContextInit): RunContext {
     recordOutcome,
   } = init;
 
+  // The gate's results, recorded on the way into `verifying` and carried again
+  // on whichever transition leaves it, so the entry that says "we paid" or "we
+  // did not" also says why.
+  let gateChecks: readonly CheckResult[] | undefined;
+
   const advance: RunContext["advance"] = async (to, meta) => {
     if (!canTransition(run.state, to)) {
       return fail("SETTLEMENT_FAILED", `illegal transition ${run.state} -> ${to}`);
     }
     const from = run.state;
+    if (to === "verifying") gateChecks = meta?.checks;
+    else if (from === "verifying" && gateChecks && !meta?.checks) {
+      meta = { ...meta, checks: gateChecks };
+    }
     run.state = to;
     run.version += 1;
     trail.push(to);
@@ -1021,7 +1030,8 @@ function createRunContext(init: RunContextInit): RunContext {
     return ok(undefined);
   };
 
-  const die: RunContext["die"] = (error, checks) => failRun(init, error, checks);
+  const die: RunContext["die"] = (error, checks) =>
+    failRun(init, error, checks ?? (run.state === "verifying" ? gateChecks : undefined));
 
   const holdAndStop: RunContext["holdAndStop"] = async (
     error,
@@ -1279,7 +1289,9 @@ async function emitTransition(
     ...(meta?.checks && meta.checks.length > 0 && { checks: [...meta.checks] }),
   };
   const logger = deps.logger ?? silentLogger;
-  for (const c of meta?.checks ?? []) {
+  // One line per check, logged once when the results arrive; the transition
+  // out of `verifying` records them again but does not re-log them.
+  for (const c of run.state === "verifying" ? (meta?.checks ?? []) : []) {
     // Only the check's own fields: `detail` is PII-free by contract (see
     // CheckResult) and nothing about the sender or recipient is added here.
     logger.log(c.passed ? "info" : "warn", "corridor.gate.check", {

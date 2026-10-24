@@ -404,6 +404,12 @@ describe("pre-settle gate results in the audit trail", () => {
     expect(entry.checks).toHaveLength(checks.length);
     expect(entry.checks).toEqual(checks);
 
+    // The entry that leaves `verifying` for `settling` says why the run was paid.
+    const leaving = audit.entries.find((e) => e.from === "verifying")!;
+    expect(leaving.to).toBe("settling");
+    expect(leaving.checks).toEqual(checks);
+
+    // Logged once, when the results arrive, not again on the way out.
     const gateLogs = logs.filter((l) => l.msg === "corridor.gate.check");
     expect(gateLogs.map((l) => l.level)).toEqual(["info", "info"]);
   });
@@ -420,6 +426,7 @@ describe("pre-settle gate results in the audit trail", () => {
     expect(r.ok).toBe(false);
 
     const entry = audit.entries.find((e) => e.to === "failed")!;
+    expect(entry.from).toBe("verifying");
     expect(entry.error).toContain("SETTLEMENT_FAILED");
     expect(entry.checks).toHaveLength(2);
     expect(entry.checks?.find((c) => !c.passed)).toEqual({
@@ -430,10 +437,10 @@ describe("pre-settle gate results in the audit trail", () => {
       durationMs: 40,
     });
 
-    // info for the pass, warn for the failure — one line each (the first two lines
-    // come from the transition into `verifying`; the refusal re-logs them on `failed`).
+    // info for the pass, warn for the failure — one line each, logged on the way
+    // into `verifying`; the refusal records them again but does not re-log them.
     const gateLogs = logs.filter((l) => l.msg === "corridor.gate.check");
-    expect(gateLogs.slice(0, 2).map((l) => [l.level, l.fields?.check])).toEqual([
+    expect(gateLogs.map((l) => [l.level, l.fields?.check])).toEqual([
       ["info", "chain.balance"],
       ["warn", "sep31.info.asset"],
     ]);
@@ -449,6 +456,30 @@ describe("pre-settle gate results in the audit trail", () => {
     for (const t of transitions) expect(t.fields).not.toHaveProperty("checks");
   });
 
+  it("carries the checks on the way out of verifying when the run stops after a passing gate", async () => {
+    const audit = new InMemoryAuditLog();
+    let clock = Date.now();
+    // The firm quote outlives the gate by nothing: it expires while the checks run.
+    const slowGate: PreSettleGate = {
+      evaluate: async () => {
+        clock += 120_000;
+        return { passed: true, results: [passing] };
+      },
+    };
+
+    const r = await execute(
+      { ...intent, idempotencyKey: "obs-gate-expired" },
+      corridor(),
+      depsWith({ audit, gate: slowGate, now: () => clock }),
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("QUOTE_EXPIRED");
+
+    const leaving = audit.entries.find((e) => e.from === "verifying")!;
+    expect(leaving.to).not.toBe("settling");
+    expect(leaving.checks).toEqual([passing]);
+  });
+
   it("does not snapshot a caller's later mutation of the checks array", async () => {
     const audit = new InMemoryAuditLog();
     const checks = [passing];
@@ -460,9 +491,10 @@ describe("pre-settle gate results in the audit trail", () => {
     expect(r.ok).toBe(true);
     checks.push(failing);
     expect(audit.entries.find((e) => e.to === "verifying")!.checks).toHaveLength(1);
+    expect(audit.entries.find((e) => e.to === "settling")!.checks).toHaveLength(1);
   });
 
-  it("leaves checks off every transition that is not into verifying or failed-by-gate", async () => {
+  it("leaves checks off every transition that is not into or out of verifying", async () => {
     const audit = new InMemoryAuditLog();
     const r = await execute(
       { ...intent, idempotencyKey: "obs-nochecks" },
@@ -471,7 +503,7 @@ describe("pre-settle gate results in the audit trail", () => {
     );
     expect(r.ok).toBe(true);
     const withChecks = audit.entries.filter((e) => "checks" in e).map((e) => e.to);
-    expect(withChecks).toEqual(["verifying"]);
+    expect(withChecks).toEqual(["verifying", "settling"]);
   });
 });
 
