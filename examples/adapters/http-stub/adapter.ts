@@ -1,6 +1,10 @@
 // A worked example of a BESPOKE adapter: an anchor that speaks a proprietary
 // HTTP API instead of SEP-31.
 //
+// To scaffold a new adapter package instead of copying this file, run:
+//   pnpm create:adapter --id <slug> [--dir <path>]
+// (see scripts/create-adapter.ts; slugs must match ^[a-z0-9-]+$).
+//
 // The engine knows only `AnchorAdapter`, so a bespoke anchor is not a special
 // case anywhere else in the codebase — it is one more implementation of the
 // same port. This file is the whole adapter: about 200 lines, no SEP code, and
