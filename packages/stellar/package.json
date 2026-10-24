@@ -53,7 +53,7 @@
     "@corridor/manifest": "workspace:*",
     "@corridor/engine": "workspace:*",
     "@corridor/sep31": "workspace:*",
-    "@stellar/stellar-sdk": "^17.2.1",
+    "@stellar/stellar-sdk": "^17.3.0",
     "@corridor/probe": "workspace:*",
     "@corridor/router": "workspace:*"
   }
