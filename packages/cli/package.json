@@ -60,7 +60,7 @@
     "@corridor/types": "workspace:*",
     "pg": "^8.23.1",
     "yaml": "^2.9.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "tsup": "^9.0.0"
