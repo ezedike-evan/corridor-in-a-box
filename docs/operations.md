@@ -352,10 +352,14 @@ Two independent constraints, same conclusion:
    back on the transaction record. There is nothing for the engine to call.
 
 So when recovery wants to return money that has already left the distribution
-account, the engine cannot do it. It parks the run in `held` and a human
-resolves it with the anchor, out of band. The only "automated refund" in this
-system is the no-op case: nothing had gone out yet, so there was nothing to
-reverse (that is what `refunded` means — see below).
+account, the engine cannot do it. What it can do is wait: if the receiving
+anchor reports a terminal failure it is already refunding, the run enters
+`refund_pending` and the engine watches the anchor's transaction record for the
+refund it owns (see [`refund_pending`](#refund_pending)). A full report records
+`refunded`; a partial one, or silence past `recovery.refund_wait_seconds`, parks
+the run in `held` and a human resolves it with the anchor, out of band. The only
+refund the engine performs itself is the no-op case: nothing had gone out yet,
+so there was nothing to reverse. The engine never calls `requestRefund`.
 
 ### `held`
 
@@ -399,19 +403,19 @@ status history for the transaction to see why it never progressed.
 
 ### `refunded`
 
-**The engine believes no on-chain payment went out.** Despite the name, nothing
-was reversed — nothing can be (see
-[why there is no automated refund](#why-there-is-no-automated-refund)). In
-today's engine this state is reachable only when settlement never succeeded
-under a `refund_sender` policy: the engine found no `stellar_tx_hash` on the
-run, so there was nothing to undo, and it recorded `refunded` without touching
-the chain. Verify the belief before closing the run:
+`refunded` is reached two ways, and the run's trail and `refund_id` tell them apart.
 
-- `stellar_tx_hash` must be **unset**. If it IS set (with the real
-  `StellarSettlementSubmitter` that combination should be impossible; the
-  mock's `refund()` does succeed, so test data can produce it), money left the
-  account and the state is lying — treat the run as `held`, follow the steps
-  above, and file a bug.
+**1. Nothing went out.** The engine found no `stellar_tx_hash` on the run under a
+`refund_sender` policy, so there was nothing to undo and it recorded `refunded`
+without touching the chain. Despite the name, nothing was reversed — nothing can be
+(see [why there is no automated refund](#why-there-is-no-automated-refund)). Verify
+the belief before closing the run:
+
+- `stellar_tx_hash` must be **unset**. If it IS set and the trail never passed
+  through `refund_pending` (with the real `StellarSettlementSubmitter` that
+  combination should be impossible; the mock's `refund()` does succeed, so test data
+  can produce it), money left the account and the state is lying — treat the run as
+  `held`, follow the steps above, and file a bug.
 - An unset hash is the engine's belief, not proof: an **ambiguous submission**
   can land on-chain without the engine ever learning the hash (the submit
   succeeded but confirmation timed out on Horizon read lag, or the send itself
@@ -420,11 +424,11 @@ the chain. Verify the belief before closing the run:
   payments (the same check "Crash mid-flight" below prescribes for `settling`)
   before declaring the sender whole.
 
-The state machine defines `refund_pending` (between `recovering` and `refunded`)
-but no transition enters it yet — the engine does not call `requestRefund`. When
-a producer lands, a payment that did go out and was returned by the anchor will
-enter `refund_pending` with `stellar_tx_hash` set. The run's trail tells the
-two apart — and `refund_id`, described below, records which refund it was.
+**2. The anchor refunded.** The payment did go out (`stellar_tx_hash` is set), the
+receiving anchor reported a terminal failure, and the run passed through
+[`refund_pending`](#refund_pending) until the anchor's own refund report arrived in
+full. `refund_id` holds the first refund payment's id. The engine did not request
+or perform this refund; it observed it. The engine never calls `requestRefund`.
 
 ### `refund_id` on the run
 
@@ -598,9 +602,27 @@ not that a step was skipped.
     correct across replicas — the `IdempotencyStore` interface is the seam.
   - Inject a shared rate limiter via `ServiceOptions.rateLimiter` (the
     `RateLimiter` interface; `take()` may be async). The default `TokenBucket`
-    is per-process; a Redis token bucket (a small `EVAL` Lua script doing
-    refill-then-decrement against a per-client key) enforces the limit fleet-wide.
-    Without it, each replica grants the full bucket independently.
+    is per-process; `RedisTokenBucket` (from `@corridor/service`) keeps the
+    bucket in Redis, so one limit holds fleet-wide. Without it, each replica
+    grants the full bucket independently. It needs only a one-method
+    `RedisLike { eval(script, keys, args) }`, so adapt whichever client you use:
+
+    ```ts
+    import { RedisTokenBucket } from "@corridor/service";
+
+    const limiter = new RedisTokenBucket(
+      // ioredis; node-redis: client.eval(script, { keys, arguments: args.map(String) })
+      { eval: (script, keys, args) => client.eval(script, keys.length, ...keys, ...args) },
+      { capacity: 60, refillPerSec: 1 },
+      { onError: "closed" }, // or "open"; see below
+    );
+    ```
+
+    The bucket refills inside Redis (`TIME` is the clock, so replicas with skewed
+    clocks agree) and expires once an idle bucket would have fully refilled.
+    When Redis errors, `onError: "closed"` (the default) answers 429 and logs a
+    line without the key; `"open"` admits the request. Pick closed unless
+    availability matters more than the limit.
 - Set `maxBodyBytes` on the service for your payload size (default 64 KiB).
 - Enable `trustProxy` **only** behind an ingress that sets `X-Forwarded-For` and
   strips any client-supplied value; otherwise leave it off so the socket peer
@@ -608,6 +630,28 @@ not that a step was skipped.
 - Wire `gracefulShutdown(server)` to `SIGTERM`/`SIGINT` so a rollout drains
   in-flight payments instead of severing one mid-settle.
 - Terminate TLS at your ingress; the built-in `node:http` server speaks plain HTTP.
+
+### Running the service as a container
+
+The repo's `Dockerfile` builds the service image: Node 22, non-root (`USER node`),
+`EXPOSE 8080`, a `HEALTHCHECK` on `/healthz`, and the `corridors/` manifests copied in
+root-owned and read-only. It runs `examples/run-service.ts`, so the env contract is the
+one in that file's header.
+
+```bash
+docker build -t corridor-service .
+docker run --rm -p 8080:8080 \
+  -e CORRIDOR_SIGNER_SECRET=S… -e DATABASE_URL=postgres://… -e CORRIDOR_API_KEYS=… \
+  corridor-service
+```
+
+**Signer secrets are passed at runtime, never built in.** Nothing secret is in the image
+(`.dockerignore` excludes every `.env*`, and CI fails if one is present), and an image
+that carried a seed would hand it to anyone who can pull it. Use `CORRIDOR_SIGNER=vault`
+(see [docs/key-management.md](./key-management.md)) rather than a seed in the
+container's environment for anything that moves real money. Tagged releases are
+published to `ghcr.io/<owner>/corridor-service` with provenance and an SBOM; pull
+requests build and smoke-test the image without pushing it.
 
 ## 6. Versioning & releases
 
@@ -637,6 +681,29 @@ const service = createService({
   metricsText: () => metrics.render(), // GET /metrics (public, unmetered)
 });
 ```
+
+### OpenTelemetry
+
+For an OTLP backend instead of Prometheus, `@corridor/otel` bridges the same two ports.
+`@opentelemetry/api` and `@opentelemetry/api-logs` are peer dependencies, so you choose
+the versions, SDK and exporters; the engine itself imports no OpenTelemetry.
+
+```ts
+import { metrics } from "@opentelemetry/api";
+import { logs } from "@opentelemetry/api-logs";
+import { otelLogger, otelMetrics } from "@corridor/otel";
+
+const deps = {
+  ...engineDeps,
+  metrics: otelMetrics(metrics.getMeter("corridor")), // increment -> Counter, timing -> Histogram (ms)
+  logger: otelLogger(logs.getLogger("corridor")), // LogLevel -> severity; fields -> attributes
+};
+```
+
+Each metric name becomes one instrument, tags become attributes. Log records are emitted in
+the active context, so the SDK stamps them with the current trace and span ids, and the
+`requestId` / `traceparent` fields the engine already records travel as attributes. That
+correlates logs with your traces; it does not create spans (a span per verb is a follow-up).
 
 Point Prometheus at `/metrics`. The two alerts that matter both key off the
 terminal counter — they catch money that stopped needing a human (see §2):

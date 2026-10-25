@@ -26,6 +26,22 @@ made-up payout asset — so it can be read, copied and run without touching a
 real anchor or a real network. `tests/http-stub-adapter.test.ts` fails if a
 URL in the example points anywhere but a reserved example domain.
 
+## Scaffolding a new adapter
+
+Rather than copying `packages/sep31` or the example above and deleting most of it:
+
+```sh
+pnpm create:adapter --id my-bank            # -> packages/adapter-my-bank
+pnpm create:adapter --id my-bank --dir /tmp/x
+```
+
+`--id` must match `^[a-z0-9-]+$`, the same rule as the manifest's `custom:<id>`
+protocol. The generated package has a `package.json`, `src/index.ts` with an
+adapter class whose verbs all return a "not implemented" failure (the engine fails
+closed on it until you fill them in), `src/adapter.test.ts` running the conformance
+harness, and a README checklist. It refuses to overwrite an existing directory.
+Run `pnpm install` afterwards so the workspace picks the new package up.
+
 ---
 
 ## The `AnchorAdapter` contract

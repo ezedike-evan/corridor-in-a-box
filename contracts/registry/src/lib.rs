@@ -671,3 +671,8 @@ impl Registry {
 }
 
 mod test;
+
+#[cfg(test)]
+extern crate std;
+
+mod prop_test;

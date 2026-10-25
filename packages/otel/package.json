@@ -1,0 +1,53 @@
+{
+  "name": "@corridor/otel",
+  "version": "0.1.0",
+  "description": "OpenTelemetry adapters for the corridor engine's Metrics and Logger ports.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ezedike-evan/corridor-in-a-box.git",
+    "directory": "packages/otel"
+  },
+  "bugs": {
+    "url": "https://github.com/ezedike-evan/corridor-in-a-box/issues"
+  },
+  "homepage": "https://github.com/ezedike-evan/corridor-in-a-box#readme",
+  "keywords": [
+    "stellar",
+    "corridor",
+    "opentelemetry",
+    "otel",
+    "metrics",
+    "logs"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "source": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node init && tsup"
+  },
+  "dependencies": {
+    "@corridor/engine": "workspace:*"
+  },
+  "devDependencies": {
+    "@opentelemetry/api": "1.9.0",
+    "@opentelemetry/api-logs": "0.200.0"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/api-logs": ">=0.200.0 <1"
+  }
+}

@@ -29,6 +29,16 @@ pnpm lint                # eslint + prettier --check
 pnpm example             # run a payment end-to-end (mocked anchor + settle)
 ```
 
+`pnpm mock:anchor` is the quickest way to run a whole corridor locally. It starts a
+small SEP-1/10/12/31/38 server on `localhost:8089` (`corridors/mock.corridor.yaml`
+points at it) that can misbehave on demand: `--scenario stall | kyc_reject |
+quote_expired | error_after_settle | refund_full | refund_partial |
+slow_pending_external` (default `happy`), switchable while running with
+`POST /__control/scenario`. It needs no containers and no Stellar payment: the
+server marks a transaction paid when told (`POST /__control/received`) or after
+`--receive-after-polls N` polls. `tests/mock-anchor.test.ts` drives `execute()`
+through the scenarios. It is a fictional anchor and not a security boundary.
+
 Node 22+ and pnpm 9+ are required (see `.nvmrc` and `packageManager` in
 `package.json`), and the contracts need a Rust toolchain with the
 `wasm32v1-none` target. The dev container below sets all of it up for you.
@@ -142,6 +152,61 @@ lists every quarantined test, its issue, and how it did in the job summary.
 `tests/quarantine.test.ts` fails if a `quarantine()` call has no issue URL.
 Once the issue is fixed, remove the wrapper.
 
+## Building the packages
+
+Every library package publishes built output: ESM plus type declarations in `dist/`,
+with conditional `exports` (`types`, `source`, `import`) and `"files": ["dist"]`.
+In-repo code and tests keep running from source (tsconfig `paths`, the vitest aliases),
+so a plain `pnpm test` needs no build.
+
+```bash
+pnpm build             # pnpm -r build: tsup per package, in dependency order
+pnpm check:packages    # publint, are-the-types-wrong (esm-only) and a plain-Node smoke test
+```
+
+CI runs both. Adding a package: give it a `tsup.config.ts`, the `exports`/`files`/`build`
+fields (`tests/package-metadata.test.ts` fails without them) and, if it has several entry
+points, one `exports` subpath each. `dist/` is git-ignored.
+
+## Coverage
+
+`pnpm test:coverage` runs the suite under v8 coverage (`packages/*/src/**`) and fails
+when a threshold in `vitest.config.ts` is not met; CI's `build` job runs it and uploads
+`coverage/lcov.info`. The floors sit a little below what the suite measured on
+2026-10-24 (lines/statements 83.6%, branches 84.2%, functions 91.9%):
+
+| Scope                                            | Lines / statements | Branches | Functions |
+| ------------------------------------------------ | ------------------ | -------- | --------- |
+| Global                                           | 82                 | 83       | 90        |
+| `packages/engine/src/run.ts`                     | 90                 | 79       | 95        |
+| `packages/engine/src/verbs.ts`                   | 88                 | 85       | 91        |
+| `packages/engine/src/state.ts`, `idempotency.ts` | 99                 | 99       | 99        |
+| `packages/types/src/money.ts`                    | 99                 | 87       | 99        |
+
+Run on a subset of tests it will fail the global floor, which is expected: use it on the
+whole suite. If your change legitimately lowers a number (deleting covered code), say so
+in the PR and lower the floor in the same commit; never lower one to land untested code.
+Raise a floor when coverage rises for good. Spawned CLI processes are not measured, and CI measured `run.ts` functions at 96.8% against 100% locally, hence its lower floor.
+
+## Releasing
+
+Maintainers only. Pushing a `vX.Y.Z` tag runs `.github/workflows/release-packages.yml`,
+which tests, builds and publishes every public `@corridor/*` package with provenance
+and creates the GitHub Release. (`cli-vX.Y.Z` tags still publish `@corridor/cli` alone,
+via `release.yml`.) Checklist:
+
+1. Move `## [Unreleased]` in `CHANGELOG.md` to a dated `## [X.Y.Z] - YYYY-MM-DD`
+   section and open a fresh empty `Unreleased`. That section is the release body.
+2. Set `version` to `X.Y.Z` in **every** public `packages/*/package.json` (a package
+   that must not ship is `"private": true`).
+3. `pnpm lint && pnpm typecheck && pnpm test && pnpm -r build` is green on `main`.
+4. `pnpm exec tsx scripts/release-check.ts vX.Y.Z` prints `release vX.Y.Z: ok`. The
+   workflow runs the same check first and refuses to publish when a public package's
+   version is not the tag's, the CHANGELOG section is missing, or a package still
+   exports TypeScript source rather than a built `dist/`.
+5. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. The repo secret
+   `NPM_TOKEN` must be an npm automation token with publish rights to `@corridor`.
+
 ## Commit messages
 
 We use [Conventional Commits](https://www.conventionalcommits.org/) prefixes
@@ -150,7 +215,7 @@ under ~72 characters and explain the _why_ in the body.
 
 ## Good first issues
 
-- Add `*.corridor.yaml` manifests for live SEP-24 / SEP-6 anchors and add corresponding `plan` verification tests.
+- Add `*.corridor.yaml` manifests for live SEP-31 or SEP-6 anchors (SEP-24's interactive flow is out of scope, see `docs/protocols/sep24.md`) and add corresponding `plan` verification tests.
 - Extend the conformance suite in `packages/adapter-kit` with additional probes for anchor SEP conformance.
 - Add and expand conformance and integration test coverage across corridor lifecycle states and error paths.
 - Widen the SEP-31 status mapping in `packages/sep31` as you hit real anchors that report statuses we don't yet classify (see `mapSep31Status`).

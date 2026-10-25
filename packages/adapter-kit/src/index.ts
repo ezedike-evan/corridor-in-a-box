@@ -611,40 +611,113 @@ export interface AnchorAdapter {
 }
 
 /**
+ * How the operator pays fiat in to the sending anchor. Opaque to the engine:
+ * it is displayed to the operator and never parsed, so it must carry no PII
+ * about the sender or recipient (the same rule as `CheckResult.detail`).
+ */
+export interface FundingInstructions {
+  /** One human-readable line, e.g. "Wire 100.00 USD to the account below". */
+  readonly summary: string;
+  /** What to quote on the transfer so the anchor can match it, when it asks for one. */
+  readonly reference?: string;
+  /** Anchor-specific labelled values (account number, routing code, ...). */
+  readonly fields?: Readonly<Record<string, string>>;
+}
+
+/** What a sending anchor says about itself, ahead of any payment. */
+export interface SourceAdapterCapabilities {
+  readonly protocol: string;
+  /** `quoteDeposit` is implemented. */
+  readonly quotes: boolean;
+}
+
+/**
  * Adapter for the source anchor's deposit/on-ramp transaction.
  * `openDeposit` must be idempotent on `intent.idempotencyKey`, so a crash
  * after the source accepts the deposit but before its id is stored is safe to
  * resume.
+ *
+ * `name`, `capabilities`, `quoteDeposit` and `instructions` are optional, so an
+ * adapter written against the original two-method port keeps compiling and the
+ * engine, which reads only `transactionId` and `getDeposit`, is unchanged.
  */
 export interface SourceAnchorAdapter {
+  readonly name?: string;
+  capabilities?(): SourceAdapterCapabilities;
+  /** Price the deposit before opening it. */
+  quoteDeposit?(intent: PaymentIntent, corridor: Corridor): Promise<Outcome<Quote>>;
+  /**
+   * `ctx.account` is the operator's Stellar account the bridge asset should be
+   * delivered to, for anchors that need it up front.
+   */
   openDeposit(
     intent: PaymentIntent,
     corridor: Corridor,
-  ): Promise<Outcome<{ transactionId: string }>>;
+    ctx?: { readonly account?: string },
+  ): Promise<Outcome<{ transactionId: string; instructions?: FundingInstructions }>>;
   getDeposit(transactionId: string): Promise<Outcome<TransactionStatus>>;
+}
+
+export interface MockSourceAdapterOptions {
+  name?: string;
+  /** Whether the deposit reaches `completed`. Default true. */
+  settled?: boolean;
+  /** Report `pending_sender` this many times from `getDeposit` before the final status. */
+  pendingPolls?: number;
+  /** Make `openDeposit` fail with this code, e.g. to exercise a source outage. */
+  failOpen?: "ANCHOR_UNAVAILABLE" | "KYC_REJECTED";
+  /** Instructions returned by `openDeposit`. A default is supplied. */
+  instructions?: FundingInstructions;
 }
 
 /** Configurable source adapter for engine tests. */
 export function createMockSourceAdapter(
-  opts: { settled?: boolean } = {},
+  opts: MockSourceAdapterOptions = {},
 ): SourceAnchorAdapter {
   let counter = 0;
-  const deposits = new Map<string, boolean>();
+  const deposits = new Map<string, { settled: boolean; pending: number }>();
   const byKey = new Map<string, string>();
   return {
+    name: opts.name ?? "mock-source",
+    capabilities: () => ({ protocol: "mock", quotes: true }),
+    async quoteDeposit(intent) {
+      return ok<Quote>({
+        id: `source_q_${++counter}`,
+        price: "1.00",
+        expiresAt: Date.now() + 60_000,
+        sourceAmount: intent.sourceAmount,
+        destAmount: intent.sourceAmount,
+        firm: true,
+      });
+    },
     async openDeposit(intent) {
+      if (opts.failOpen) return fail(opts.failOpen, "mock source refused to open the deposit");
       const existing = byKey.get(intent.idempotencyKey);
-      if (existing) return ok({ transactionId: existing });
-      const transactionId = `source-deposit-${++counter}`;
-      deposits.set(transactionId, opts.settled ?? true);
-      byKey.set(intent.idempotencyKey, transactionId);
-      return ok({ transactionId });
+      const transactionId = existing ?? `source-deposit-${++counter}`;
+      if (!existing) {
+        deposits.set(transactionId, {
+          settled: opts.settled ?? true,
+          pending: opts.pendingPolls ?? 0,
+        });
+        byKey.set(intent.idempotencyKey, transactionId);
+      }
+      return ok({
+        transactionId,
+        instructions: opts.instructions ?? {
+          summary: `Pay ${intent.sourceAmount.amount} ${intent.sourceAmount.asset} to the mock source anchor`,
+          reference: transactionId,
+        },
+      });
     },
     async getDeposit(transactionId) {
-      const settled = deposits.get(transactionId);
-      if (settled === undefined)
+      const d = deposits.get(transactionId);
+      if (d === undefined)
         return fail("ANCHOR_UNAVAILABLE", `unknown source deposit ${transactionId}`);
-      return ok({ status: settled ? "completed" : "pending_sender", settled });
+      if (d.pending > 0) {
+        d.pending -= 1;
+        return ok({ status: "pending_sender", settled: false });
+      }
+      return ok({ status: d.settled ? "completed" : "pending_sender", settled: d.settled });
     },
   };
 }

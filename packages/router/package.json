@@ -24,10 +24,25 @@
     "node": ">=22"
   },
   "exports": {
-    ".": "./src/index.ts",
-    "./testing": "./src/testing.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "source": "./src/index.ts",
+      "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "source": "./src/testing.ts",
+      "import": "./dist/testing.js"
+    }
   },
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node init && tsup"
+  },
   "dependencies": {
     "@corridor/types": "workspace:*",
     "@corridor/manifest": "workspace:*",

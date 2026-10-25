@@ -1,0 +1,61 @@
+# One repeatable release: push a `vX.Y.Z` tag and every public @corridor package
+# is tested, built, version-checked and published with provenance, then a GitHub
+# Release is created from that version's CHANGELOG section.
+#
+# Distinct from release.yml, which still publishes @corridor/cli alone on
+# `cli-vX.Y.Z` tags; the two tag patterns do not overlap.
+#
+# Needs one repo secret: NPM_TOKEN (an npm automation token with publish rights
+# to the @corridor scope). `--provenance` needs the id-token permission below.
+#
+# It REFUSES to publish when scripts/release-check.ts finds a problem: a public
+# package whose version is not the tag's, no CHANGELOG section for the version,
+# or a package that still exports TypeScript source instead of a built dist.
+# See "Releasing" in CONTRIBUTING.md.
+name: release-packages
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # gh release create
+  id-token: write # npm --provenance
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Version comes from package.json "packageManager" (pnpm@9.x); do not also
+      # pass `version:` here or action-setup errors on the duplicate.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+
+      # Cheapest checks first, and before anything is built or tested: a tag that
+      # cannot be released should fail in seconds.
+      - name: Check the tag against every public package and the CHANGELOG
+        run: pnpm exec tsx scripts/release-check.ts "$GITHUB_REF_NAME"
+
+      - name: Extract this version's release notes
+        run: pnpm exec tsx scripts/changelog-section.ts "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+
+      # Never publish a broken build.
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm -r build
+
+      - name: Publish every public package
+        run: pnpm -r publish --provenance --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create the GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" --verify-tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -44,6 +44,7 @@ import {
   type RouteResolver,
 } from "@corridor/router";
 import { Sep31Adapter } from "@corridor/sep31";
+import { Sep6Adapter } from "@corridor/sep6";
 import {
   assertSignerProducesValidSignatures,
   LocalKeypairSigner,
@@ -173,10 +174,11 @@ async function buildResolver(adapterFor: (c: Corridor) => AnchorAdapter): Promis
   return { resolver, label: module };
 }
 
-/** Protocol -> adapter. Register `sep6` / `custom:<id>` here as those adapters are wired. */
+/** Protocol -> adapter. Register `custom:<id>` here as those adapters are wired. */
 function buildAdapterRegistry(sep10: StellarSep10Signer) {
   const registry = createAdapterRegistry();
   registry.register("sep31", (corridor) => new Sep31Adapter(corridor, { sep10 }));
+  registry.register("sep6", (corridor) => new Sep6Adapter(corridor, { sep10 }));
   return registry;
 }
 

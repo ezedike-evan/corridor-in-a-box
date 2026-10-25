@@ -20,6 +20,22 @@ export function metadataProblems(dir: string, pkg: PackageJson): string[] {
   if (repo?.url !== REPO_URL) problems.push("repository.url missing or wrong");
   if (repo?.directory !== `packages/${dir}`)
     problems.push(`repository.directory must be packages/${dir}`);
+  // Published as built output: exports point at dist (with types), only dist ships, and
+  // the package can build itself. `source` keeps in-repo tooling on the TypeScript.
+  const exportsMap = pkg.exports as Record<string, Record<string, string>> | undefined;
+  for (const [subpath, conditions] of Object.entries(exportsMap ?? {})) {
+    for (const condition of ["types", "import"]) {
+      if (!conditions?.[condition]?.startsWith("./dist/")) {
+        problems.push(`exports["${subpath}"].${condition} must point into ./dist/`);
+      }
+    }
+  }
+  if (!exportsMap || Object.keys(exportsMap).length === 0) problems.push("exports missing");
+  if (!Array.isArray(pkg.files) || !pkg.files.includes("dist"))
+    problems.push('files must include "dist"');
+  if ((pkg.scripts as Record<string, string> | undefined)?.build === undefined) {
+    problems.push("build script missing");
+  }
   const bugs = pkg.bugs as { url?: string } | undefined;
   if (!bugs?.url) problems.push("bugs.url missing");
   if (!Array.isArray(pkg.keywords) || pkg.keywords.length === 0)
@@ -54,6 +70,15 @@ describe("package metadata", () => {
       bugs: { url: "https://example.test/issues" },
       homepage: "https://example.test",
       keywords: ["k"],
+      exports: {
+        ".": {
+          types: "./dist/index.d.ts",
+          source: "./src/index.ts",
+          import: "./dist/index.js",
+        },
+      },
+      files: ["dist"],
+      scripts: { build: "tsup" },
     };
     expect(metadataProblems("x", full)).toEqual([]);
     for (const field of Object.keys(full)) {

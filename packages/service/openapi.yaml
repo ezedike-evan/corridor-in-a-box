@@ -1,0 +1,450 @@
+openapi: 3.1.0
+info:
+  title: corridor-in-a-box service
+  version: 0.1.0
+  summary: HTTP API over the corridor engine.
+  description: |
+    Starts payments on a corridor and reads them back. This document is tested against the
+    real `route()` in `tests/openapi.test.ts`, so a response shape the spec does not allow
+    fails CI.
+
+    Every response carries an `x-request-id` header, echoed from the request when it sent
+    one. Error bodies never include anchor URLs, upstream bodies or stack traces.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: http://localhost:8080
+    description: Local `pnpm serve`
+security:
+  - bearerAuth: []
+tags:
+  - name: payments
+  - name: ops
+paths:
+  /healthz:
+    get:
+      tags: [ops]
+      operationId: healthz
+      summary: Liveness
+      description: Public and unmetered. Always 200 while the process is up.
+      security: []
+      responses:
+        "200":
+          description: The process is up.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                additionalProperties: false
+                properties:
+                  status: { const: ok }
+  /readyz:
+    get:
+      tags: [ops]
+      operationId: readyz
+      summary: Readiness
+      description: |
+        Public and unmetered. 200 when every readiness check passes, 503 while draining or when
+        any check fails. Per-check results only; never an error message.
+      security: []
+      responses:
+        "200":
+          description: Every check passed.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: Draining, or a check failed.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+  /metrics:
+    get:
+      tags: [ops]
+      operationId: metrics
+      summary: Prometheus metrics
+      description: Public and unmetered. Only present when the service is given a metrics renderer.
+      security: []
+      responses:
+        "200":
+          description: Prometheus text exposition.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            text/plain:
+              schema: { type: string }
+  /payments:
+    post:
+      tags: [payments]
+      operationId: createPayment
+      summary: Run a payment
+      description: |
+        Runs the payment to a terminal state and returns the result. Idempotent on
+        `idempotencyKey`: the same key never settles twice. The run is owned by the caller's
+        bearer credential.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentIntent" }
+      responses:
+        "200":
+          description: The run reached a result.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunResult" }
+        "400":
+          description: The body is not a valid payment. `field` names the offending input.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvalidBody" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: The corridor id is not served by this process.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409": { $ref: "#/components/responses/EngineError" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "422": { $ref: "#/components/responses/EngineError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "403": { $ref: "#/components/responses/EngineError" }
+        "500": { $ref: "#/components/responses/EngineError" }
+        "501": { $ref: "#/components/responses/EngineError" }
+        "502": { $ref: "#/components/responses/EngineError" }
+        "503":
+          description: Draining, the lane is halted, or no trusted route is available.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/Draining" }
+                  - { $ref: "#/components/schemas/EngineError" }
+        "504": { $ref: "#/components/responses/EngineError" }
+  /payments/{key}:
+    get:
+      tags: [payments]
+      operationId: getPayment
+      summary: Read a payment
+      description: |
+        Scoped to the caller: a run created by another credential answers 404, never 403, so the
+        existence of a key is not revealed. Only the error code is returned, not its message.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: The idempotency key the payment was created with.
+          schema: { type: string }
+      responses:
+        "200":
+          description: The stored run.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such run for this caller.
+          headers:
+            x-request-id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /callbacks/sep31/{corridorId}:
+    post:
+      tags: [payments]
+      operationId: sep31Callback
+      summary: SEP-31 transaction callback
+      description: |
+        Called by the receiving anchor. Authenticated by a signature over `<t>.<raw body>` in the
+        `Signature` header (`t=<unix>, s=<base64>`), checked against the anchor's stellar.toml
+        signing key within a 120 second window, not by a bearer token. Wakes the reconcile loop
+        for the transaction.
+      security: []
+      parameters:
+        - name: corridorId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Signature
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                transaction:
+                  type: object
+                  properties:
+                    id: { type: string }
+      responses:
+        "200":
+          description: Accepted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: false }
+        "401":
+          description: The signature is missing, malformed, expired or wrong.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Unknown corridor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: An API key. Required when the service is started with API keys.
+  headers:
+    RequestId:
+      description: Correlates the response with the log lines the request produced.
+      schema: { type: string }
+  responses:
+    Unauthorized:
+      description: Missing or unknown API key.
+      headers:
+        x-request-id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            additionalProperties: false
+            properties:
+              error: { const: unauthorized }
+    RateLimited:
+      description: The client's token bucket is empty.
+      headers:
+        x-request-id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            additionalProperties: false
+            properties:
+              error: { const: rate_limited }
+    TooLarge:
+      description: The request body is over the size limit.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    EngineError:
+      description: The engine refused or failed the payment. The status comes from the error code.
+      headers:
+        x-request-id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - { $ref: "#/components/schemas/EngineError" }
+              - { $ref: "#/components/schemas/AmountInvalid" }
+  schemas:
+    Money:
+      type: object
+      required: [asset, amount]
+      additionalProperties: false
+      properties:
+        asset: { type: string, examples: [USDC] }
+        amount:
+          type: string
+          description: A decimal string, never a number.
+          examples: ["100.00"]
+    Party:
+      type: object
+      required: [id]
+      additionalProperties: false
+      properties:
+        id: { type: string, minLength: 1 }
+        jurisdiction: { type: string }
+        sep12Id: { type: string, deprecated: true, description: Alias of anchorCustomerId. }
+        anchorCustomerId:
+          {
+            type: string,
+            description: The customer id issued by the receiving anchor's SEP-12.,
+          }
+    PaymentIntent:
+      type: object
+      required: [idempotencyKey, corridorId, sender, recipient, sourceAmount]
+      additionalProperties: false
+      properties:
+        idempotencyKey:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9._:-]+$"
+        corridorId: { type: string, minLength: 1, maxLength: 128 }
+        sender: { $ref: "#/components/schemas/Party" }
+        recipient: { $ref: "#/components/schemas/Party" }
+        sourceAmount: { $ref: "#/components/schemas/Money" }
+        destinationFields:
+          type: object
+          maxProperties: 50
+          additionalProperties: { type: string, maxLength: 256 }
+    CorridorState:
+      type: string
+      enum:
+        - created
+        - quoted
+        - compliant
+        - opened
+        - funding
+        - funded
+        - verifying
+        - settling
+        - retrying
+        - settled
+        - reconciled
+        - completed
+        - recovering
+        - refund_pending
+        - refunded
+        - held
+        - failed
+    SettlementRef:
+      oneOf:
+        - type: object
+          required: [kind, stellarTxHash]
+          properties:
+            kind: { const: stellar }
+            stellarTxHash: { type: string }
+            ledger: { type: integer }
+            feeCharged: { type: string }
+            claimableBalanceId: { type: string }
+        - type: object
+          required: [kind, reference]
+          properties:
+            kind: { const: adapter }
+            reference: { type: string }
+    RunResult:
+      type: object
+      required: [idempotencyKey, state, trail]
+      properties:
+        idempotencyKey: { type: string }
+        state: { $ref: "#/components/schemas/CorridorState" }
+        transactionId: { type: string }
+        stellarTxHash: { type: string }
+        settlementKind: { enum: [stellar, adapter] }
+        settlementRef: { $ref: "#/components/schemas/SettlementRef" }
+        trail:
+          type: array
+          items: { $ref: "#/components/schemas/CorridorState" }
+    RunStatus:
+      type: object
+      required: [idempotencyKey, corridorId, state]
+      additionalProperties: false
+      properties:
+        idempotencyKey: { type: string }
+        corridorId: { type: string }
+        state: { $ref: "#/components/schemas/CorridorState" }
+        transactionId: { type: string }
+        stellarTxHash: { type: string }
+        error:
+          type: string
+          description: The error code only, never its message.
+    ErrorCode:
+      type: string
+      enum:
+        - MANIFEST_INVALID
+        - MANIFEST_CHANGED
+        - CAPABILITY_MISMATCH
+        - AMOUNT_INVALID
+        - ENGINE_MISCONFIGURED
+        - QUOTE_UNAVAILABLE
+        - QUOTE_EXPIRED
+        - KYC_REQUIRED
+        - KYC_REJECTED
+        - ANCHOR_UNAVAILABLE
+        - SETTLEMENT_FAILED
+        - SETTLEMENT_TIMEOUT
+        - REFUND_UNSUPPORTED
+        - RECONCILE_MISMATCH
+        - RECONCILE_STALLED
+        - IDEMPOTENCY_CONFLICT
+        - PRESETTLE_ANCHOR_DRIFT
+        - PRESETTLE_TX_MISMATCH
+        - PRESETTLE_DESTINATION_UNSAFE
+        - PRESETTLE_INSUFFICIENT_FUNDS
+        - PRESETTLE_QUOTE_WINDOW
+        - PRESETTLE_AMOUNT_OUT_OF_RANGE
+        - PRESETTLE_RECEIVER_NOT_ACCEPTED
+        - CORRIDOR_UNPROVEN
+        - CORRIDOR_HALTED
+        - DRY_RUN_COMPLETE
+        - ROUTE_REFUSED
+    EngineError:
+      type: object
+      required: [error, message]
+      additionalProperties: false
+      properties:
+        error: { $ref: "#/components/schemas/ErrorCode" }
+        message: { type: string }
+    AmountInvalid:
+      type: object
+      required: [error, field, message]
+      additionalProperties: false
+      properties:
+        error: { const: AMOUNT_INVALID }
+        field: { enum: [sourceAmount.amount, sourceAmount.asset] }
+        message: { type: string }
+    InvalidBody:
+      type: object
+      required: [error, field, reason]
+      additionalProperties: false
+      properties:
+        error: { const: invalid payment body }
+        field: { type: string, description: 'Path of the offending input, e.g. "sender.id".' }
+        reason: { type: string }
+    Draining:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error: { const: draining }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        corridorId: { type: string }
+    Readiness:
+      type: object
+      required: [status, checks]
+      additionalProperties: false
+      properties:
+        status: { enum: [ok, degraded, draining] }
+        checks:
+          type: array
+          items:
+            type: object
+            required: [name, ok]
+            additionalProperties: false
+            properties:
+              name: { type: string }
+              ok: { type: boolean }

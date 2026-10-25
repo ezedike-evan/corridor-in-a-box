@@ -1,0 +1,17 @@
+# Keep secrets, build output and everything the service does not run out of the image.
+.git
+.github
+.claude
+.devcontainer
+.env
+.env.*
+**/.env
+**/.env.*
+**/node_modules
+**/dist
+coverage
+web
+contracts/target
+docs
+tests
+*.md

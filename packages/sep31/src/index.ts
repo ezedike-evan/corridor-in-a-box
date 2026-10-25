@@ -550,10 +550,11 @@ export class Sep31Adapter implements AnchorAdapter {
   //
   // Since #72, `requestRefund` is part of the `AnchorAdapter` port. The
   // generic `Sep31Adapter` fails closed with `REFUND_UNSUPPORTED` — standard
-  // SEP-31 anchors have no sender-initiated refund endpoint. The engine does
-  // not call it yet, and the state machine defines `refund_pending` but no
-  // transition enters it. The method occupies the name so bespoke adapters
-  // (OTC desks, proprietary anchors) can implement anchor-driven refunds.
+  // SEP-31 anchors have no sender-initiated refund endpoint. The engine never
+  // calls it: after a payment has gone out and the anchor reports a terminal
+  // failure it enters `refund_pending` and watches `getTransaction` for the
+  // anchor's own refund report instead. The method occupies the name so bespoke
+  // adapters (OTC desks, proprietary anchors) can implement anchor-driven refunds.
   async requestRefund(
     transactionId: string,
     _amount?: Money,

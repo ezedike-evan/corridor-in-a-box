@@ -558,12 +558,12 @@ export class Sep6Adapter implements AnchorAdapter {
   }
 
   /**
-   * Minimal SEP-38 firm quote — the honest floor, not the full design. #196
-   * owns SEP-38 properly (indicative prices, the `total_price` arithmetic
-   * cross-check @corridor/sep31 performs, expiry policy); until that lands we
-   * only POST /quote when the dest pins a quote server, honour the anchor's
-   * own sell_amount, and refuse anything we cannot read. Corridors without a
-   * quote server price through `fx.quote_source: external` instead.
+   * SEP-38 firm quote. We POST /quote (context `sep6`) only when the dest pins
+   * a quote server, honour the anchor's own sell_amount, run the same
+   * `total_price` cross-check @corridor/sep31 performs, and refuse anything we
+   * cannot read. There is no indicative-price path (SEP-38 `GET /price`): a
+   * corridor without a quote server prices through `fx.quote_source: external`
+   * instead.
    */
   async requestQuote(intent: PaymentIntent, corridor: Corridor): Promise<Outcome<Quote>> {
     const quoteServer = this.anchor.endpoints.quote_server;
@@ -571,8 +571,9 @@ export class Sep6Adapter implements AnchorAdapter {
       return fail(
         "QUOTE_UNAVAILABLE",
         `${this.name}: SEP-6 dest configures no SEP-38 quote server — firm quotes over ` +
-          `SEP-6 are issue #196. Until then price corridor ${corridor.id} with ` +
-          `fx.quote_source: external or a quote-bearing adapter`,
+          `SEP-6 need a quote server, and this adapter has no indicative-price path. ` +
+          `Price corridor ${corridor.id} with fx.quote_source: external or a ` +
+          `quote-bearing adapter`,
       );
     }
     const auth = await this.authToken();

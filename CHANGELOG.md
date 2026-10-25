@@ -7,6 +7,169 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Fixed — stale documentation and comments
+
+- Docs said no transition enters `refund_pending` and that `refunded` is reachable only when
+  nothing settled. The engine does enter it (after a payment has gone out and the anchor
+  reports a terminal failure) and watches the anchor's refund report; it never calls
+  `requestRefund`. Corrected in `docs/operations.md`, `docs/sep-coverage.md`, the `sep31`
+  adapter comment and the ROADMAP.
+- `testanchor-sep6` claimed `liveness()` does not understand SEP-6; `corridor plan` reports it
+  VERIFIED (since #517). The corridor catalog and web data are regenerated.
+- ROADMAP and README now list what shipped (Zeam and SEP-6 lanes, KMS signers, OpenTelemetry,
+  Redis limiter, OpenAPI, container image, release workflow, mock anchor); the web docs gain
+  the pre-settle and `ROUTE_REFUSED` status codes, `/readyz`, the callback route and `otel`.
+- `docs/mainnet-registry.md` costed a ~10-anchor fleet; `anchors.json` lists 19, so the daily
+  and monthly spend and the 250 XLM runway are restated (about 4 to 8 months).
+- `.env.example` documents the Vault signer variables. `Sep6Adapter.requestQuote` no longer
+  points at the closed #196 as pending: it says there is no indicative-price path, which is
+  what the firm-quote-only adapter actually does. The `sep6` no-quote-server message changed
+  accordingly.
+
+### Added — every library package builds to `dist/` with type declarations ([#262](https://github.com/ezedike-evan/corridor-in-a-box/issues/262))
+
+- Each `@corridor/*` package has a `tsup.config.ts` and a `build` script emitting ESM plus
+  `.d.ts`, conditional `exports` (`types`, `source`, `import`) and `"files": ["dist"]`, so
+  they can be consumed from npm by a plain Node or bundler project. Subpaths
+  (`router/testing`, `stellar/signers/*`, `cli/wire`) build too. In-repo code and tests still
+  run from source, so nothing about `pnpm test` changes.
+- `pnpm build` and `pnpm check:packages` (publint, are-the-types-wrong with the `esm-only`
+  profile, and `scripts/dist-smoke.mjs`, which imports the built router, adapter-kit,
+  manifest, engine and types from a plain Node ESM script) run in CI.
+  `tests/package-metadata.test.ts` now also requires the dist `exports`, `files` and `build`
+  script. With this, `scripts/release-check.ts` no longer refuses a release for exporting
+  TypeScript source.
+
+### Added — an OpenAPI 3.1 spec for `@corridor/service`, tested against `route()` ([#264](https://github.com/ezedike-evan/corridor-in-a-box/issues/264))
+
+- `packages/service/openapi.yaml` describes every route (`/healthz`, `/readyz`, `/metrics`,
+  `POST /payments`, `GET /payments/{key}`, the SEP-31 callback), the request and response
+  bodies, the bearer scheme, and every status the service answers, including the full
+  error-code table. `STATUS_BY_CODE` is now exported so the test can hold the spec to it.
+- `tests/openapi.test.ts` validates the responses `route()` actually produces against the
+  spec's response schemas (ajv, a devDependency only; the service stays dependency-free) and
+  fails if a route returns a shape the spec does not allow, or an error code or status goes
+  undocumented. CI also lints the document with Redocly.
+
+### Added — coverage thresholds in CI ([#280](https://github.com/ezedike-evan/corridor-in-a-box/issues/280))
+
+- `pnpm test:coverage` (`@vitest/coverage-v8`) enforces global floors and stricter ones
+  for `engine/src/{run,verbs,state,idempotency}.ts` and `types/src/money.ts`; CI's `build`
+  job runs it and uploads `coverage/lcov.info`. The numbers are in `CONTRIBUTING.md`.
+
+### Added — attester, full hash and explorer links on `AnchorCard` ([#290](https://github.com/ezedike-evan/corridor-in-a-box/issues/290))
+
+- The web card links the attested ledger and the attester to stellar.expert for the
+  registry's network and shows the full toml sha256 with a copy button.
+
+### Added — a Dockerfile for the service, published to GHCR on release ([#271](https://github.com/ezedike-evan/corridor-in-a-box/issues/271))
+
+- `Dockerfile` (multi-stage, `node:22-slim`, `USER node`, `HEALTHCHECK` on `/healthz`,
+  `EXPOSE 8080`, read-only `corridors/`) and `.dockerignore` (no `.env*`, `web/`,
+  `contracts/target`). Same env contract as `pnpm serve`; secrets are passed at runtime.
+- CI builds the image on pull requests (no push) and `scripts/docker-smoke.sh` checks it
+  runs as non-root, contains no `.env`, and answers `/healthz`.
+- `docker-publish.yml` pushes `ghcr.io/<owner>/corridor-service` on `vX.Y.Z` tags with
+  provenance and an SBOM, after the same smoke test. Actions pinned by SHA.
+- Not yet run on a Docker daemon by the author; the CI `docker` job is the first build.
+
+### Added — `@corridor/otel`, OpenTelemetry adapters for `Metrics` and `Logger` ([#273](https://github.com/ezedike-evan/corridor-in-a-box/issues/273))
+
+- New package `@corridor/otel`: `otelMetrics(meter)` (counter per name for `increment`,
+  millisecond histogram for `timing`, tags as attributes) and `otelLogger(logger)`
+  (`LogLevel` to severity, fields to attributes, emitted in the active context, `child()`
+  supported). `@opentelemetry/api` and `api-logs` are peer dependencies; the engine imports
+  nothing from OpenTelemetry.
+- `tests/otel.test.ts` uses the SDK's `InMemoryMetricExporter` and asserts counter and
+  histogram values after an `execute()` run. Wiring example in `docs/operations.md` §7.
+
+### Added — AWS KMS and Google Cloud KMS `ExternalSigner`s ([#277](https://github.com/ezedike-evan/corridor-in-a-box/issues/277))
+
+- `AwsKmsSigner` (`ECC_NIST_EDWARDS25519`, `ED25519_SHA_512`, `MessageType: RAW`) and
+  `GcpKmsSigner` (`EC_SIGN_ED25519`, hash in `data`) in `@corridor/stellar`, also at the
+  `@corridor/stellar/signers/aws` and `/gcp` subpaths. They take a structural client, so no
+  cloud SDK is imported. The G address comes from the KMS public key; a key of the wrong
+  type is refused at `create()`, and a wrong-length or wrong-key signature is rejected
+  before it is returned. Provider docs and least-privilege IAM are in
+  `docs/key-management.md`.
+- Tested with fake clients that sign with a real local ed25519 key, through
+  `assertSignerProducesValidSignatures`.
+
+### Added — one tag releases every public package ([#263](https://github.com/ezedike-evan/corridor-in-a-box/issues/263))
+
+- `.github/workflows/release-packages.yml`: a `vX.Y.Z` tag runs lint, typecheck, tests
+  and `pnpm -r build`, publishes every public package with provenance, and creates a
+  GitHub Release from that version's CHANGELOG section. All actions are pinned by SHA.
+- `scripts/release-check.ts` makes the workflow refuse when a public package's version
+  is not the tag's, the CHANGELOG has no section for it, or a package still exports
+  TypeScript source (so nothing is published until #262 gives each library a `dist/`).
+  `scripts/changelog-section.ts` extracts the release notes. Both are unit-tested.
+- "Releasing" checklist in `CONTRIBUTING.md`. Cutting the first tag is a maintainer action.
+
+### Added — property tests for the registry contract ([#283](https://github.com/ezedike-evan/corridor-in-a-box/issues/283))
+
+- `contracts/registry/src/prop_test.rs` (dev-dependency `proptest`, 48 cases per
+  property, no regression files) checks: `serves_sep31` / `serves_sep6` are true iff the
+  SEP is advertised and its probe passed; `probes_passed` is always a subset of
+  `probes_run` and a violation writes nothing; unknown bits are refused; `staleness`
+  equals the ledger minus `attested_ledger` and never underflows; bounded-length
+  domains round-trip, are listed once and decode to the stored bitmap; a writer other
+  than the enrolled attester can never write. No contract logic changed.
+- Adding `proptest` moved `cc` (1.4.2 to 1.5.1) and `find-msvc-tools` in
+  `contracts/Cargo.lock`; both are build-time only.
+
+### Added — seeded property tests for the service body and the manifest loader ([#282](https://github.com/ezedike-evan/corridor-in-a-box/issues/282))
+
+- `tests/service-properties.test.ts` and `tests/manifest-properties.test.ts` run 600
+  generated cases per property, with no dependency (`tests/helpers/seeded.ts`). A
+  failure prints the seed and case index; `SEED=<n>` replays it.
+- Service: `route()` never throws or answers 5xx for random or mutated bodies and
+  paths, never settles for a body an independent oracle calls invalid, and a
+  `__proto__` key never reaches `Object.prototype`.
+- Manifest: the loader returns `ok:false` instead of throwing for dropped, retyped,
+  oversized and poisoned fields and for YAML aliases; any `ok:true` result satisfies
+  the schema invariants and parses to itself again.
+
+### Added — `pnpm mock:anchor`, a scriptable mock SEP-31 anchor ([#299](https://github.com/ezedike-evan/corridor-in-a-box/issues/299))
+
+- `examples/mock-anchor/server.ts` serves SEP-1, SEP-10, SEP-12, SEP-31 and SEP-38
+  over `node:http` with no new runtime dependency, and reproduces anchor misbehaviour
+  on demand: `stall`, `kyc_reject`, `quote_expired`, `error_after_settle`,
+  `refund_full`, `refund_partial`, `slow_pending_external`. A transaction is marked
+  paid when told (or after N polls), so no Stellar payment is needed.
+- `corridors/mock.corridor.yaml` (testnet) points at it; `corridor plan` validates it
+  and reports it UNVERIFIED, as it should for a fictional lane.
+- `tests/mock-anchor.test.ts` drives `execute()` through every scenario.
+
+### Added — `pnpm create:adapter` ([#204](https://github.com/ezedike-evan/corridor-in-a-box/issues/204))
+
+- `pnpm create:adapter --id <slug> [--dir <path>]` scaffolds a custom `AnchorAdapter`
+  package: `package.json`, an adapter whose verbs all fail "not implemented", a
+  conformance test, a fixture corridor and a README checklist. The id must match
+  `^[a-z0-9-]+$` (the manifest's `custom:<id>` rule) and an existing directory is
+  never overwritten. `tests/create-adapter.test.ts` generates into a temp dir and
+  type-checks the result.
+
+### Added — richer `SourceAnchorAdapter` port and mock ([#215](https://github.com/ezedike-evan/corridor-in-a-box/issues/215))
+
+- `SourceAnchorAdapter` (which the engine already used for source funding) gains
+  optional `name`, `capabilities()`, `quoteDeposit()` and an optional `{ account }`
+  context on `openDeposit`, and `openDeposit` can return `FundingInstructions`
+  (opaque, PII-free text for the operator). All additions are optional, so existing
+  adapters and the engine are unchanged.
+- `createMockSourceAdapter` takes `name`, `pendingPolls`, `failOpen` and
+  `instructions`, and is unit-tested in `tests/adapter-kit.test.ts`.
+
+### Added — `RedisTokenBucket`, a fleet-wide rate limiter ([#270](https://github.com/ezedike-evan/corridor-in-a-box/issues/270))
+
+- `RedisTokenBucket` in `@corridor/service` implements `RateLimiter` against a
+  structural `RedisLike`, so neither ioredis nor node-redis is a dependency. An
+  atomic Lua script refills and takes a token, reads the clock from Redis `TIME`
+  and expires idle buckets. `onError` chooses fail-closed (default, 429 and a log
+  line) or fail-open when Redis errors.
+- Unit tests run the logic against a fake `RedisLike`; an opt-in integration test
+  (`CORRIDOR_TEST_REDIS_URL`) runs the real script, and CI has a `redis:7` job.
+
 ### Fixed — Prometheus exposition conformance (#274)
 
 - Added HELP metadata to emitted metric families and changed timing metrics from

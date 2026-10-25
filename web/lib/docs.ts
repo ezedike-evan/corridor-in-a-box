@@ -84,12 +84,14 @@ packages/
   manifest/      Zod schema for a corridor + loader
   adapter-kit/   AnchorAdapter port + conformance probes + mock adapter
   sep31/         ONE generic adapter (SEP-10 auth + SEP-12 KYC)
-  sep6/          ONE generic adapter (GET /info discovery + capabilities)
+  sep6/          ONE generic adapter for SEP-6 anchors (GET /info discovery,
+                 withdraw-exchange to open, GET /transaction to reconcile)
   stellar/       the only money-path package that touches the chain:
                  settlement submitter + SEP-10 signer
-  router/        RouteResolver seam — open interface + static default
+  router/        RouteResolver seam — open interface + Static and Registry resolvers
   engine/        orchestration: state machine, crash-resume, recovery, audit, metrics
-  service/       thin HTTP API over the engine (auth + rate limiting)
+  service/       thin HTTP API over the engine (auth + rate limiting, OpenAPI spec)
+  otel/          OpenTelemetry adapters for the engine's Metrics and Logger
   cli/           validate a manifest; print an offline runnability plan
   probe/         probe an anchor's SEP conformance from its stellar.toml
   registry/      read conformance attestations from the on-chain registry
@@ -172,24 +174,34 @@ Body is a \`PaymentIntent\`:
 | \`400\` | \`invalid payment body\`, \`invalid JSON\` | Malformed JSON or invalid \`PaymentIntent\` body structure |
 | \`401\` | \`unauthorized\` | Missing or invalid Bearer API key |
 | \`403\` | \`KYC_REJECTED\` | Receiving anchor rejected customer KYC |
+| \`403\` | \`PRESETTLE_RECEIVER_NOT_ACCEPTED\` | The recipient's SEP-12 status is no longer ACCEPTED at the pre-settle gate; nothing was sent |
 | \`404\` | \`unknown corridor\`, \`not found\` | Unknown corridor ID, run key not found (or foreign tenant key), or unmatched route |
 | \`409\` | \`IDEMPOTENCY_CONFLICT\` | Replay with conflicting parameters or in-flight payment with same key |
 | \`409\` | \`QUOTE_EXPIRED\` | Anchor quote expired before settlement could begin |
 | \`409\` | \`KYC_REQUIRED\` | Customer KYC incomplete or customer action required |
+| \`409\` | \`PRESETTLE_TX_MISMATCH\` | The transaction the anchor opened is not what the engine was about to pay (amount, deposit account or memo); nothing was sent |
+| \`409\` | \`PRESETTLE_QUOTE_WINDOW\` | The firm quote would not survive settle and confirm; nothing was sent |
 | \`409\` | \`MANIFEST_CHANGED\` | Corridor manifest changed since the run started; resume refused before settle |
 | \`409\` | \`DRY_RUN_COMPLETE\` | A \`dryRun: true\` run passed the pre-settle gate and stopped before settling; nothing was sent. The HTTP API never starts dry runs, so this code only appears from the engine or CLI |
 | \`413\` | \`payload too large\` | Request body exceeds \`maxBodyBytes\` cap (default 64 KiB) |
 | \`422\` | \`AMOUNT_INVALID\` | Amount is not a positive decimal or cannot be settled |
 | \`422\` | \`CAPABILITY_MISMATCH\` | Adapter capabilities do not match corridor manifest or settlement strategies |
 | \`422\` | \`MANIFEST_INVALID\` | Corridor manifest validation failed |
+| \`422\` | \`PRESETTLE_DESTINATION_UNSAFE\` | Destination account missing, without a trustline, or not authorized; nothing was sent |
+| \`422\` | \`PRESETTLE_INSUFFICIENT_FUNDS\` | The signer's balance cannot cover amount, fee and reserve; nothing was sent |
+| \`422\` | \`PRESETTLE_AMOUNT_OUT_OF_RANGE\` | Amount is outside the anchor's or manifest's min/max; nothing was sent |
+| \`422\` | \`CORRIDOR_UNPROVEN\` | Amount is above the canary cap on a lane that is not yet \`PROVEN\` |
 | \`429\` | \`rate_limited\` | Token-bucket rate limit exceeded for client IP or API key |
 | \`500\` | \`SETTLEMENT_FAILED\` | On-chain Stellar payment transaction failed |
 | \`500\` | \`RECONCILE_MISMATCH\` | Settled amounts or assets do not match anchor transaction record |
 | \`500\` | \`internal\` | Unexpected server error or unhandled failure fallback |
 | \`501\` | \`REFUND_UNSUPPORTED\` | Payment failed and anchor does not support refund |
 | \`502\` | \`QUOTE_UNAVAILABLE\` | Origin or destination anchor failed to provide a quote |
+| \`502\` | \`PRESETTLE_ANCHOR_DRIFT\` | The anchor's live \`/info\` or stellar.toml no longer matches what was verified; nothing was sent |
 | \`502\` | \`ANCHOR_UNAVAILABLE\` | Upstream anchor service unreachable or returned an upstream error |
 | \`503\` | \`CORRIDOR_HALTED\` | Circuit breaker is open for this corridor: too many consecutive lane failures. No run was created and nothing was sent to the anchor. Retry is pointless until the lane is reset — see \`docs/operations.md\` §7. Non-retryable |
+| \`503\` | \`ROUTE_REFUSED\` | The resolver would not route the payment (for example an unattested anchor). Well-formed request, no trusted route available |
+| \`503\` | \`draining\` | The service is shutting down and is refusing new payments |
 | \`504\` | \`SETTLEMENT_TIMEOUT\` | Stellar network submission timed out |
 | \`504\` | \`RECONCILE_STALLED\` | Anchor transaction polling timed out |
 
@@ -197,10 +209,14 @@ Body is a \`PaymentIntent\`:
 
 - \`GET /payments/:key\` — current run state (scoped to authenticated tenant).
 - \`GET /healthz\` — liveness (public, unmetered).
+- \`GET /readyz\` — readiness: 200 when every check passes, 503 while draining or when one fails (public, unmetered).
+- \`POST /callbacks/sep31/:corridorId\` — the receiving anchor's signed callback; wakes the reconcile loop for that transaction.
 - \`GET /metrics\` — Prometheus text exposition format (public, unmetered; served when \`metricsText\` is configured).
 
 Optional bearer **API-key** auth and an in-memory **token-bucket** rate limiter
-are configured on the service context.
+are configured on the service context. For more than one replica, inject
+\`RedisTokenBucket\` so the limit holds fleet-wide. The full contract, with every
+request and response shape, is \`packages/service/openapi.yaml\` (OpenAPI 3.1).
 `,
   },
   {
@@ -228,7 +244,8 @@ interface ExternalSigner {
 A KMS/HSM that supports ed25519 implements \`ExternalSigner\` by delegating
 \`sign\` to the vault, so the application only ever sees the public key and a
 finished signature. Rotate keys on a schedule; because callers depend on the
-port, rotation is a config change, not a code change.
+port, rotation is a config change, not a code change. Shipped implementations:
+\`VaultTransitSigner\` (HashiCorp Vault Transit), \`AwsKmsSigner\` and \`GcpKmsSigner\`.
 `,
   },
   {

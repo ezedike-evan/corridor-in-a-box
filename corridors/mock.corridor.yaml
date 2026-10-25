@@ -1,0 +1,47 @@
+# corridor — the local mock anchor (examples/mock-anchor), on testnet.
+# Start it with `pnpm mock:anchor` and the engine can run quote -> comply -> open ->
+# settle -> reconcile against a scriptable SEP-1/10/12/31/38 server that can stall,
+# reject KYC, error after settle or refund on demand. It is fictional: nothing here
+# is an anchor, and `corridor plan` correctly reports the lane UNVERIFIED because its
+# endpoints have never been checked against a published stellar.toml.
+id: mock
+
+status_note: "LOCAL MOCK — examples/mock-anchor on localhost:8089. Fictional; scriptable failures. Not a real anchor."
+
+source:
+  name: Local Sending Anchor
+  asset: USDC
+  endpoints:
+    home_domain: localhost:8089
+
+dest:
+  name: Local Mock Anchor
+  asset: "iso4217:USD"
+  protocol: sep31
+  endpoints:
+    home_domain: localhost:8089
+    transfer_server_sep31: http://localhost:8089/sep31
+    web_auth: http://localhost:8089/auth
+    kyc_server: http://localhost:8089/sep12
+    quote_server: http://localhost:8089/sep38
+
+fx:
+  path: ["USD", "USDC", "USD"]
+  quote_source: sep38
+  who_holds_risk: receiving_anchor
+  quote_ttl_seconds: 60
+
+compliance:
+  source_jurisdiction: US
+  dest_jurisdiction: US
+  travel_rule_profile: default
+
+settlement:
+  bridge_asset: USDC
+  network: testnet
+  asset_issuer: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+
+recovery:
+  max_retries: 3
+  timeout_seconds: 900
+  rollback: refund_sender

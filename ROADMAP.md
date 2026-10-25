@@ -33,6 +33,13 @@ system. Items marked ✅ are done.
   [`reference-corridor`](https://github.com/ezedike-evan/corridor-in-a-box/actions/workflows/reference-corridor.yml)
   workflow. The pending proof is that workflow going green; it currently fails,
   so this item stays ⬜.
+  _Update (2026-10-24):_ the failure it had was the signer draining
+  (`op_underfunded`): the workflow now tops the signer up first (#297), and a manual
+  run settles (tx
+  [`757341…`](https://stellar.expert/explorer/testnet/tx/757341861311f52f6feaf8a1f307215c77acfd3238779d184911a0579d448b42)).
+  It still ends red: after settling, the reference anchor's status poll returns `error`
+  for about 15 minutes, so the run goes `settled → recovering → held`. That is the open
+  question, and it stays ⬜.
 
 ## Phase 2 — Durability & correctness
 
@@ -40,28 +47,38 @@ system. Items marked ✅ are done.
 - ✅ Durable idempotency store (Postgres) + crash-resume of in-flight runs.
 - ✅ `reconcile` polls until settled/timeout; `recovery.timeout_seconds`
   enforced; retry backoff.
-- ⬜ Real refund path (reverse settlement). **Not implemented.**
-  `StellarSettlementSubmitter.refund()` unconditionally returns a non-retryable
-  failure — an already-credited payment cannot be reversed unilaterally on
-  chain, which is correct behaviour, but it means the engine's only real
-  recovery is escalation to `held` for manual intervention. A genuine refund
-  path means the receiving anchor initiating a refund on its own side — SEP-31
-  gives the sender no endpoint to trigger one, so this is an operational
-  arrangement with the anchor, not an API call (the full reasoning lives in
-  [the operations runbook](./docs/operations.md)). What ships today is the
-  escalation, not the reversal.
+- ⬜ Real refund path (reverse settlement). **Not implemented**, and the engine
+  never calls `requestRefund`. `StellarSettlementSubmitter.refund()` unconditionally
+  returns a non-retryable failure — an already-credited payment cannot be reversed
+  unilaterally on chain, which is correct behaviour. A genuine refund means the
+  receiving anchor initiating one on its own side — SEP-31 gives the sender no endpoint
+  to trigger one, so this is an operational arrangement with the anchor, not an API
+  call (the full reasoning lives in [the operations runbook](./docs/operations.md)).
+  What ships today is the watch and the escalation, not the reversal: after a
+  payment has gone out and the anchor reports a terminal failure, the run enters
+  `refund_pending` and the engine polls for the anchor's own refund report (`refunded`
+  on a full report; `held` on a partial one or after `recovery.refund_wait_seconds`).
 
 ## Phase 3 — Operability (required before close beta)
 
 - ✅ Structured logging + append-only audit trail of every state transition.
 - ✅ Metrics / tracing hooks (injectable `Metrics`; per-verb timings + counters).
-- ✅ Signing-key management: an `ExternalSigner` port (KMS/HSM-ready) and
-  [docs/key-management.md](./docs/key-management.md).
+- ✅ Signing-key management: an `ExternalSigner` port with Vault Transit, AWS KMS and
+  Google Cloud KMS implementations, and [docs/key-management.md](./docs/key-management.md).
 - ✅ A thin service/API layer (`@corridor/service`: HTTP over the engine, with
   API-key auth and rate limiting).
 - ✅ A runnable launcher for `@corridor/service` (`pnpm serve` →
   `examples/run-service.ts`), serving every corridor manifest with the same
   mainnet safety guard as `pnpm testnet`.
+- ✅ OpenTelemetry adapters for the `Metrics` and `Logger` ports (`@corridor/otel`),
+  and a Redis token bucket for a fleet-wide rate limit (`RedisTokenBucket`).
+- ✅ An OpenAPI 3.1 spec for the service, tested against the real `route()`.
+- ✅ A container image (`Dockerfile`), smoke-tested in CI and published to GHCR on
+  release tags; coverage floors enforced in CI; every library package builds to
+  `dist/` with type declarations; and a one-tag release workflow. Cutting the first
+  `vX.Y.Z` tag is a maintainer action: it needs a `CHANGELOG.md` section for the version.
+- ✅ A scriptable mock anchor (`pnpm mock:anchor`) that stalls, rejects KYC, errors
+  after settle or refunds on demand, for running a whole corridor locally.
 - ✅ Nightly CI job re-running the live-anchor probe
   (`tests/integration/sep31-live.test.ts`), running against `testanchor.stellar.org`
   by default; only the SEP-10/SEP-12 legs need `CORRIDOR_SIGNER_SECRET`.
@@ -79,6 +96,11 @@ system. Items marked ✅ are done.
   publishes no SEP-38 quote server (`quote_source: external`), and there is no
   KYC'd business relationship with Cowrie backing this — see the manifest's
   `status_note`.
+- ✅ Corridor #2: `zeam.corridor.yaml` — Zeam (South Africa), probed 2026-10-17:
+  SEP-10, SEP-12, SEP-31 and SEP-38 all answer, so it is the first lane with a firm-quote
+  path. Same caveats as #1: no payment attempted, no business relationship.
+- ✅ A SEP-6 lane: `testanchor-sep6.corridor.yaml`, the SDF test anchor on testnet.
+  [`corridors/README.md`](./corridors/README.md) catalogues every manifest.
 - ⬜ Additional real corridors as off-ramps come online.
 - ⬜ `ng-cn` becomes runnable the day a compliant RMB SEP-31 off-ramp exists.
 

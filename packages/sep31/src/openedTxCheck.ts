@@ -18,11 +18,11 @@ const NAME = "anchor.tx.match";
 
 /**
  * The transaction fields this check compares, as the anchor reports them on
- * GET /transactions/:id. They land on `TransactionStatus` with #147; until
- * then every field is optional here, and the check treats an absent field
- * as `unverified` rather than failing (unless `strict`). Structural on
- * purpose: when #147 adds the real fields, this alias collapses into them
- * with no change to the check.
+ * GET /transactions/:id. `TransactionStatus` carries them since #147
+ * (`amountIn`, `depositAddress`, `memo`, `memoType`); every field stays optional
+ * here, because an anchor may omit any of them, and the check treats an absent
+ * field as `unverified` rather than failing (unless `strict`). Structural on
+ * purpose, so the check does not depend on the adapter's own type.
  */
 export type ReportedTransactionFields = {
   readonly amount?: string;

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   conformanceSuite,
   createMockAdapter,
+  createMockSourceAdapter,
+  type SourceAnchorAdapter,
   runConformance,
   toLegacy,
   type AnchorAdapter,
@@ -426,5 +428,89 @@ describe("runConformance harness (#199)", () => {
     expect(report.passed).toBe(false);
     const probe = report.results.find((r) => r.name === "capabilities well-formed");
     expect(probe?.passed).toBe(false);
+  });
+});
+
+describe("createMockSourceAdapter", () => {
+  it("opens a deposit that returns funding instructions without PII", async () => {
+    const source = createMockSourceAdapter();
+    const named = {
+      ...intent,
+      sender: { id: "sender-ada-lovelace" },
+      recipient: { id: "recipient-grace-hopper" },
+    };
+    const r = await source.openDeposit(named, corridor(), { account: "GOPERATOR" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.transactionId).toMatch(/^source-deposit-/);
+    expect(r.value.instructions?.summary).toContain("100 USDC");
+    expect(r.value.instructions?.reference).toBe(r.value.transactionId);
+    const text = JSON.stringify(r.value.instructions);
+    expect(text).not.toContain("ada-lovelace");
+    expect(text).not.toContain("grace-hopper");
+  });
+
+  it("is idempotent on the idempotency key", async () => {
+    const source = createMockSourceAdapter();
+    const a = await source.openDeposit(intent, corridor());
+    const b = await source.openDeposit(intent, corridor());
+    const c = await source.openDeposit({ ...intent, idempotencyKey: "other" }, corridor());
+    expect(a.ok && b.ok && c.ok).toBe(true);
+    if (!(a.ok && b.ok && c.ok)) return;
+    expect(b.value.transactionId).toBe(a.value.transactionId);
+    expect(c.value.transactionId).not.toBe(a.value.transactionId);
+  });
+
+  it("reports completed by default and pending_sender when it will not settle", async () => {
+    const settles = createMockSourceAdapter();
+    const stalls = createMockSourceAdapter({ settled: false });
+    for (const [source, status, settled] of [
+      [settles, "completed", true],
+      [stalls, "pending_sender", false],
+    ] as const) {
+      const opened = await source.openDeposit(intent, corridor());
+      if (!opened.ok) throw new Error("open failed");
+      const got = await source.getDeposit(opened.value.transactionId);
+      expect(got).toEqual({ ok: true, value: { status, settled } });
+    }
+  });
+
+  it("stays pending for `pendingPolls` polls, then reports the final status", async () => {
+    const source = createMockSourceAdapter({ pendingPolls: 2 });
+    const opened = await source.openDeposit(intent, corridor());
+    if (!opened.ok) throw new Error("open failed");
+    const id = opened.value.transactionId;
+    const polls = [
+      await source.getDeposit(id),
+      await source.getDeposit(id),
+      await source.getDeposit(id),
+    ];
+    expect(polls.map((p) => p.ok && p.value.settled)).toEqual([false, false, true]);
+  });
+
+  it("fails openDeposit with the configured code, and getDeposit for an unknown id", async () => {
+    const down = createMockSourceAdapter({ failOpen: "ANCHOR_UNAVAILABLE" });
+    const opened = await down.openDeposit(intent, corridor());
+    expect(opened.ok).toBe(false);
+    if (!opened.ok) expect(opened.error.code).toBe("ANCHOR_UNAVAILABLE");
+
+    const unknown = await createMockSourceAdapter().getDeposit("nope");
+    expect(unknown.ok).toBe(false);
+  });
+
+  it("quotes a deposit and describes itself", async () => {
+    const source = createMockSourceAdapter({ name: "demo-source" });
+    expect(source.name).toBe("demo-source");
+    expect(source.capabilities?.()).toEqual({ protocol: "mock", quotes: true });
+    const q = await source.quoteDeposit?.(intent, corridor());
+    expect(q?.ok && q.value.expiresAt > Date.now()).toBe(true);
+  });
+
+  it("still accepts an adapter written against the original two-method port", () => {
+    const legacy: SourceAnchorAdapter = {
+      openDeposit: async () => ({ ok: true, value: { transactionId: "x" } }),
+      getDeposit: async () => ({ ok: true, value: { status: "completed", settled: true } }),
+    };
+    expect(legacy.name).toBeUndefined();
   });
 });

@@ -15,6 +15,7 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+proptest = "1"
 
 # Lets the attester crate pull in this contract's generated test client.
 [features]

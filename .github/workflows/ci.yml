@@ -58,7 +58,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
-      - run: pnpm test
+      # Every library package builds to dist/ with type declarations, passes publint and
+      # are-the-types-wrong, and the built output works from a plain Node ESM script.
+      - run: pnpm build
+      - run: pnpm check:packages
+      # The service's OpenAPI 3.1 document must be valid. (tests/openapi.test.ts checks it
+      # against the real route(); this checks it against the OpenAPI specification.)
+      - run: pnpm --package=@redocly/cli@1.34.5 dlx redocly lint packages/service/openapi.yaml
+      # The suite, with coverage thresholds enforced (vitest.config.ts).
+      - run: pnpm test:coverage
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          retention-days: 14
+          if-no-files-found: ignore
       # web/ renders corridor data and the state list generated from the
       # manifests and the engine. Fail when the committed copy has drifted.
       - name: Check web/lib/generated is up to date
@@ -120,6 +135,47 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec vitest run --no-file-parallelism tests/integration/idempotency-pg.test.ts tests/integration/audit-pg.test.ts
+
+  integration-redis:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CORRIDOR_TEST_REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run --no-file-parallelism tests/integration/redis-rate-limiter.test.ts
+
+  # Builds the service image (no push) and smoke-tests the container: non-root, no
+  # .env baked in, /healthz answers. Publishing is docker-publish.yml, on tags.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: corridor-service:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: scripts/docker-smoke.sh corridor-service:ci
 
   # The web/ showcase app is a standalone Next.js project with its own lockfile
   # (intentionally outside the pnpm workspace, see web/README.md), so it gets its

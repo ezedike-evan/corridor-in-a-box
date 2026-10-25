@@ -1,12 +1,15 @@
-import { CircleCheck, CircleSlash, CircleHelp, Clock } from "lucide-react";
+import { CircleCheck, CircleSlash, CircleHelp, Clock, ExternalLink } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { CopyButton } from "@/components/CopyButton";
 import {
   PROBE_NAMES,
+  REGISTRY_NETWORK,
   STALE_AFTER_LEDGERS,
   type AnchorAttestation,
 } from "@/lib/registry";
 import { approxLedgerDuration } from "@/lib/freshness";
+import { addressUrl, ledgerUrl, shortAddress } from "@/lib/explorer";
 
 /**
  * One attested anchor.
@@ -76,13 +79,41 @@ export function AnchorCard({ anchor }: { anchor: AnchorAttestation }) {
 
       <div className="flex flex-col gap-1 border-t border-border pt-3 text-xs text-secondary-text">
         <div>
-          attested at ledger <span className="font-mono">{anchor.attestedLedger}</span> ·{" "}
-          {anchor.staleness.toLocaleString("en-US")} ledgers ({approxLedgerDuration(anchor.staleness)})
+          attested at ledger{" "}
+          <a
+            href={ledgerUrl(REGISTRY_NETWORK, anchor.attestedLedger)}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={`Ledger ${anchor.attestedLedger} on stellar.expert (opens in a new tab)`}
+            className="inline-flex items-center gap-0.5 font-mono hover:underline"
+          >
+            {anchor.attestedLedger}
+            <ExternalLink size={11} aria-hidden="true" />
+          </a>{" "}
+          · {anchor.staleness.toLocaleString("en-US")} ledgers ({approxLedgerDuration(anchor.staleness)})
           ago
           {stale && <span className="font-medium text-yellow-700 dark:text-yellow-500"> · stale</span>}
         </div>
-        <div className="truncate">
-          toml sha256 <span className="font-mono">{anchor.tomlHash.slice(0, 24)}…</span>
+        <div className="flex items-center gap-1">
+          attested by{" "}
+          <a
+            href={addressUrl(REGISTRY_NETWORK, anchor.attester)}
+            target="_blank"
+            rel="noreferrer"
+            title={anchor.attester}
+            aria-label={`Attester ${anchor.attester} on stellar.expert (opens in a new tab)`}
+            className="inline-flex items-center gap-0.5 font-mono hover:underline"
+          >
+            {shortAddress(anchor.attester)}
+            <ExternalLink size={11} aria-hidden="true" />
+          </a>
+        </div>
+        <div className="flex min-w-0 items-center gap-1">
+          <span className="shrink-0">toml sha256</span>
+          <span className="truncate font-mono" title={anchor.tomlHash}>
+            {anchor.tomlHash}
+          </span>
+          <CopyButton value={anchor.tomlHash} label="toml sha256" />
         </div>
       </div>
     </Card>

@@ -9,6 +9,7 @@ export default defineConfig({
   entry: ["src/index.ts", "src/wire.ts"],
   format: ["esm"],
   target: "es2022",
+  dts: true,
   clean: true,
   noExternal: [/^@corridor\//],
 });

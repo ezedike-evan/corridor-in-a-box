@@ -800,14 +800,15 @@ describe("ensureCompliance", () => {
 describe("requestQuote", () => {
   const endpoints = { quote_server: "https://d.example/sep38" };
 
-  it("refuses without a quote server, naming #196", async () => {
+  it("refuses without a quote server, and says how to price the corridor instead", async () => {
     const c = corridor();
     const { fn, calls } = fakeFetch({});
     const r = await new Sep6Adapter(c, { fetchImpl: fn }).requestQuote(intent, c);
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.error.code).toBe("QUOTE_UNAVAILABLE");
-      expect(r.error.message).toContain("#196");
+      expect(r.error.message).toContain("quote server");
+      expect(r.error.message).toContain("fx.quote_source: external");
     }
     expect(calls).toHaveLength(0);
   });

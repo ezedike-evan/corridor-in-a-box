@@ -30,15 +30,23 @@
     "dist"
   ],
   "exports": {
-    ".": "./src/index.ts",
-    "./wire": "./src/wire.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "source": "./src/index.ts",
+      "import": "./dist/index.js"
+    },
+    "./wire": {
+      "types": "./dist/wire.d.ts",
+      "source": "./src/wire.ts",
+      "import": "./dist/wire.js"
+    }
   },
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "build": "tsup"
+    "build": "node init && tsup"
   },
   "dependencies": {
     "@corridor/adapter-kit": "workspace:*",
@@ -56,5 +64,6 @@
   },
   "devDependencies": {
     "tsup": "^9.0.0"
-  }
+  },
+  "types": "./dist/index.d.ts"
 }

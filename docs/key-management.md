@@ -67,6 +67,45 @@ process: signing keeps using the old version, and a response signed by another v
 is rejected. Restart the service to pick up the new key (and fund/authorise its new
 account first). A non-default Transit mount can be set with `VAULT_TRANSIT_MOUNT`.
 
+### AWS KMS and Google Cloud KMS
+
+`AwsKmsSigner` and `GcpKmsSigner` (both from `@corridor/stellar`, also importable as
+`@corridor/stellar/signers/aws` and `/gcp`) sign with an Ed25519 key held in the cloud
+KMS. Stellar needs **pure** Ed25519 over the 32-byte transaction hash, so a KMS mode that
+pre-hashes is wrong and is not used:
+
+|                  | Key                                                   | Signing call                                                                    | Source                                                                                                                                        |
+| ---------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| AWS KMS          | key spec `ECC_NIST_EDWARDS25519`, usage `SIGN_VERIFY` | `Sign` with `ED25519_SHA_512` and `MessageType: RAW` (not `ED25519_PH_SHA_512`) | [Sign API](https://docs.aws.amazon.com/kms/latest/APIReference/API_Sign.html)                                                                 |
+| Google Cloud KMS | algorithm `EC_SIGN_ED25519`                           | `AsymmetricSign` with the hash in `data`, not `digest`                          | [Algorithms](https://docs.cloud.google.com/kms/docs/algorithms), [signing](https://docs.cloud.google.com/kms/docs/create-validate-signatures) |
+
+Neither imports a cloud SDK. Each takes a structural client (`AwsKmsClientLike`, the
+aggregated `KMS` client from `@aws-sdk/client-kms`; `GcpKmsClientLike`, the
+`KeyManagementServiceClient` from `@google-cloud/kms`), so the SDK is your optional
+dependency and a real client satisfies it unchanged:
+
+```ts
+const aws = await AwsKmsSigner.create({ client: new KMS({}), keyId: "arn:aws:kms:…:key/…" });
+const gcp = await GcpKmsSigner.create({
+  client: new KeyManagementServiceClient(),
+  keyVersionName,
+});
+await assertSignerProducesValidSignatures(aws); // fail at startup, not on the first payment
+```
+
+The G… address is derived from the KMS public key (SPKI to the raw 32 bytes). A key of
+the wrong type is refused at `create()`. Every signature is checked, for length (64
+bytes) and against the public key, before it is returned, so a wrong-length or
+wrong-key signature from the KMS is rejected before a transaction is submitted. GCP's
+key version is pinned in `keyVersionName`; a new version is never used silently.
+
+**IAM, least privilege (sign only).** AWS: `kms:GetPublicKey` and `kms:Sign` on that one
+key ARN, nothing else (no `kms:*`, `kms:CreateGrant`, `kms:ScheduleKeyDeletion`,
+`kms:PutKeyPolicy`). GCP: `cloudkms.cryptoKeyVersions.viewPublicKey` and
+`cloudkms.cryptoKeyVersions.useToSign` on that one key version (`roles/cloudkms.signerVerifier`
+is the nearest predefined role); the service account must not create or destroy versions
+or change IAM.
+
 A KMS/HSM that supports ed25519 (e.g. AWS KMS, GCP KMS, HashiCorp Vault Transit,
 a YubiHSM) implements `ExternalSigner` by delegating `sign` to the vault:
 

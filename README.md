@@ -42,6 +42,7 @@ pnpm lint               # eslint + prettier
 pnpm typecheck          # whole monorepo, one tsc pass
 pnpm test               # vitest: engine, manifest, money, sep31, stellar, …
 pnpm example            # run a payment end-to-end (mocked anchor + settle)
+pnpm mock:anchor        # scriptable local SEP-1/10/12/31/38 anchor (stall, KYC reject, refund, …): the quickest full corridor
 pnpm cli plan corridors/reference.corridor.yaml   # offline pre-flight / liveness check
 CORRIDOR_SIGNER_SECRET=S… pnpm cli canary corridors/reference.corridor.yaml \
   --amount 1.00 --dry-run                          # real anchor up to the pre-settle gate, no payment
@@ -82,16 +83,19 @@ packages/
   engine/        corridor-agnostic orchestration of the five verbs, with a
                  persisted state machine, crash-resume, recovery, audit trail,
                  metrics hooks, and a durable Postgres idempotency store
-  service/       thin HTTP API over the engine (auth + rate limiting),
-                 zero deps
+  service/       thin HTTP API over the engine (auth + rate limiting, an
+                 OpenAPI 3.1 spec, an optional Redis limiter), zero deps
+  otel/          OpenTelemetry adapters for the engine's Metrics and Logger
   cli/           validate a manifest; print an offline runnability plan
 corridors/       the manifests — ALL corridor-specifics live here,
-                 nowhere else
+                 nowhere else (README.md there catalogues them)
 contracts/       Soroban registry + attester contracts
-scripts/         reference-anchor.sh + assert-testnet-corridor.ts
+scripts/         reference-anchor.sh, assert-testnet-corridor.ts, the
+                 corridor catalog, adapter scaffold and release checks
 docs/            threat model, key management, bespoke adapters,
                  "why not Anchor Platform", SEP coverage, operations, …
-examples/        runnable end-to-end demo
+examples/        runnable end-to-end demos, the service launcher and a
+                 scriptable mock anchor (`pnpm mock:anchor`)
 ```
 
 Three boundaries do the work:

@@ -46,12 +46,15 @@ only news.
 
 `Sep31Adapter.requestRefund()` therefore fails closed with a non-retryable
 `REFUND_UNSUPPORTED` and never touches the network. Since #72 the port has
-`requestRefund`; the generic adapter refuses, the engine does not call it yet,
-and the state machine defines `refund_pending` but no transition enters it. The
+`requestRefund`; the generic adapter refuses and the engine never calls it. The
 method occupies the name so bespoke adapters (OTC desks, proprietary anchors)
-can implement anchor-driven refunds. The engine already parks any refused
-refund in `held` for a human (asserted in a test), and the [operations
-runbook](./operations.md) takes over (out-of-band resolution with the anchor). Observing that a refund _happened_ is
+can implement anchor-driven refunds. What the engine does instead is _watch_: when
+a payment has gone out and the anchor reports a terminal failure, the run enters
+`refund_pending` and the engine polls the anchor's transaction record for the
+refund it owns, recording `refunded` on a full report and parking the run in `held`
+for a human on a partial one or on silence (see the [operations
+runbook](./operations.md#refund_pending), which takes over with out-of-band
+resolution with the anchor). Observing that a refund _happened_ is
 `getTransaction`'s job. An anchor that exposes a proprietary refund API is a
 bespoke integration: it implements `AnchorAdapter` itself and lives outside
 `packages/sep31`, keeping the generic adapter honest about what the standard
@@ -65,8 +68,10 @@ another transfer SEP is a new adapter, not an engine change:
 
 - **SEP-6** maps cleanly onto the same five verbs — `openTransaction` becomes a
   SEP-6 `POST /transactions/withdraw` (or `/deposit`), `getTransaction` polls the
-  SEP-6 status. `@corridor/sep6` now provides the adapter and its `GET /info`
-  discovery; the transfer verbs land in their own issues.
+  SEP-6 status. `@corridor/sep6` provides the adapter: `GET /info` discovery, `GET
+/withdraw-exchange` to open, and `GET /transaction` for status and the deposit
+  instructions, so settle and reconcile are unchanged. `corridors/testanchor-sep6.corridor.yaml`
+  is a `dest.protocol: sep6` lane.
 - **SEP-24** is the awkward one: its interactive webview needs a human, so it
   fits a _user-facing_ product, not an unattended corridor. If it were ever
   needed, the `open` step would return an `interactive_url` the caller must drive,
@@ -74,9 +79,10 @@ another transfer SEP is a new adapter, not an engine change:
   which is why it is out of scope today. See
   [docs/protocols/sep24.md](./protocols/sep24.md) for a full breakdown of the
   SEP-24 interactive lifecycle, state-machine implications, and options considered.
-  Anchors that publish only SEP-6/SEP-24 (for example Anclap, pending the probe
-  recorded in the issue) are blocked on the SEP-6 adapter and cannot yet be
-  onboarded as SEP-31 corridors.
+  Anchors that publish only SEP-6/SEP-24 (Anclap and MoneyGram Access, whose probe
+  results are recorded in `contracts/anchors.json`) have no SEP-31 receive side, so
+  they cannot be onboarded as SEP-31 corridors. An anchor with a working SEP-6 side can
+  be a `sep6` corridor; one that offers only SEP-24's interactive flow still cannot.
 
 ## External quotes (`fx.quote_source: external`)
 

@@ -24,9 +24,30 @@
     "node": ">=22"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "source": "./src/index.ts",
+      "import": "./dist/index.js"
+    },
+    "./signers/gcp": {
+      "types": "./dist/signers/gcp.d.ts",
+      "source": "./src/signers/gcp-kms.ts",
+      "import": "./dist/signers/gcp.js"
+    },
+    "./signers/aws": {
+      "types": "./dist/signers/aws.d.ts",
+      "source": "./src/signers/aws-kms.ts",
+      "import": "./dist/signers/aws.js"
+    }
   },
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node init && tsup"
+  },
   "dependencies": {
     "@corridor/types": "workspace:*",
     "@corridor/manifest": "workspace:*",
