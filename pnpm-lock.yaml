@@ -61,8 +61,8 @@ importers:
         specifier: 2.0.0
         version: 2.0.0(@opentelemetry/api@1.9.0)
       '@stellar/stellar-sdk':
-        specifier: ^17.2.1
-        version: 17.2.1
+        specifier: ^17.4.0
+        version: 17.4.0
       '@types/node':
         specifier: ^26.6.4
         version: 26.6.4
@@ -133,8 +133,8 @@ importers:
         specifier: workspace:*
         version: link:../types
       '@stellar/stellar-sdk':
-        specifier: ^17.2.1
-        version: 17.2.1
+        specifier: ^17.4.0
+        version: 17.4.0
 
   packages/cli:
     dependencies:
@@ -228,8 +228,8 @@ importers:
         specifier: workspace:*
         version: link:../types
       '@stellar/stellar-sdk':
-        specifier: ^17.2.1
-        version: 17.2.1
+        specifier: ^17.4.0
+        version: 17.4.0
 
   packages/registry:
     dependencies:
@@ -237,8 +237,8 @@ importers:
         specifier: workspace:*
         version: link:../types
       '@stellar/stellar-sdk':
-        specifier: ^17.2.1
-        version: 17.2.1
+        specifier: ^17.4.0
+        version: 17.4.0
 
   packages/router:
     dependencies:
@@ -315,8 +315,8 @@ importers:
         specifier: workspace:*
         version: link:../types
       '@stellar/stellar-sdk':
-        specifier: ^17.2.1
-        version: 17.2.1
+        specifier: ^17.4.0
+        version: 17.4.0
 
   packages/types: {}
 
@@ -953,8 +953,8 @@ packages:
     resolution: {integrity: sha512-HBDNKnxr+ecdaEmbZ0mcKkirOF8tXXEbWSw34P3wT40Tn3g+u+cCH17xAWZymzscq8cojHB8340pR8QNVaD32w==}
     engines: {node: '>=22.0.0', pnpm: '>=10.0.0'}
 
-  '@stellar/stellar-sdk@17.2.1':
-    resolution: {integrity: sha512-kIyfnZ2zCOqV8SUJcsk9buBOvhH1wsLU7KAzqAJyY7AgmD+KdvLTMpI1gcYdhGSakuDG5s6xSO4EN9HZTxpm8g==}
+  '@stellar/stellar-sdk@17.4.0':
+    resolution: {integrity: sha512-IX6gi62yWQ+6Oz56LsVEEeSViSOWJL3BkttftwVmVsu+62nLTWNVsCmTWEzwgNLT/q5HGP25OnlU+hhy2E4wwA==}
     engines: {node: '>=22.12.0'}
     hasBin: true
 
@@ -1425,8 +1425,8 @@ packages:
   flatted@3.4.4:
     resolution: {integrity: sha512-5+ybhBZANEJxaH3X5evAFatUxLfEHSr7n6kYJ+1Qd0mUqr4eu9gIf6GDbWHf8RJijHrjjO8G+la14SlL2SeS1Q==}
 
-  follow-redirects@1.16.1:
-    resolution: {integrity: sha512-FNvFGzoMLWmE6Yj9spb/zjd7yiNCHiAW9/Tg9CXrQ8wuu32HtlJOwWO11OJafl5FfY3DxTdQ0vj42zU1kvv5jg==}
+  follow-redirects@1.16.2:
+    resolution: {integrity: sha512-/kVP2U8z596Ia0gwFrwyIeo74ta5aVmSeU1FfAUMAmcEP5EP7zydmag3SLiN64NaRKef3lxsq7i/g7ltJQDGow==}
     engines: {node: '>=4.0'}
     peerDependencies:
       debug: '*'
@@ -2653,7 +2653,7 @@ snapshots:
 
   '@stellar/js-xdr@5.0.0': {}
 
-  '@stellar/stellar-sdk@17.2.1':
+  '@stellar/stellar-sdk@17.4.0':
     dependencies:
       '@exodus/bytes': 1.16.0(@noble/hashes@2.4.0)
       '@noble/ed25519': 3.2.0
@@ -2888,7 +2888,7 @@ snapshots:
 
   axios@1.20.0:
     dependencies:
-      follow-redirects: 1.16.1
+      follow-redirects: 1.16.2
       form-data: 4.0.6
       https-proxy-agent: 5.0.1
       proxy-from-env: 2.1.0
@@ -3227,7 +3227,7 @@ snapshots:
 
   flatted@3.4.4: {}
 
-  follow-redirects@1.16.1: {}
+  follow-redirects@1.16.2: {}
 
   foreground-child@3.3.1:
     dependencies:
