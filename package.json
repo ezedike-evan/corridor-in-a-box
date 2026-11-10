@@ -24,7 +24,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "build": "pnpm -r build",
+    "build": "node init && pnpm -r build",
     "check:packages": "pnpm --filter \"./packages/**\" exec ../../node_modules/.bin/publint && pnpm --filter \"./packages/**\" exec ../../node_modules/.bin/attw --pack . --profile esm-only && node scripts/dist-smoke.mjs",
     "test:quarantine": "vitest run --mode quarantine",
     "lint": "eslint . && prettier --check .",
@@ -46,9 +46,9 @@
     "attest": "tsx examples/attest.ts",
     "gen:web-data": "tsx scripts/gen-web-data.ts",
     "corridors:catalog": "tsx examples/gen-corridor-catalog.ts",
+    "sweep:anchors": "tsx examples/sweep-anchors.ts",
     "create:adapter": "tsx scripts/create-adapter.ts",
-    "mock:anchor": "tsx examples/run-mock-anchor.ts",
-    "sweep:anchors": "tsx examples/sweep-anchors.ts"
+    "mock:anchor": "tsx examples/run-mock-anchor.ts"
   },
   "dependencies": {
     "@corridor/adapter-kit": "workspace:*",

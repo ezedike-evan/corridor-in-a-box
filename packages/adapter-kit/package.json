@@ -37,7 +37,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup"
+    "build": "node init && tsup"
   },
   "dependencies": {
     "@corridor/types": "workspace:*",

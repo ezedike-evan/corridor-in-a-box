@@ -46,7 +46,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsup"
+    "build": "node init && tsup"
   },
   "dependencies": {
     "@corridor/adapter-kit": "workspace:*",
